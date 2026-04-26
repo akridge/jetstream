@@ -3,10 +3,11 @@
 import os
 import re
 import subprocess
+import threading
 import uuid
 import random
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Callable
 from datetime import datetime
 from collections import defaultdict
 import asyncio
@@ -452,17 +453,66 @@ class FolderAnalyzer:
         
         return subfolders
 
+# Progress line patterns for gcloud storage rsync output (Issue #12)
+_PROGRESS_RE = re.compile(
+    r'Completed\s+([\d.]+)\s*(B|KiB|MiB|GiB)\s*/\s*([\d.]+)\s*(B|KiB|MiB|GiB)'
+)
+_FILES_RE = re.compile(r'Operation completed over (\d+) objects')
+
+def _to_bytes(val: float, unit: str) -> float:
+    return val * {'B': 1, 'KiB': 1024, 'MiB': 1024**2, 'GiB': 1024**3}[unit]
+
+def _parse_progress(line: str, callback: Callable) -> None:
+    """Parse a gcloud/gsutil output line and invoke callback with progress."""
+    m = _PROGRESS_RE.search(line)
+    if m:
+        callback(
+            bytes_uploaded=_to_bytes(float(m.group(1)), m.group(2)),
+            total_bytes=_to_bytes(float(m.group(3)), m.group(4))
+        )
+    mf = _FILES_RE.search(line)
+    if mf:
+        callback(files_uploaded=int(mf.group(1)))
+
+def make_progress_callback(job_id: str, db) -> Callable:
+    """Return a throttled progress callback that updates the job in the database."""
+    last_write = [0.0]
+
+    def callback(bytes_uploaded=None, total_bytes=None, files_uploaded=None):
+        now = time.time()
+        if now - last_write[0] < 2.0:
+            return
+        last_write[0] = now
+        try:
+            from .database import UploadJob
+            j = db.query(UploadJob).filter(UploadJob.job_id == job_id).first()
+            if not j:
+                return
+            if bytes_uploaded is not None:
+                j.bytes_uploaded = bytes_uploaded
+            if total_bytes and total_bytes > 0:
+                j.total_size_bytes = total_bytes
+            if files_uploaded is not None:
+                j.files_uploaded = files_uploaded
+            db.commit()
+        except Exception:
+            pass
+
+    return callback
+
+
 class UploadService:
     """Handle Google Cloud Storage uploads."""
     
     def __init__(self):
         self.active_uploads = {}  # Track active upload processes
     
-    async def upload_to_gcs(self, job_id: str, source_path: str, 
+    async def upload_to_gcs(self, job_id: str, source_path: str,
                            destination_bucket: str, destination_path: str = "",
                            dry_run: bool = False, recursive: bool = True,
                            threads: int = 4, log_path: str = None, upload_tool: str = "gcloud",
-                           exclude_patterns: list = None, exclude_folders: list = None) -> bool:
+                           exclude_patterns: list = None, exclude_folders: list = None,
+                           no_clobber: bool = False, progress_callback: Callable = None) -> bool:
         """Upload files to Google Cloud Storage using gcloud storage or gsutil."""
         
         # Strip bucket name from destination_path if it starts with it
@@ -549,7 +599,11 @@ class UploadService:
             
             # Use checksums to determine if files need updating (more reliable than timestamps)
             cmd.append("--checksums-only")
-            
+
+            # Skip files that already exist in the bucket (Issue #13)
+            if no_clobber:
+                cmd.append("--no-clobber")
+
             # Add exclude patterns for gcloud storage
             # Combine multiple patterns with | alternation
             if all_exclude_patterns:
@@ -576,37 +630,45 @@ class UploadService:
             import subprocess
             
             def run_subprocess():
-                """Run subprocess synchronously in thread, capturing output in real-time."""
+                """Run subprocess synchronously in thread, capturing output in real-time.
+
+                Uses two threads to read stdout and stderr concurrently to prevent
+                OS pipe buffer deadlocks when both streams produce large output.
+                """
                 process = subprocess.Popen(
                     shell_cmd,
                     shell=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,  # Use text mode for easier handling
-                    bufsize=1,  # Line buffered
+                    text=True,
+                    bufsize=1,
                     universal_newlines=True
                 )
                 self.active_uploads[job_id] = process
-                
-                # Capture output in real-time
+
                 stdout_lines = []
                 stderr_lines = []
-                
-                # Read stderr (gsutil outputs progress to stderr)
-                for line in process.stderr:
-                    stderr_lines.append(line)
-                    print(line.rstrip())  # Print to console in real-time
-                
-                # Wait for process to complete and get any remaining stdout
+
+                def _read_stdout():
+                    for line in process.stdout:
+                        stdout_lines.append(line)
+
+                def _read_stderr():
+                    for line in process.stderr:
+                        stderr_lines.append(line)
+                        print(line.rstrip())
+                        if progress_callback:
+                            _parse_progress(line, progress_callback)
+
+                t1 = threading.Thread(target=_read_stdout, daemon=True)
+                t2 = threading.Thread(target=_read_stderr, daemon=True)
+                t1.start()
+                t2.start()
+                t1.join()
+                t2.join()
                 process.wait()
-                stdout_data = process.stdout.read()
-                if stdout_data:
-                    stdout_lines.append(stdout_data)
-                
-                stdout = ''.join(stdout_lines)
-                stderr = ''.join(stderr_lines)
-                
-                return process.returncode, stdout, stderr
+
+                return process.returncode, ''.join(stdout_lines), ''.join(stderr_lines)
             
             # Run in thread pool to avoid blocking
             returncode, stdout, stderr = await asyncio.to_thread(run_subprocess)
