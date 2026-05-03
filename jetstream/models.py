@@ -112,6 +112,7 @@ class JobStatusResponse(BaseModel):
     """Response model for job status."""
     id: int
     job_id: str
+    friendly_name: Optional[str] = None
     status: JobStatus
     source_path: str
     destination_bucket: str

@@ -778,38 +778,49 @@ class UploadService:
 
 class QueueManager:
     """Manage upload queue and concurrent jobs."""
-    
+
     def __init__(self, max_concurrent: int = 1):
         self.max_concurrent = max_concurrent
         self.running_jobs = set()
         self.queue = []
-    
+        self.paused = False
+
     def can_start_job(self) -> bool:
-        """Check if a new job can be started."""
-        return len(self.running_jobs) < self.max_concurrent
-    
+        """Check if a new job can be started (respects pause state)."""
+        return not self.paused and len(self.running_jobs) < self.max_concurrent
+
+    def pause(self) -> None:
+        """Pause queue — no new jobs will start until resume() is called."""
+        self.paused = True
+        logger.info("Queue paused")
+
+    def resume(self) -> None:
+        """Resume queue processing."""
+        self.paused = False
+        logger.info("Queue resumed")
+
     def add_to_queue(self, job_id: str):
         """Add job to queue."""
         if job_id not in self.queue:
             self.queue.append(job_id)
-    
+
     def start_job(self, job_id: str):
         """Mark job as started."""
         self.running_jobs.add(job_id)
         if job_id in self.queue:
             self.queue.remove(job_id)
-    
+
     def complete_job(self, job_id: str):
         """Mark job as completed."""
         if job_id in self.running_jobs:
             self.running_jobs.remove(job_id)
-    
+
     def get_next_job(self) -> Optional[str]:
         """Get next job from queue if can start."""
         if self.can_start_job() and self.queue:
             return self.queue[0]
         return None
-    
+
     def get_queue_status(self) -> Dict:
         """Get current queue status."""
         return {
@@ -817,7 +828,8 @@ class QueueManager:
             'queued_count': len(self.queue),
             'running_jobs': list(self.running_jobs),
             'queued_jobs': self.queue.copy(),
-            'max_concurrent': self.max_concurrent
+            'max_concurrent': self.max_concurrent,
+            'paused': self.paused,
         }
 
 # Global instances

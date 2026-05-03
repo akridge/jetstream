@@ -115,6 +115,11 @@ async def process_upload_job(job_id: str, db_path: str):
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
         queue_manager.complete_job(job_id)
+        # Ensure the next waiting job is not left stuck when this one fails
+        next_job_id = queue_manager.get_next_job()
+        if next_job_id:
+            import asyncio
+            asyncio.create_task(process_upload_job(next_job_id, db_path))
     finally:
         db.close()
 
