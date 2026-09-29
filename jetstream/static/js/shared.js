@@ -88,7 +88,7 @@ function renderSharedNav() {
         { icon: '🏠', label: 'Home', href: '/' },
         { icon: '📤', label: 'Uploads', href: '/static/uploads.html' },
         { icon: '🗂️', label: 'Drive Upload', href: '/static/gdrive.html', visible: prefs.beta_pages.drive_upload },
-        { icon: '☁️', label: 'Cloud Sync', href: '/static/cloud.html' },
+        { icon: '☁️', label: 'Cloud Ops', href: '/static/cloud.html' },
         { icon: '🧹', label: 'Cloud Audit', href: '/static/cloud-audit.html', visible: prefs.beta_pages.cloud_audit },
         { icon: '🗄️', label: 'Local Audit', href: '/static/local-audit.html', visible: prefs.beta_pages.local_audit },
         { icon: '📚', label: 'Cloud Catalog Tool', href: '/static/dataset-creator.html' },
@@ -218,7 +218,7 @@ function showToast(message, type, duration) {
     var toast = document.createElement('div');
     toast.className = 'toast toast-' + type;
     toast.innerHTML = '<span class="toast-icon">' + (_toastIcons[type] || '') + '</span>' +
-        '<span class="toast-message">' + message + '</span>' +
+        '<span class="toast-message">' + escapeHtml(String(message)) + '</span>' +
         '<button class="toast-close" onclick="this.parentElement.remove()">&times;</button>';
     container.appendChild(toast);
 
@@ -350,7 +350,10 @@ function renderJobCard(job, options) {
     var showDelete = options.showDelete !== false;
     var showProgress = options.showProgress !== false;
     var clickable = options.clickable !== false;
-    var isCloudSync = job.job_type === 'cloud_sync' || job.transfer_direction === 'cloud_to_cloud';
+    var isCloudMove = job.job_type === 'cloud_move' || job.operation === 'move';
+    var isCloudSync = !isCloudMove && (job.job_type === 'cloud_sync' || job.transfer_direction === 'cloud_to_cloud');
+    var isCloudOperation = isCloudMove || isCloudSync;
+    showDelete = showDelete && !isCloudOperation;
 
     var jobTitle = job.friendly_name || (job.job_id.substring(0, 8) + '...');
     return '<div class="job-item" ' + (clickable ? 'onclick="showJobDetails(\'' + job.job_id + '\')"' : '') + ' style="' + (clickable ? 'cursor: pointer;' : '') + '">' +
@@ -362,14 +365,15 @@ function renderJobCard(job, options) {
             '</div>' +
         '</div>' +
         '<div class="job-badges">' +
-            '<span class="job-badge badge-rsync">\ud83d\udce6 RSYNC</span>' +
+            (!isCloudMove ? '<span class="job-badge badge-rsync">\ud83d\udce6 RSYNC</span>' : '') +
             (job.dry_run ? '<span class="job-badge badge-dry-run">\ud83d\udc41\ufe0f DRY-RUN</span>' : '') +
             (job.no_clobber ? '<span class="job-badge badge-rsync">\ud83d\udee1\ufe0f NO-CLOBBER</span>' : '') +
             (job.scheduled_for ? '<span class="job-badge badge-scheduled">\u23f0 SCHEDULED</span>' : '') +
-            (isCloudSync ? '<span class="job-badge badge-local">\u2601\ufe0f CLOUD\u2192CLOUD</span>' : '<span class="job-badge badge-local">\ud83d\udcbb LOCAL\u2192CLOUD</span>') +
+            (isCloudOperation ? '<span class="job-badge badge-local">\u2601\ufe0f CLOUD\u2192CLOUD</span>' : '<span class="job-badge badge-local">\ud83d\udcbb LOCAL\u2192CLOUD</span>') +
             (isCloudSync ? '<span class="job-badge badge-rsync">\u2601\ufe0f CLOUD SYNC</span>' : '') +
+            (isCloudMove ? '<span class="job-badge badge-rsync">\u2601\ufe0f CLOUD MOVE</span>' : '') +
             (job.split_by_folder ? '<span class="job-badge badge-split">\ud83d\udcc1 SPLIT</span>' : '') +
-            (job.recursive ? '<span class="job-badge badge-rsync">\ud83d\udd04 RECURSIVE</span>' : '') +
+            (job.recursive && !isCloudMove ? '<span class="job-badge badge-rsync">\ud83d\udd04 RECURSIVE</span>' : '') +
             (job.auto_retry && job.retry_count > 0 ? '<span class="job-badge badge-scheduled">\ud83d\udd04 RETRY ' + job.retry_count + '</span>' : '') +
         '</div>' +
         (job.scheduled_for && job.status === 'scheduled' ? '<div style="color: #6b21a8; font-size: 0.85em; margin: 8px 0;">\u23f0 Scheduled for: ' + formatDate(job.scheduled_for) + '</div>' : '') +
@@ -468,9 +472,11 @@ async function showJobDetails(jobId) {
         if (!response.ok) throw new Error('Job not found');
         var job = await response.json();
 
-        var isCloudSync = job.job_type === 'cloud_sync' || job.transfer_direction === 'cloud_to_cloud';
-        var canRetry = !isCloudSync && ['completed', 'failed', 'cancelled'].indexOf(job.status) !== -1;
-        var canCancel = !isCloudSync && ['pending', 'queued', 'running', 'scheduled'].indexOf(job.status) !== -1;
+        var isCloudMove = job.job_type === 'cloud_move' || job.operation === 'move';
+        var isCloudSync = !isCloudMove && (job.job_type === 'cloud_sync' || job.transfer_direction === 'cloud_to_cloud');
+        var isCloudOperation = isCloudMove || isCloudSync;
+        var canRetry = !isCloudOperation && ['completed', 'failed', 'cancelled'].indexOf(job.status) !== -1;
+        var canCancel = !isCloudOperation && ['pending', 'queued', 'running', 'scheduled'].indexOf(job.status) !== -1;
         var isDryRun = job.dry_run;
         var uploadTool = job.upload_tool || 'gcloud';
 
@@ -517,17 +523,22 @@ async function showJobDetails(jobId) {
         var modalBody = document.getElementById('modalBody');
         var html = '';
         html += '<div class="detail-section"><h3>Status</h3><span class="status-badge status-' + job.status + '">' + job.status.toUpperCase() + '</span></div>';
-        html += '<div class="detail-section"><h3>Command</h3><div class="detail-value" style="word-break: break-all; font-family: monospace; font-size: 0.85em;">' + escapeHtml(command) + '</div></div>';
+        if (!isCloudMove) {
+            html += '<div class="detail-section"><h3>Command</h3><div class="detail-value" style="word-break: break-all; font-family: monospace; font-size: 0.85em;">' + escapeHtml(command) + '</div></div>';
+        }
 
         html += '<div class="detail-section"><h3>Job Information</h3><div class="detail-grid">';
         if (job.friendly_name) {
             html += '<div class="detail-item"><span class="detail-label">Job Name</span><span class="detail-text">' + escapeHtml(job.friendly_name) + '</span></div>';
         }
-        html += '<div class="detail-item"><span class="detail-label">Job Type</span><span class="detail-text">' + (isCloudSync ? 'Cloud Sync' : 'Upload') + '</span></div>';
+        html += '<div class="detail-item"><span class="detail-label">Job Type</span><span class="detail-text">' + (isCloudMove ? 'Cloud Move' : (isCloudSync ? 'Cloud Sync' : 'Upload')) + '</span></div>';
         html += '<div class="detail-item"><span class="detail-label">Job ID</span><span class="detail-text">' + job.job_id + '</span></div>';
         html += '<div class="detail-item"><span class="detail-label">Created</span><span class="detail-text">' + formatDate(job.created_at) + '</span></div>';
         html += '<div class="detail-item"><span class="detail-label">Started</span><span class="detail-text">' + formatDate(job.started_at) + '</span></div>';
         html += '<div class="detail-item"><span class="detail-label">Completed</span><span class="detail-text">' + formatDate(job.completed_at) + '</span></div>';
+        if (isCloudMove) {
+            html += '<div class="detail-item"><span class="detail-label">Phase</span><span class="detail-text">' + escapeHtml(job.phase || 'N/A') + '</span></div>';
+        }
         if (job.duration_seconds) {
             html += '<div class="detail-item"><span class="detail-label">Duration</span><span class="detail-text">' + formatDuration(job.duration_seconds) + '</span></div>';
         }
@@ -537,9 +548,9 @@ async function showJobDetails(jobId) {
         html += '</div></div>';
 
         html += '<div class="detail-section"><h3>Source & Destination</h3><div class="detail-grid">';
-        html += '<div class="detail-item"><span class="detail-label">Source Path</span><span class="detail-text">' + job.source_path + '</span></div>';
-        html += '<div class="detail-item"><span class="detail-label">Destination Bucket</span><span class="detail-text">' + job.destination_bucket + '</span></div>';
-        html += '<div class="detail-item"><span class="detail-label">Destination Path</span><span class="detail-text">' + (job.destination_path || '(root)') + '</span></div>';
+        html += '<div class="detail-item"><span class="detail-label">Source Path</span><span class="detail-text">' + escapeHtml(job.source_path) + '</span></div>';
+        html += '<div class="detail-item"><span class="detail-label">Destination Bucket</span><span class="detail-text">' + escapeHtml(job.destination_bucket) + '</span></div>';
+        html += '<div class="detail-item"><span class="detail-label">Destination Path</span><span class="detail-text">' + escapeHtml(job.destination_path || '(root)') + '</span></div>';
         html += '<div class="detail-item"><span class="detail-label">Threads</span><span class="detail-text">' + job.threads + '</span></div>';
         html += '</div></div>';
 
@@ -573,7 +584,7 @@ async function showJobDetails(jobId) {
         }
 
         if (job.upload_output) {
-            html += '<div class="detail-section"><h3>Command Output <button class="btn btn-secondary" onclick="downloadJobOutput(\'' + job.job_id + '\', \'' + job.source_path.replace(/\\/g, '\\\\') + '\')" style="float: right; font-size: 12px; padding: 4px 8px;">\ud83d\udcbe Download Output</button></h3>';
+            html += '<div class="detail-section"><h3>Command Output <button class="btn btn-secondary" onclick="downloadJobOutput(\'' + job.job_id + '\')" style="float: right; font-size: 12px; padding: 4px 8px;">\ud83d\udcbe Download Output</button></h3>';
             html += '<div class="detail-value" style="max-height: 300px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.85em;">' + escapeHtml(job.upload_output) + '</div></div>';
         }
 
@@ -602,7 +613,7 @@ function closeJobModal() {
     if (modal) modal.style.display = 'none';
 }
 
-async function downloadJobOutput(jobId, sourcePath) {
+async function downloadJobOutput(jobId) {
     try {
         var response = await fetch('/api/uploads/' + jobId);
         var job = await response.json();
@@ -610,6 +621,7 @@ async function downloadJobOutput(jobId, sourcePath) {
             showToast('No output available for this job', 'warning');
             return;
         }
+        var sourcePath = job.source_path || 'job';
         var timestamp = new Date(job.created_at).toISOString().replace(/:/g, '-').split('.')[0];
         var pathName = sourcePath.split(/[/\\]/).pop() || 'job';
         var filename = pathName + '_' + jobId.substring(0, 8) + '_' + timestamp + '.txt';

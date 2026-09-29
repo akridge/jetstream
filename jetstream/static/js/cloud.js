@@ -1,11 +1,18 @@
 /**
- * JetStream - Cloud Sync Page
- * Cloud-to-cloud sync with gcloud storage rsync
+ * JetStream - Cloud Ops Page
+ * Cloud-to-cloud sync and generation-safe moves
  */
 
 let cloudTransferJobs = {};
+let cloudOperationMode = 'sync';
+let moveSourceKind = 'object';
+let metadataTimer = null;
+let metadataRequestId = 0;
+let moveDryRun = false;
+const bucketMetadataCache = new Map();
 
 document.addEventListener('DOMContentLoaded', function() {
+    setCloudOperationMode('sync');
     loadCloudTransfers();
 
     // Poll for job updates
@@ -27,6 +34,115 @@ function normalizeGcsPath(path) {
     return 'gs://' + path;
 }
 
+function getMovePathError(path, label) {
+    if (!path.startsWith('gs://')) return `${label} must begin with gs://`;
+    const remainder = path.slice(5);
+    if (!remainder.includes('/') || !remainder.split('/')[1]) {
+        return `${label} must include a bucket and a file or folder`;
+    }
+    if (isFolderMove() && !path.endsWith('/')) return `${label} must end with / because you are moving a folder`;
+    if (!isFolderMove() && path.endsWith('/')) return `${label} looks like a folder. Choose a folder option above to move it.`;
+    return '';
+}
+
+function isFolderMove() {
+    return moveSourceKind === 'folder' || moveSourceKind === 'folder_contents';
+}
+
+// FastAPI returns a string detail for handled errors and a list of objects for validation failures.
+function extractApiError(data, fallback) {
+    const detail = data && data.detail;
+    if (typeof detail === 'string' && detail) return detail;
+    if (Array.isArray(detail) && detail.length) {
+        return detail.map(item => item && item.msg ? item.msg : JSON.stringify(item)).join('; ');
+    }
+    return fallback;
+}
+
+function setCloudOperationMode(mode) {
+    cloudOperationMode = mode;
+    document.getElementById('sync-mode-button').classList.toggle('active', mode === 'sync');
+    document.getElementById('move-mode-button').classList.toggle('active', mode === 'move');
+    document.getElementById('sync-options').style.display = mode === 'sync' ? 'block' : 'none';
+    document.getElementById('move-options').style.display = mode === 'move' ? 'block' : 'none';
+    document.getElementById('operation-description').textContent = mode === 'sync'
+        ? 'Sync data between Google Cloud Storage buckets using gcloud storage rsync.'
+        : 'Move files between Cloud Storage locations without downloading them. If anything already exists at the destination, nothing is moved.';
+    document.getElementById('cloud-operation-submit').textContent = mode === 'sync' ? 'Start Cloud Sync' : 'Move in Cloud Storage';
+    document.getElementById('move-dry-run-button').style.display = mode === 'move' ? 'inline-block' : 'none';
+    updateMovePathLabels();
+    updateCloudPathPreview();
+}
+
+function setMoveSourceKind(kind) {
+    moveSourceKind = kind;
+    document.getElementById('object-kind-button').classList.toggle('active', kind === 'object');
+    document.getElementById('folder-kind-button').classList.toggle('active', kind === 'folder');
+    document.getElementById('contents-kind-button').classList.toggle('active', kind === 'folder_contents');
+    updateMovePathLabels();
+    updateCloudPathPreview();
+}
+
+function updateMovePathLabels() {
+    const isMove = cloudOperationMode === 'move';
+    const folderMove = isFolderMove();
+    document.getElementById('source-path-label').textContent = isMove
+        ? (folderMove ? 'Source folder path' : 'Source file path')
+        : 'Source Bucket Path';
+    document.getElementById('dest-path-label').textContent = isMove
+        ? (folderMove ? 'Destination folder path' : 'Final destination file path')
+        : 'Destination Bucket Path';
+
+    const hints = {
+        object: 'Moves or renames a single file. The destination path is its final name.',
+        folder: 'Moves the folder into the destination, keeping the folder name. Both paths must end with /.',
+        folder_contents: 'Moves the files out of the folder into the destination. Use this to rename a folder or merge into an existing one. Both paths must end with /.'
+    };
+    document.getElementById('move-kind-hint').textContent = hints[moveSourceKind];
+}
+
+function renderMoveMappingPreview() {
+    const preview = document.getElementById('move-mapping-preview');
+    const rows = document.getElementById('move-mapping-rows');
+    const note = document.getElementById('move-mapping-note');
+    const src = document.getElementById('source-bucket').value.trim();
+    const dst = document.getElementById('dest-bucket').value.trim();
+
+    if (cloudOperationMode !== 'move' || !src || !dst) {
+        preview.style.display = 'none';
+        return;
+    }
+
+    const pathError = getMovePathError(src, 'Source') || getMovePathError(dst, 'Destination');
+    if (pathError) {
+        rows.textContent = '';
+        note.textContent = pathError;
+        preview.style.display = 'block';
+        return;
+    }
+
+    if (moveSourceKind === 'object') {
+        rows.textContent = `${src}  \u2192  ${dst}`;
+        note.textContent = 'The source file is deleted only after the copy is verified at the destination.';
+    } else {
+        const sourceFolder = src.endsWith('/') ? src : src + '/';
+        const destBase = dst.endsWith('/') ? dst : dst + '/';
+        const sourceName = sourceFolder.replace(/\/+$/, '').split('/').pop();
+        const destFolder = moveSourceKind === 'folder' ? `${destBase}${sourceName}/` : destBase;
+        rows.innerHTML = '';
+        ['report.csv', '2024/logs.txt'].forEach(function(relativeName) {
+            const line = document.createElement('div');
+            line.textContent = `${sourceFolder}${relativeName}  \u2192  ${destFolder}${relativeName}`;
+            rows.appendChild(line);
+        });
+        note.textContent = moveSourceKind === 'folder'
+            ? `The folder "${sourceName}" is created inside the destination. Source files are deleted only after every copy is verified.`
+            : `Files land directly in the destination, so no "${sourceName}" folder is created inside it. Source files are deleted only after every copy is verified; an empty folder placeholder can remain behind.`;
+    }
+
+    preview.style.display = 'block';
+}
+
 // ===== PATH PREVIEW =====
 
 function updateCloudPathPreview() {
@@ -37,20 +153,110 @@ function updateCloudPathPreview() {
     const dstDiv = document.getElementById('dest-path-preview');
 
     if (src) {
-        const norm = src.startsWith('gs://') ? src.replace(/\/+$/, '') : 'gs://' + src.replace(/\/+$/, '');
-        document.getElementById('source-path-preview-text').textContent = norm + '/';
+        const norm = cloudOperationMode === 'move' ? src : normalizeGcsPath(src) + '/';
+        document.getElementById('source-path-preview-text').textContent = norm;
         srcDiv.style.display = 'block';
     } else {
         srcDiv.style.display = 'none';
     }
 
     if (dst) {
-        const norm = dst.startsWith('gs://') ? dst.replace(/\/+$/, '') : 'gs://' + dst.replace(/\/+$/, '');
-        document.getElementById('dest-path-preview-text').textContent = norm + '/';
+        const norm = cloudOperationMode === 'move' ? dst : normalizeGcsPath(dst) + '/';
+        document.getElementById('dest-path-preview-text').textContent = norm;
         dstDiv.style.display = 'block';
     } else {
         dstDiv.style.display = 'none';
     }
+
+    scheduleBucketMetadataLookup();
+    renderMoveMappingPreview();
+}
+
+function scheduleBucketMetadataLookup() {
+    clearTimeout(metadataTimer);
+    const requestId = ++metadataRequestId;
+    if (cloudOperationMode !== 'move') {
+        document.getElementById('source-bucket-metadata').textContent = '';
+        document.getElementById('dest-bucket-metadata').textContent = '';
+        document.getElementById('move-cost-warning').style.display = 'none';
+        return;
+    }
+    const sourcePath = document.getElementById('source-bucket').value.trim();
+    const destPath = document.getElementById('dest-bucket').value.trim();
+    if (!sourcePath || !destPath) {
+        document.getElementById('source-bucket-metadata').textContent = '';
+        document.getElementById('dest-bucket-metadata').textContent = '';
+        document.getElementById('move-cost-warning').style.display = 'none';
+        return;
+    }
+    metadataTimer = setTimeout(() => loadMoveMetadata(requestId), 600);
+}
+
+async function fetchBucketMetadata(path) {
+    const bucket = path.startsWith('gs://') ? path.slice(5).split('/')[0] : '';
+    if (!bucket) throw new Error('Enter a gs:// bucket path');
+    if (bucketMetadataCache.has(bucket)) return bucketMetadataCache.get(bucket);
+
+    const response = await fetch(`/api/cloud/bucket-metadata?path=${encodeURIComponent(`gs://${bucket}`)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(extractApiError(data, 'Metadata unavailable'));
+    bucketMetadataCache.set(bucket, data);
+    return data;
+}
+
+function formatBucketMetadata(metadata) {
+    const locations = metadata.data_locations && metadata.data_locations.length
+        ? metadata.data_locations.join('/')
+        : (metadata.location || 'unknown');
+    return `Location: ${locations} | Default storage: ${metadata.storage_class || 'unknown'}`;
+}
+
+function getLocationKey(metadata) {
+    if (!metadata) return '';
+    const locations = metadata.data_locations && metadata.data_locations.length
+        ? [...metadata.data_locations].sort()
+        : [metadata.location];
+    return locations.filter(Boolean).map(value => value.toUpperCase()).join('|');
+}
+
+async function loadMoveMetadata(requestId) {
+    const sourcePath = document.getElementById('source-bucket').value.trim();
+    const destPath = document.getElementById('dest-bucket').value.trim();
+    if (!sourcePath || !destPath) return;
+
+    const results = await Promise.allSettled([
+        fetchBucketMetadata(sourcePath),
+        fetchBucketMetadata(destPath)
+    ]);
+    if (requestId !== metadataRequestId || cloudOperationMode !== 'move') return;
+
+    const sourceMetadata = results[0].status === 'fulfilled' ? results[0].value : null;
+    const destMetadata = results[1].status === 'fulfilled' ? results[1].value : null;
+    document.getElementById('source-bucket-metadata').textContent = sourceMetadata
+        ? formatBucketMetadata(sourceMetadata)
+        : `Metadata unavailable: ${results[0].reason.message}`;
+    document.getElementById('dest-bucket-metadata').textContent = destMetadata
+        ? formatBucketMetadata(destMetadata)
+        : `Metadata unavailable: ${results[1].reason.message}`;
+    renderMoveCostWarning(sourceMetadata, destMetadata);
+}
+
+function renderMoveCostWarning(sourceMetadata, destMetadata) {
+    const warning = document.getElementById('move-cost-warning');
+    const reasons = [];
+    const sourceLocation = getLocationKey(sourceMetadata);
+    const destLocation = getLocationKey(destMetadata);
+    const sourceClass = (sourceMetadata && sourceMetadata.storage_class || '').toUpperCase();
+
+    if (!sourceLocation || !destLocation) reasons.push('One or both bucket locations are unknown; network charges may apply.');
+    else if (sourceLocation !== destLocation) reasons.push('Buckets use different locations; network transfer charges may apply.');
+    if (['NEARLINE', 'COLDLINE', 'ARCHIVE', 'ARCHIVAL'].includes(sourceClass)) {
+        reasons.push(`Source default storage is ${sourceClass}; retrieval or early-deletion charges may apply.`);
+    }
+
+    warning.className = `dc-alert ${reasons.length ? 'warning' : 'success'}`;
+    warning.textContent = reasons.length ? reasons.join(' ') : 'Bucket locations match and no retrieval-sensitive source default was detected.';
+    warning.style.display = 'block';
 }
 
 // ===== ADVANCED OPTIONS =====
@@ -70,8 +276,16 @@ function toggleAdvancedOptions() {
 
 // ===== FORM SUBMIT =====
 
+function startMoveDryRun() {
+    moveDryRun = true;
+    document.getElementById('cloud-transfer-form').requestSubmit();
+}
+
 document.getElementById('cloud-transfer-form').addEventListener('submit', async function(e) {
     e.preventDefault();
+
+    const isMoveDryRun = moveDryRun;
+    moveDryRun = false;
 
     const sourceBucket = document.getElementById('source-bucket').value.trim();
     const destBucket = document.getElementById('dest-bucket').value.trim();
@@ -88,38 +302,64 @@ document.getElementById('cloud-transfer-form').addEventListener('submit', async 
         return;
     }
 
+    if (cloudOperationMode === 'move') {
+        const sourceError = getMovePathError(sourceBucket, 'Source');
+        const destError = getMovePathError(destBucket, 'Destination');
+        if (sourceError || destError) {
+            showToast(sourceError || destError, 'error');
+            return;
+        }
+    }
+
     const submitBtn = this.querySelector('button[type="submit"]');
+    const dryRunBtn = document.getElementById('move-dry-run-button');
+    const activeBtn = isMoveDryRun ? dryRunBtn : submitBtn;
+    const activeBtnText = activeBtn.textContent;
     submitBtn.disabled = true;
-    submitBtn.textContent = '⏳ Starting Sync...';
+    dryRunBtn.disabled = true;
+    activeBtn.textContent = cloudOperationMode === 'sync'
+        ? 'Starting Sync...'
+        : (isMoveDryRun ? 'Checking...' : 'Starting Move...');
 
     try {
-        const response = await fetch('/api/cloud/transfer', {
+        const endpoint = cloudOperationMode === 'sync' ? '/api/cloud/transfer' : '/api/cloud/move';
+        const payload = cloudOperationMode === 'sync' ? {
+            source_path: sourceBucket,
+            dest_path: destBucket,
+            recursive: recursive,
+            dry_run: dryRun,
+            no_clobber: noClobber,
+            exclude_patterns: excludePatterns
+        } : {
+            source_path: sourceBucket,
+            dest_path: destBucket,
+            source_kind: moveSourceKind,
+            dry_run: isMoveDryRun
+        };
+        const response = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                source_path: sourceBucket,
-                dest_path: destBucket,
-                recursive: recursive,
-                dry_run: dryRun,
-                no_clobber: noClobber,
-                exclude_patterns: excludePatterns
-            })
+            body: JSON.stringify(payload)
         });
 
         const data = await response.json();
 
         if (response.ok) {
-            showToast(dryRun ? 'Dry run started! Check results below.' : 'Sync started successfully!', 'success');
+            const message = cloudOperationMode === 'move'
+                ? (isMoveDryRun ? 'Dry run started. Nothing will be copied or deleted.' : 'Move started successfully.')
+                : (dryRun ? 'Dry run started. Check results below.' : 'Sync started successfully.');
+            showToast(message, 'success');
             loadCloudTransfers();
         } else {
-            showToast(data.detail || 'Failed to start sync', 'error');
+            showToast(extractApiError(data, `Failed to start ${cloudOperationMode}`), 'error');
         }
     } catch (error) {
-        console.error('Error starting sync:', error);
-        showToast('Error starting sync: ' + error.message, 'error');
+        console.error('Error starting cloud operation:', error);
+        showToast('Error starting cloud operation: ' + error.message, 'error');
     } finally {
         submitBtn.disabled = false;
-        submitBtn.textContent = '🚀 Start Cloud Sync';
+        dryRunBtn.disabled = false;
+        activeBtn.textContent = activeBtnText;
     }
 });
 
@@ -157,7 +397,7 @@ function renderCloudJobs(jobs) {
     const visibleJobs = jobs;
 
     if (!visibleJobs || visibleJobs.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: #999; padding: 50px 0;">No cloud sync jobs yet. Use the form to start a sync.</p>';
+        container.innerHTML = '<p style="text-align: center; color: #999; padding: 50px 0;">No cloud operations yet. Use the form to start one.</p>';
         return;
     }
 
@@ -174,6 +414,10 @@ function renderCloudJobs(jobs) {
         const statusClass = getStatusClass(job.status);
         const statusIcon = getStatusIcon(job.status);
         const isDryRun = job.dry_run ? ' (Dry Run)' : '';
+        const operation = job.operation === 'move' ? 'Move' : 'Sync';
+        const phase = job.operation === 'move' && job.status === 'running' && job.phase
+            ? ` | Phase: ${escapeHtml(job.phase)}`
+            : '';
 
         // Shorten paths for display
         const sourcePath = shortenPath(job.source_path);
@@ -185,11 +429,12 @@ function renderCloudJobs(jobs) {
             <div class="job-item ${statusClass}" ${isClickable ? `onclick="viewTransferOutput('${job.job_id}')" style="cursor: pointer;"` : ''}>
                 <div class="job-info">
                     <div class="job-name">
-                        ${statusIcon} ${sourcePath} → ${destPath}${isDryRun}
+                        ${statusIcon} <span class="job-badge badge-rsync">${operation.toUpperCase()}</span> ${escapeHtml(sourcePath)} → ${escapeHtml(destPath)}${isDryRun}
                     </div>
                     <div class="job-meta" style="font-size: 0.85em; color: #64748b;">
                         Started: ${formatDate(job.created_at)}
-                        ${job.completed_at ? ' | Completed: ' + formatDate(job.completed_at) : ''}
+                        ${job.completed_at ? ' | Completed: ' + formatDate(job.completed_at) : ''}${phase}
+                        ${job.operation === 'move' && job.total_files ? ` | ${job.files_uploaded || 0} / ${job.total_files} verified` : ''}
                     </div>
                     ${job.error ? `<div style="color: #dc2626; font-size: 0.85em; margin-top: 4px;">Error: ${escapeHtml(job.error)}</div>` : ''}
                 </div>
@@ -270,14 +515,21 @@ async function viewTransferOutput(jobId) {
         const modalBody = document.getElementById('modalBody');
         let html = '';
         
-        html += `<div class="detail-section"><h3>Status</h3><span class="status-badge ${getStatusClass(job.status)}">${job.status.toUpperCase()}</span>${job.dry_run ? ' <span class="job-badge badge-dry-run">🧪 DRY-RUN</span>' : ''}</div>`;
-        
-        html += `<div class="detail-section"><h3>Command</h3><div class="detail-value">${escapeHtml(formatCloudCommand(job.command))}</div></div>`;
+        const operation = job.operation === 'move' ? 'Move' : 'Sync';
+        html += `<div class="detail-section"><h3>Status</h3><span class="status-badge ${getStatusClass(job.status)}">${job.status.toUpperCase()}</span> <span class="job-badge badge-rsync">${operation.toUpperCase()}</span>${job.dry_run ? ' <span class="job-badge badge-dry-run">DRY-RUN</span>' : ''}</div>`;
+
+        if (job.operation !== 'move') {
+            html += `<div class="detail-section"><h3>Command</h3><div class="detail-value">${escapeHtml(formatCloudCommand(job.command))}</div></div>`;
+        }
 
         html += '<div class="detail-section"><h3>Transfer Information</h3><div class="detail-grid">';
         html += `<div class="detail-item"><span class="detail-label">Job ID</span><span class="detail-text">${job.job_id}</span></div>`;
         html += `<div class="detail-item"><span class="detail-label">Created</span><span class="detail-text">${formatDate(job.created_at)}</span></div>`;
         html += `<div class="detail-item"><span class="detail-label">Completed</span><span class="detail-text">${formatDate(job.completed_at)}</span></div>`;
+        if (job.operation === 'move') {
+            html += `<div class="detail-item"><span class="detail-label">Phase</span><span class="detail-text">${escapeHtml(job.phase || 'N/A')}</span></div>`;
+            html += `<div class="detail-item"><span class="detail-label">Verified</span><span class="detail-text">${job.files_uploaded || 0} / ${job.total_files || 0} objects</span></div>`;
+        }
         html += '</div></div>';
 
         html += '<div class="detail-section"><h3>Source & Destination</h3><div class="detail-grid">';
@@ -310,7 +562,7 @@ async function viewTransferOutput(jobId) {
 // ===== CLEAR COMPLETED TRANSFERS =====
 
 async function clearCompletedTransfers() {
-    if (!confirm('This will hide all completed and failed cloud sync transfers from the recent list. Continue?')) {
+    if (!confirm('This will hide all completed and failed cloud operations from the recent list. Continue?')) {
         return;
     }
 

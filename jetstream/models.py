@@ -146,6 +146,9 @@ class JobStatusResponse(BaseModel):
     filters: Optional[dict] = None
     job_type: str = "upload"
     transfer_direction: str = "local_to_cloud"
+    operation: Optional[str] = None
+    source_kind: Optional[str] = None
+    phase: Optional[str] = None
 
     # Data protection & rsync options (Issue #13)
     no_clobber: bool = False

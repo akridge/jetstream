@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Literal
 from datetime import datetime, timezone
 import asyncio
 import subprocess
@@ -63,6 +63,22 @@ class CloudTransferResponse(BaseModel):
     status: str
     message: str
     command: str
+
+class CloudMoveRequest(BaseModel):
+    """Request model for moving a GCS object or folder."""
+    source_path: str = Field(..., description="Source GCS URI beginning with gs://")
+    dest_path: str = Field(..., description="Destination GCS URI beginning with gs://")
+    source_kind: Literal["object", "folder", "folder_contents"] = Field(
+        ..., description="Move one object, a folder into the destination, or a folder's contents"
+    )
+    dry_run: bool = Field(False, description="Preview the move without copying or deleting anything")
+
+class CloudMoveResponse(BaseModel):
+    """Response model for a cloud move."""
+    job_id: str
+    status: str
+    message: str
+    operation: str
     
 class FolderStats(BaseModel):
     """Folder statistics model."""
@@ -226,13 +242,53 @@ def split_gcs_path(path: str) -> tuple[str, str]:
     return bucket, prefix
 
 
+def parse_move_path(path: str, source_kind: str) -> tuple[str, str, str]:
+    """Validate a move URI while preserving prefix trailing-slash semantics."""
+    value = path.strip()
+    if not value.startswith("gs://"):
+        raise ValueError("Move paths must begin with gs://")
+
+    bucket, separator, object_name = value[5:].partition("/")
+    if not bucket or not separator or not object_name:
+        raise ValueError("Move paths must include a bucket and object or prefix")
+
+    if source_kind == "prefix":
+        if not value.endswith("/"):
+            raise ValueError("Folder paths must end with /")
+        object_name = object_name.rstrip("/") + "/"
+    elif value.endswith("/"):
+        raise ValueError("A single-file path cannot end with /. Choose a folder option to move a folder.")
+
+    return bucket, object_name, f"gs://{bucket}/{object_name}"
+
+
+def destination_name_for_move(source_name: str, source_prefix: str, destination_prefix: str) -> str:
+    """Map a source object beneath a contents-only destination prefix."""
+    if not source_name.startswith(source_prefix):
+        raise ValueError(f"Object '{source_name}' is outside source prefix '{source_prefix}'")
+    relative_name = source_name[len(source_prefix):]
+    if not relative_name:
+        raise ValueError("Prefix marker objects cannot be moved as content")
+    return destination_prefix + relative_name
+
+
 def make_cloud_sync_name(job_id: str) -> str:
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d-%H%M%S')
     return f"cloud-sync-{timestamp}-{job_id}"
 
 
-def update_cloud_sync_job(job_id: str, status: str, output: str = None, error: str = None):
-    """Persist cloud sync background status into the shared jobs table."""
+def update_cloud_operation_job(
+    job_id: str,
+    status: Optional[str] = None,
+    output: str = None,
+    error: str = None,
+    phase: str = None,
+    total_files: int = None,
+    total_size_bytes: float = None,
+    files_uploaded: int = None,
+    bytes_uploaded: float = None,
+):
+    """Persist cloud operation progress into the shared jobs table."""
     from .. import database
 
     if database.SessionLocal is None:
@@ -243,11 +299,22 @@ def update_cloud_sync_job(job_id: str, status: str, output: str = None, error: s
         job = db.query(UploadJob).filter(UploadJob.job_id == job_id).first()
         if not job:
             return
-        job.status = status
+        if status is not None:
+            job.status = status
         if output is not None:
             job.upload_output = output
         if error is not None:
             job.error_message = error
+        if phase is not None:
+            job.filters = {**(job.filters or {}), "phase": phase}
+        if total_files is not None:
+            job.total_files = total_files
+        if total_size_bytes is not None:
+            job.total_size_bytes = total_size_bytes
+        if files_uploaded is not None:
+            job.files_uploaded = files_uploaded
+        if bytes_uploaded is not None:
+            job.bytes_uploaded = bytes_uploaded
         if status in ("completed", "failed", "cancelled"):
             job.completed_at = datetime.now(timezone.utc)
         db.commit()
@@ -255,16 +322,16 @@ def update_cloud_sync_job(job_id: str, status: str, output: str = None, error: s
         db.close()
 
 
-def is_cloud_sync_job(job: UploadJob) -> bool:
+def is_cloud_operation_job(job: UploadJob) -> bool:
     filters = job.filters or {}
-    return filters.get("job_type") == "cloud_sync" or filters.get("transfer_direction") == "cloud_to_cloud"
+    return filters.get("job_type") in {"cloud_sync", "cloud_move"} or filters.get("transfer_direction") == "cloud_to_cloud"
 
 
-def cloud_sync_job_to_transfer(job: UploadJob) -> dict:
+def cloud_operation_job_to_transfer(job: UploadJob) -> dict:
     filters = job.filters or {}
     destination = f"gs://{job.destination_bucket}"
     if job.destination_path:
-        destination += f"/{job.destination_path.strip('/')}"
+        destination += f"/{job.destination_path}"
 
     return {
         "job_id": job.job_id,
@@ -279,7 +346,48 @@ def cloud_sync_job_to_transfer(job: UploadJob) -> dict:
         "created_at": job.to_dict().get("created_at"),
         "completed_at": job.to_dict().get("completed_at"),
         "error": job.error_message,
+        "operation": filters.get("operation", "move" if filters.get("job_type") == "cloud_move" else "sync"),
+        "source_kind": filters.get("source_kind"),
+        "phase": filters.get("phase"),
+        "total_files": job.total_files or 0,
+        "total_size_bytes": job.total_size_bytes or 0,
+        "files_uploaded": job.files_uploaded or 0,
+        "bytes_uploaded": job.bytes_uploaded or 0,
     }
+
+
+@router.get("/bucket-metadata")
+async def get_bucket_metadata(path: str):
+    """Return advisory bucket metadata for Cloud Ops cost warnings."""
+    try:
+        value = path.strip()
+        if not value.startswith("gs://"):
+            raise HTTPException(status_code=400, detail="Path must begin with gs://")
+        bucket_name = value[5:].split("/", 1)[0]
+        if not bucket_name:
+            raise HTTPException(status_code=400, detail="Path must include a bucket")
+
+        def load_metadata():
+            bucket = get_storage_client().bucket(bucket_name)
+            bucket.reload()
+            properties = getattr(bucket, "_properties", {}) or {}
+            custom_placement = properties.get("customPlacementConfig") or properties.get("custom_placement_config") or {}
+            data_locations = custom_placement.get("dataLocations") or custom_placement.get("data_locations") or []
+            return {
+                "bucket_name": bucket_name,
+                "location": bucket.location,
+                "data_locations": data_locations,
+                "storage_class": bucket.storage_class,
+            }
+
+        return await asyncio.to_thread(load_metadata)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Bucket metadata unavailable. Check bucket access and existence.",
+        )
 
 
 def resolve_gcloud_executable() -> Optional[str]:
@@ -407,6 +515,214 @@ async def start_cloud_transfer(
     )
 
 
+@router.post("/move", response_model=CloudMoveResponse)
+async def start_cloud_move(
+    request: CloudMoveRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Start a generation-safe GCS object or folder move."""
+    # The worker only understands exact objects or contents-only prefixes; a whole-folder
+    # move is expressed by appending the source folder name to the destination.
+    worker_kind = "object" if request.source_kind == "object" else "prefix"
+    try:
+        source_bucket, source_name, source = parse_move_path(request.source_path, worker_kind)
+        dest_bucket, dest_name, dest = parse_move_path(request.dest_path, worker_kind)
+        if request.source_kind == "folder":
+            folder_name = source_name.rstrip("/").split("/")[-1]
+            dest_name = f"{dest_name}{folder_name}/"
+            dest = f"gs://{dest_bucket}/{dest_name}"
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if source_bucket == dest_bucket and source_name == dest_name:
+        raise HTTPException(status_code=400, detail="Source and destination must be different")
+    if worker_kind == "prefix" and source_bucket == dest_bucket and dest_name.startswith(source_name):
+        raise HTTPException(status_code=400, detail="Destination folder cannot be inside the source folder")
+
+    job_id = str(uuid.uuid4())[:8]
+    job = UploadJob(
+        job_id=job_id,
+        friendly_name=f"cloud-move-{datetime.now(timezone.utc).strftime('%Y-%m-%d-%H%M%S')}-{job_id}",
+        status="running",
+        source_path=source,
+        destination_bucket=dest_bucket,
+        destination_path=dest_name,
+        total_files=0,
+        total_size_bytes=0,
+        files_uploaded=0,
+        bytes_uploaded=0,
+        dry_run=request.dry_run,
+        recursive=worker_kind == "prefix",
+        threads=1,
+        split_by_folder=False,
+        upload_tool="gcs-sdk",
+        started_at=datetime.now(timezone.utc),
+        filters={
+            "job_type": "cloud_move",
+            "transfer_direction": "cloud_to_cloud",
+            "operation": "move",
+            "source_kind": request.source_kind,
+            "phase": "preflight",
+        },
+        no_clobber=True,
+    )
+    db.add(job)
+    db.commit()
+
+    cloud_transfer_jobs[job_id] = {
+        "status": "running",
+        "source_path": source,
+        "dest_path": dest,
+        "operation": "move",
+        "source_kind": request.source_kind,
+        "dry_run": request.dry_run,
+        "phase": "preflight",
+        "output": "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": None,
+        "error": None,
+    }
+    background_tasks.add_task(run_cloud_move, job_id, source, dest, worker_kind, request.dry_run)
+
+    return CloudMoveResponse(
+        job_id=job_id,
+        status="running",
+        message="Move preview started" if request.dry_run else "Cloud move started",
+        operation="move",
+    )
+
+
+async def run_cloud_move(job_id: str, source: str, destination: str, source_kind: str, dry_run: bool = False):
+    """Run a manifest-first copy, verify, and source-delete move."""
+    try:
+        await asyncio.to_thread(_run_cloud_move_sync, job_id, source, destination, source_kind, dry_run)
+    except Exception as exc:
+        error = redact_sensitive_text(str(exc))
+        job_data = cloud_transfer_jobs.setdefault(job_id, {})
+        job_data.update({
+            "status": "failed",
+            "error": error,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        update_cloud_operation_job(job_id, status="failed", error=error)
+
+
+def _run_cloud_move_sync(job_id: str, source: str, destination: str, source_kind: str, dry_run: bool = False):
+    client = get_storage_client()
+    source_bucket_name, source_name, _ = parse_move_path(source, source_kind)
+    dest_bucket_name, dest_name, _ = parse_move_path(destination, source_kind)
+    source_bucket = client.bucket(source_bucket_name)
+    dest_bucket = client.bucket(dest_bucket_name)
+
+    if source_kind == "object":
+        source_blobs = [source_bucket.blob(source_name)]
+        source_blobs[0].reload()
+    else:
+        source_blobs = [blob for blob in source_bucket.list_blobs(prefix=source_name) if blob.name != source_name]
+    if not source_blobs:
+        raise RuntimeError("No source objects found")
+
+    manifest = []
+    for blob in source_blobs:
+        if blob.generation is None or blob.size is None or blob.crc32c is None:
+            blob.reload()
+        target_name = dest_name if source_kind == "object" else destination_name_for_move(blob.name, source_name, dest_name)
+        if source_bucket_name == dest_bucket_name and blob.name == target_name:
+            raise RuntimeError(f"Source and destination resolve to the same object: {blob.name}")
+        manifest.append({
+            "blob": blob,
+            "destination_name": target_name,
+            "generation": blob.generation,
+            "size": int(blob.size or 0),
+            "crc32c": blob.crc32c,
+        })
+
+    total_size = sum(item["size"] for item in manifest)
+    _update_move_progress(job_id, "preflight", total_files=len(manifest), total_size_bytes=total_size)
+    conflicts = [item["destination_name"] for item in manifest if dest_bucket.blob(item["destination_name"]).exists()]
+    if conflicts:
+        preview = ", ".join(conflicts[:3])
+        suffix = "" if len(conflicts) <= 3 else f" and {len(conflicts) - 3} more"
+        raise RuntimeError(f"Destination already contains {len(conflicts)} object(s): {preview}{suffix}")
+
+    if dry_run:
+        sample = "\n".join(
+            f"{item['blob'].name} -> {item['destination_name']}" for item in manifest[:20]
+        )
+        remaining = "" if len(manifest) <= 20 else f"\n... and {len(manifest) - 20} more"
+        output = (
+            f"DRY RUN: {len(manifest)} object(s), {total_size} bytes would move.\n"
+            f"No destination conflicts were found. Nothing was copied or deleted.\n\n"
+            f"{sample}{remaining}"
+        )
+        cloud_transfer_jobs[job_id].update({
+            "status": "completed",
+            "phase": "completed",
+            "output": output,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        update_cloud_operation_job(job_id, status="completed", output=output, phase="completed")
+        return
+
+    created = []
+    try:
+        _update_move_progress(job_id, "copying")
+        for item in manifest:
+            copied = source_bucket.copy_blob(
+                item["blob"],
+                dest_bucket,
+                new_name=item["destination_name"],
+                if_generation_match=0,
+                if_source_generation_match=item["generation"],
+            )
+            created.append(copied)
+            copied.reload()
+
+        _update_move_progress(job_id, "verifying")
+        verified_bytes = 0
+        for index, (item, copied) in enumerate(zip(manifest, created), start=1):
+            if int(copied.size or 0) != item["size"] or copied.crc32c != item["crc32c"]:
+                raise RuntimeError(f"Copy verification failed for {item['destination_name']}")
+            verified_bytes += item["size"]
+            _update_move_progress(
+                job_id,
+                "verifying",
+                files_uploaded=index,
+                bytes_uploaded=verified_bytes,
+            )
+    except Exception as exc:
+        rollback_errors = []
+        for copied in created:
+            try:
+                if copied.generation is None:
+                    raise RuntimeError("Destination generation unavailable")
+                copied.delete(if_generation_match=copied.generation)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"{copied.name}: {rollback_exc}")
+        if rollback_errors:
+            raise RuntimeError(f"{exc}; rollback failed for {'; '.join(rollback_errors)}") from exc
+        raise
+
+    _update_move_progress(job_id, "deleting")
+    for item in manifest:
+        item["blob"].delete(if_generation_match=item["generation"])
+
+    output = f"Moved {len(manifest)} object(s), {total_size} bytes"
+    cloud_transfer_jobs[job_id].update({
+        "status": "completed",
+        "phase": "completed",
+        "output": output,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    update_cloud_operation_job(job_id, status="completed", output=output, phase="completed")
+
+
+def _update_move_progress(job_id: str, phase: str, **progress):
+    cloud_transfer_jobs.setdefault(job_id, {}).update({"phase": phase, **progress})
+    update_cloud_operation_job(job_id, phase=phase, **progress)
+
+
 async def run_cloud_transfer(job_id: str, cmd: list):
     """Execute the cloud transfer command."""
     try:
@@ -454,12 +770,12 @@ async def run_cloud_transfer(job_id: str, cmd: list):
         if returncode == 0:
             cloud_transfer_jobs[job_id]["status"] = "completed"
             cloud_transfer_jobs[job_id]["output"] = output
-            update_cloud_sync_job(job_id, "completed", output=output)
+            update_cloud_operation_job(job_id, "completed", output=output)
         else:
             cloud_transfer_jobs[job_id]["status"] = "failed"
             cloud_transfer_jobs[job_id]["output"] = output
             cloud_transfer_jobs[job_id]["error"] = redact_sensitive_text(stderr.strip() or "Unknown error")
-            update_cloud_sync_job(
+            update_cloud_operation_job(
                 job_id,
                 "failed",
                 output=output,
@@ -476,13 +792,13 @@ async def run_cloud_transfer(job_id: str, cmd: list):
         cloud_transfer_jobs[job_id]["status"] = "failed"
         cloud_transfer_jobs[job_id]["error"] = error
         cloud_transfer_jobs[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
-        update_cloud_sync_job(job_id, "failed", error=error)
+        update_cloud_operation_job(job_id, "failed", error=error)
     except Exception as e:
         error = redact_sensitive_text(str(e))
         cloud_transfer_jobs[job_id]["status"] = "failed"
         cloud_transfer_jobs[job_id]["error"] = error
         cloud_transfer_jobs[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
-        update_cloud_sync_job(job_id, "failed", error=error)
+        update_cloud_operation_job(job_id, "failed", error=error)
 
 
 @router.get("/transfer/{job_id}")
@@ -494,8 +810,8 @@ async def get_transfer_status(job_id: str, db: Session = Depends(get_db)):
         return job
 
     persisted_job = db.query(UploadJob).filter(UploadJob.job_id == job_id).first()
-    if persisted_job and is_cloud_sync_job(persisted_job):
-        return cloud_sync_job_to_transfer(persisted_job)
+    if persisted_job and is_cloud_operation_job(persisted_job):
+        return cloud_operation_job_to_transfer(persisted_job)
 
     raise HTTPException(status_code=404, detail="Transfer job not found")
 
@@ -508,9 +824,9 @@ async def list_transfers(db: Session = Depends(get_db)):
     seen_job_ids = set()
 
     for persisted_job in persisted_jobs:
-        if persisted_job.cleared or not is_cloud_sync_job(persisted_job):
+        if persisted_job.cleared or not is_cloud_operation_job(persisted_job):
             continue
-        transfer = cloud_sync_job_to_transfer(persisted_job)
+        transfer = cloud_operation_job_to_transfer(persisted_job)
         if persisted_job.job_id in cloud_transfer_jobs:
             transfer.update(cloud_transfer_jobs[persisted_job.job_id])
             transfer["job_id"] = persisted_job.job_id
@@ -537,7 +853,7 @@ async def clear_completed_transfers(db: Session = Depends(get_db)):
     ).all()
 
     for job in jobs:
-        if not is_cloud_sync_job(job):
+        if not is_cloud_operation_job(job):
             continue
         job.cleared = True
         cleared += 1

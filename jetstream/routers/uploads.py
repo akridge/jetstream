@@ -336,6 +336,8 @@ async def delete_upload(job_id: str, db: Session = Depends(get_db)):
     job = db.query(UploadJob).filter(UploadJob.job_id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if (job.filters or {}).get("transfer_direction") == "cloud_to_cloud":
+        raise HTTPException(status_code=400, detail="Cloud operations must be managed from Cloud Ops")
     
     # If job is running or queued, cancel it first
     if job.status in ["running", "queued", "pending"]:
@@ -355,6 +357,8 @@ async def cancel_upload(job_id: str, db: Session = Depends(get_db)):
     job = db.query(UploadJob).filter(UploadJob.job_id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if (job.filters or {}).get("transfer_direction") == "cloud_to_cloud":
+        raise HTTPException(status_code=400, detail="Cloud operations cannot be cancelled from Uploads")
     
     if job.status not in ["running", "queued", "pending", "scheduled"]:
         raise HTTPException(status_code=400, detail=f"Cannot cancel job with status: {job.status}")
@@ -384,6 +388,8 @@ async def retry_upload(
     job = db.query(UploadJob).filter(UploadJob.job_id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if (job.filters or {}).get("transfer_direction") == "cloud_to_cloud":
+        raise HTTPException(status_code=400, detail="Cloud operations cannot be retried as uploads")
     
     if job.status not in ["failed", "cancelled", "completed"]:
         raise HTTPException(status_code=400, detail=f"Cannot retry job with status: {job.status}")

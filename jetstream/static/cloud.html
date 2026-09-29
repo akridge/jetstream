@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cloud Sync - NOAA JetStream</title>
+    <title>Cloud Ops - NOAA JetStream</title>
     <link rel="stylesheet" href="/static/css/styles.css">
 </head>
 <body>
@@ -21,7 +21,7 @@
         <button class="nav-tab" onclick="window.location.href='/'">🏠 Home</button>
         <button class="nav-tab" onclick="window.location.href='/static/uploads.html'">📤 Uploads</button>
         <button class="nav-tab" onclick="window.location.href='/static/gdrive.html'">🗂️ Drive Upload</button>
-        <button class="nav-tab active" onclick="window.location.href='/static/cloud.html'">☁️ Cloud Sync</button>
+        <button class="nav-tab active" onclick="window.location.href='/static/cloud.html'">☁️ Cloud Ops</button>
         <button class="nav-tab" onclick="window.location.href='/static/cloud-audit.html'">🧹 Cloud Audit</button>
         <button class="nav-tab" onclick="window.location.href='/static/jobs.html'">📋 Jobs</button>
         <button class="nav-tab" onclick="window.location.href='/static/analytics.html'">📊 Analytics</button>
@@ -31,12 +31,12 @@
     <div class="container">
         <div class="stats-grid" style="margin-top: 20px;">
             <div class="stat-card">
-                <h3>Total Transfers</h3>
+                <h3>Total Operations</h3>
                 <div class="value" id="total-transfers">0</div>
                 <div class="label">All time</div>
             </div>
             <div class="stat-card">
-                <h3>Active Transfers</h3>
+                <h3>Active Operations</h3>
                 <div class="value" id="active-transfers">0</div>
                 <div class="label">Running now</div>
             </div>
@@ -54,46 +54,70 @@
         
         <div class="main-content">
             <div class="panel">
-                <h2>Create Cloud Sync Job</h2>
-                <p style="color: #64748b; margin-bottom: 20px;">
+                <h2>Create Cloud Operation</h2>
+                <p id="operation-description" style="color: #64748b; margin-bottom: 20px;">
                     Sync data between Google Cloud Storage buckets using gcloud storage rsync.
                 </p>
+
+                <div class="dc-toggle" aria-label="Cloud operation mode">
+                    <button type="button" id="sync-mode-button" class="active" onclick="setCloudOperationMode('sync')">Sync</button>
+                    <button type="button" id="move-mode-button" onclick="setCloudOperationMode('move')">Move</button>
+                </div>
                 
                 <form class="upload-form" id="cloud-transfer-form">
                     <div class="form-group">
-                        <label for="source-bucket">Source Bucket Path</label>
-                        <input type="text" id="source-bucket" placeholder="nmfs_odp_pifsc/path/to/data" oninput="updateCloudPathPreview()" required>
+                        <label for="source-bucket" id="source-path-label">Source Bucket Path</label>
+                        <input type="text" id="source-bucket" placeholder="gs://nmfs_odp_pifsc/path/to/data" oninput="updateCloudPathPreview()" required>
                         <small style="color: #64748b; display: block; margin-top: 4px;">
                             Quick fill:
-                            <a href="#" onclick="document.getElementById('source-bucket').value='nmfs_odp_pifsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">PIFSC</a> |
-                            <a href="#" onclick="document.getElementById('source-bucket').value='nmfs_odp_afsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">AFSC</a> |
-                            <a href="#" onclick="document.getElementById('source-bucket').value='nmfs_odp_swfsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">SWFSC</a> |
-                            <a href="#" onclick="document.getElementById('source-bucket').value='nmfs_odp_sefsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">SEFSC</a> |
-                            <a href="#" onclick="document.getElementById('source-bucket').value='nmfs_odp_nefsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">NEFSC</a> |
-                            <a href="#" onclick="document.getElementById('source-bucket').value='nmfs_odp_nwfsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">NWFSC</a>
+                            <a href="#" onclick="document.getElementById('source-bucket').value='gs://nmfs_odp_pifsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">PIFSC</a> |
+                            <a href="#" onclick="document.getElementById('source-bucket').value='gs://nmfs_odp_afsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">AFSC</a> |
+                            <a href="#" onclick="document.getElementById('source-bucket').value='gs://nmfs_odp_swfsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">SWFSC</a> |
+                            <a href="#" onclick="document.getElementById('source-bucket').value='gs://nmfs_odp_sefsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">SEFSC</a> |
+                            <a href="#" onclick="document.getElementById('source-bucket').value='gs://nmfs_odp_nefsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">NEFSC</a> |
+                            <a href="#" onclick="document.getElementById('source-bucket').value='gs://nmfs_odp_nwfsc/'; updateCloudPathPreview(); document.getElementById('source-bucket').focus(); return false;" style="color: var(--primary);">NWFSC</a>
                         </small>
                         <div id="source-path-preview" style="display:none; margin-top:6px; padding:8px 12px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px; font-family:monospace; font-size:0.9em; color:#166534;">
                             <strong>Source:</strong> <span id="source-path-preview-text"></span>
                         </div>
+                        <div id="source-bucket-metadata" class="cloud-bucket-metadata" aria-live="polite"></div>
                     </div>
 
                     <div class="form-group">
-                        <label for="dest-bucket">Destination Bucket Path</label>
-                        <input type="text" id="dest-bucket" placeholder="nmfs_odp_afsc/destination/path" oninput="updateCloudPathPreview()" required>
+                        <label for="dest-bucket" id="dest-path-label">Destination Bucket Path</label>
+                        <input type="text" id="dest-bucket" placeholder="gs://nmfs_odp_afsc/destination/path" oninput="updateCloudPathPreview()" required>
                         <small style="color: #64748b; display: block; margin-top: 4px;">
                             Quick fill:
-                            <a href="#" onclick="document.getElementById('dest-bucket').value='nmfs_odp_pifsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">PIFSC</a> |
-                            <a href="#" onclick="document.getElementById('dest-bucket').value='nmfs_odp_afsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">AFSC</a> |
-                            <a href="#" onclick="document.getElementById('dest-bucket').value='nmfs_odp_swfsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">SWFSC</a> |
-                            <a href="#" onclick="document.getElementById('dest-bucket').value='nmfs_odp_sefsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">SEFSC</a> |
-                            <a href="#" onclick="document.getElementById('dest-bucket').value='nmfs_odp_nefsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">NEFSC</a> |
-                            <a href="#" onclick="document.getElementById('dest-bucket').value='nmfs_odp_nwfsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">NWFSC</a>
+                            <a href="#" onclick="document.getElementById('dest-bucket').value='gs://nmfs_odp_pifsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">PIFSC</a> |
+                            <a href="#" onclick="document.getElementById('dest-bucket').value='gs://nmfs_odp_afsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">AFSC</a> |
+                            <a href="#" onclick="document.getElementById('dest-bucket').value='gs://nmfs_odp_swfsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">SWFSC</a> |
+                            <a href="#" onclick="document.getElementById('dest-bucket').value='gs://nmfs_odp_sefsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">SEFSC</a> |
+                            <a href="#" onclick="document.getElementById('dest-bucket').value='gs://nmfs_odp_nefsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">NEFSC</a> |
+                            <a href="#" onclick="document.getElementById('dest-bucket').value='gs://nmfs_odp_nwfsc/'; updateCloudPathPreview(); document.getElementById('dest-bucket').focus(); return false;" style="color: var(--primary);">NWFSC</a>
                         </small>
                         <div id="dest-path-preview" style="display:none; margin-top:6px; padding:8px 12px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; font-family:monospace; font-size:0.9em; color:#1e40af;">
                             <strong>Destination:</strong> <span id="dest-path-preview-text"></span>
                         </div>
+                        <div id="dest-bucket-metadata" class="cloud-bucket-metadata" aria-live="polite"></div>
                     </div>
-                    
+
+                    <div id="move-options" style="display: none;">
+                        <label style="display: block; color: #4a5568; font-weight: 500; margin-bottom: 8px; font-size: 0.9em;">What are you moving?</label>
+                        <div class="dc-toggle dc-toggle-wrap" aria-label="Move source type">
+                            <button type="button" id="object-kind-button" class="active" onclick="setMoveSourceKind('object')">One file</button>
+                            <button type="button" id="folder-kind-button" onclick="setMoveSourceKind('folder')">A whole folder</button>
+                            <button type="button" id="contents-kind-button" onclick="setMoveSourceKind('folder_contents')">Only files inside a folder</button>
+                        </div>
+                        <p id="move-kind-hint" class="form-hint">Moves a single file. The destination path is its final name.</p>
+                        <div id="move-mapping-preview" style="display:none; margin-top:10px; padding:10px 12px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; font-size:0.85em; color:#334155;">
+                            <strong>Result preview</strong>
+                            <div id="move-mapping-rows" style="font-family:monospace; margin-top:6px; word-break:break-all;"></div>
+                            <div id="move-mapping-note" style="margin-top:6px;"></div>
+                        </div>
+                        <div id="move-cost-warning" class="dc-alert info" style="display: none; margin-top: 12px;" aria-live="polite"></div>
+                    </div>
+
+                    <div id="sync-options">
                     <div class="checkbox-group">
                         <input type="checkbox" id="recursive" checked>
                         <label for="recursive">Recursive (include subfolders)</label>
@@ -141,15 +165,19 @@
                             💡 <strong>Tip:</strong> Always test with dry run first to preview what will be transferred.
                         </p>
                     </div>
-                    
-                    <button type="submit" class="btn btn-primary" style="margin-top: 20px;">🚀 Start Cloud Sync</button>
+                    </div>
+
+                    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+                        <button type="submit" id="cloud-operation-submit" class="btn btn-primary" style="margin-top: 20px;">Start Cloud Sync</button>
+                        <button type="button" id="move-dry-run-button" class="btn btn-secondary" style="margin-top: 20px; display:none;" onclick="startMoveDryRun()">Dry Run (preview only)</button>
+                    </div>
                 </form>
             </div>
             
             <div class="panel">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <h2>Recent Transfers <span id="transfers-last-updated" class="last-updated"></span></h2>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="clearCompletedTransfers()" title="Clear completed transfers">Clear Completed</button>
+                    <h2>Recent Cloud Operations <span id="transfers-last-updated" class="last-updated"></span></h2>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="clearCompletedTransfers()" title="Clear completed operations">Clear Completed</button>
                 </div>
                 <div class="jobs-list" id="cloud-jobs-list">
                     <p style="text-align: center; color: #999; padding: 50px 0;">Loading transfers...</p>

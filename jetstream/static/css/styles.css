@@ -284,6 +284,12 @@ body {
     gap: 10px;
 }
 
+.cloud-bucket-metadata {
+    min-height: 18px;
+    color: var(--text-secondary);
+    font-size: 0.8em;
+}
+
 /* Buttons */
 .btn {
     padding: 11px 24px;
@@ -1313,6 +1319,10 @@ body.dark-mode .cloud-results-table tr:hover {
 .dc-toggle button.active {
     background: var(--primary);
     color: #fff;
+}
+
+.dc-toggle-wrap {
+    flex-wrap: wrap;
 }
 
 .chip-row {
