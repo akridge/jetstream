@@ -11,7 +11,8 @@
     "engine": "python scripts/build_engine.py",
     "icons": "tauri icon ../jetstream/static/icon.png",
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "tauri": "tauri"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "7.3.1",
