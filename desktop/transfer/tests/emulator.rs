@@ -446,3 +446,36 @@ mod files {
         assert_eq!(names(&env, "").await, ["archive/report.pdf"]);
     }
 }
+
+#[tokio::test]
+async fn compare_shows_what_is_synced_local_only_cloud_only_and_changed() {
+    let Some(env) = Env::new().await else { return };
+    env.write("photos/a.jpg", &big(1000, 1));
+    env.write("photos/b.jpg", &big(2000, 2));
+    env.write("docs/c.pdf", &big(300, 3));
+    env.write("top.txt", &big(10, 4));
+    env.run(env.options()).await;
+
+    env.write("photos/new.jpg", &big(500, 5)); // not uploaded yet
+    env.write("docs/c.pdf", &big(301, 6)); // changed locally
+    env.write("skip.tmp", &big(5, 7)); // filtered out
+    env.delete("data/top.txt").await; // removed from the cloud
+    env.client.upload_multipart("bucket", "data/cloud_only.csv", b"x,y".to_vec(), crc32c::crc32c(b"x,y"), false).await.unwrap();
+    env.client.upload_multipart("bucket", "data/empty_folder/", Vec::new(), 0, false).await.unwrap();
+
+    let excludes = jetstream_transfer::compare::exclude_regexes(&["*.tmp".into()], &[]).unwrap();
+    let report = jetstream_transfer::compare::compare(&env.client, &env.src(), "gs://bucket/data", &excludes, true, Some(&env.manifest))
+        .await
+        .unwrap();
+    let paths = |g: &jetstream_transfer::compare::Group| g.list.iter().map(|d| d.path.clone()).collect::<Vec<_>>();
+    assert_eq!(paths(&report.same), ["photos/b.jpg", "photos/a.jpg"], "largest first");
+    assert_eq!(report.verified, 2, "both confirmed by the manifest's checksums");
+    assert_eq!(paths(&report.different), ["docs/c.pdf"]);
+    assert_eq!(paths(&report.local_only), ["photos/new.jpg", "top.txt"]);
+    assert_eq!(paths(&report.cloud_only), ["cloud_only.csv"], "folder placeholders aren't files");
+    assert_eq!((report.local_files, report.excluded, report.cloud_files), (5, 1, 4));
+    let photos = report.folders.iter().find(|f| f.folder == "photos").unwrap();
+    assert_eq!((photos.same, photos.local_only), (2, 1));
+    let top = report.folders.iter().find(|f| f.folder.is_empty()).unwrap();
+    assert_eq!((top.local_only, top.cloud_only), (1, 1));
+}

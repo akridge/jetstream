@@ -5,6 +5,7 @@
 pub mod audit;
 pub mod auth;
 pub mod browse;
+pub mod compare;
 pub mod fileops;
 pub mod gcs;
 pub mod manifest;

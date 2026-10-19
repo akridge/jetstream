@@ -61,7 +61,7 @@
         {#if group.title}<div class="group-title">{group.title}</div>{/if}
         {#each group.items as item (item.id)}
           {@const Icon = item.icon}
-          <button class="nav-item" class:active={app.view === item.id} onclick={() => (app.view = item.id)}>
+          <button class="nav-item" class:active={app.view === item.id || (item.id === 'folders' && app.view === 'compare')} onclick={() => (app.view = item.id)}>
             <Icon size={18} />
             <span>{item.label}</span>
             {#if item.id === 'activity' && app.activeCount}

@@ -95,6 +95,21 @@ enum Command {
         #[arg(long, default_value_t = 20_000)]
         max_findings: usize,
     },
+    /// Compare a local folder with its cloud copy: in both, only local, only in the cloud, changed.
+    Compare {
+        folder: PathBuf,
+        destination: String,
+        /// Glob patterns skipped by the sync (e.g. "*.tmp"); repeatable.
+        #[arg(long = "exclude")]
+        excludes: Vec<String>,
+        /// Folder names skipped anywhere; repeatable.
+        #[arg(long = "exclude-folder")]
+        exclude_folders: Vec<String>,
+        #[arg(long)]
+        no_recursive: bool,
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
     /// Bucket settings (soft delete, hierarchical namespace, Autoclass) and your permissions.
     Bucket { bucket: String },
     /// Copy objects or folders (gs://b/folder/ ends with "/") into a folder, server-side.
@@ -222,6 +237,14 @@ async fn run() -> Result<i32> {
         Command::Du { path, limit } => {
             let (bucket, prefix) = parse_destination(&path)?;
             return print_json(&browse::folder_totals(&cloud_client()?, &bucket, &prefix, limit).await?);
+        }
+        Command::Compare { folder, destination, excludes, exclude_folders, no_recursive, manifest } => {
+            let regexes = jetstream_transfer::compare::exclude_regexes(&excludes, &exclude_folders)?;
+            let path = manifest.unwrap_or_else(|| default_data_dir().join("transfer-manifest.db"));
+            let manifest = if path.exists() { Manifest::open(&path).ok() } else { None };
+            let report = jetstream_transfer::compare::compare(&cloud_client()?, &folder, &destination, &regexes, !no_recursive, manifest.as_ref())
+                .await?;
+            return print_json(&report);
         }
         Command::Bucket { bucket } => {
             let bucket = bucket.trim_start_matches("gs://").trim_end_matches('/');

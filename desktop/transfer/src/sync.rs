@@ -143,11 +143,11 @@ pub enum Event {
 pub type Emit = Arc<dyn Fn(Event) + Send + Sync>;
 
 #[derive(Debug, Clone)]
-struct LocalFile {
-    abs: PathBuf,
-    rel: String,
-    size: u64,
-    mtime_ns: i64,
+pub(crate) struct LocalFile {
+    pub(crate) abs: PathBuf,
+    pub(crate) rel: String,
+    pub(crate) size: u64,
+    pub(crate) mtime_ns: i64,
 }
 
 struct Candidate {
@@ -180,7 +180,7 @@ struct Ctx {
     files_done: AtomicU64,
 }
 
-fn scan(source: &Path, excludes: &[Regex], recursive: bool) -> Result<(Vec<LocalFile>, u64, u64)> {
+pub(crate) fn scan(source: &Path, excludes: &[Regex], recursive: bool) -> Result<(Vec<LocalFile>, u64, u64)> {
     if !source.is_dir() {
         bail!("{} is not a folder", source.display());
     }

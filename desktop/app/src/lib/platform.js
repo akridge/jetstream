@@ -228,3 +228,9 @@ export async function newFolder(bucket, parent, name) {
   if (!isDesktop) throw desktopOnly();
   return invoke('new_folder', { bucket, parent, name });
 }
+
+/** Compare a local folder with gs://destination: same / different / local_only / cloud_only. */
+export async function compareFolder(path, destination, { excludePatterns = [], excludeFolders = [], recursive = true } = {}) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('compare_folder', { path, destination, excludePatterns, excludeFolders, recursive });
+}

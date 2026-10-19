@@ -18,12 +18,12 @@ function loadPrefs() {
 export const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 export const ACTIVE = new Set(['pending', 'queued', 'running', 'scheduled']);
 
-function lines(text) {
+export function lines(text) {
   const items = (text || '').split('\n').map((s) => s.trim()).filter(Boolean);
   return items.length ? items : null;
 }
 
-function commaList(text) {
+export function commaList(text) {
   const items = (text || '').split(',').map((s) => s.trim()).filter(Boolean);
   return items.length ? items : null;
 }
@@ -45,6 +45,8 @@ class AppState {
   scanRequest = $state(null);
   /** Add/edit folder dialog: { preset, previousName } or null. */
   folderDialog = $state(null);
+  /** Synced folder shown on the Compare screen. */
+  compareTarget = $state(null);
   /** Last place browsed in Cloud storage, kept while switching views. */
   cloudLocation = null;
 
@@ -263,6 +265,20 @@ class AppState {
   addFolder(path = '') {
     this.view = 'folders';
     this.folderDialog = { preset: this.newPresetFor(path), previousName: null };
+  }
+
+  compareFolder(preset) {
+    this.compareTarget = preset;
+    this.view = 'compare';
+  }
+
+  /** The synced folder whose cloud copy contains gs://bucket/prefix, if any. */
+  presetForCloudPath(bucket, prefix) {
+    const here = normalizeDestination(`${bucket}/${prefix}`);
+    return this.presets.find((p) => {
+      const dest = normalizeDestination(p.destination);
+      return here === dest || here.startsWith(`${dest}/`);
+    }) || null;
   }
 
   editFolder(preset) {

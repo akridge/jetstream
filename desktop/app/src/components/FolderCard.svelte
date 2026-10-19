@@ -7,6 +7,7 @@
   import Square from '@lucide/svelte/icons/square';
   import CloudUpload from '@lucide/svelte/icons/cloud-upload';
   import Clock from '@lucide/svelte/icons/clock';
+  import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import StatusIcon from './StatusIcon.svelte';
   import ProgressBar from './ProgressBar.svelte';
   import { app, ACTIVE, TERMINAL } from '../lib/state.svelte.js';
@@ -49,6 +50,13 @@
     busy = false;
   }
 
+  function openCloud() {
+    menuOpen = false;
+    const [bucket, ...rest] = normalizeDestination(preset.destination).split('/');
+    app.cloudLocation = { bucket, prefix: rest.length ? `${rest.join('/')}/` : '' };
+    app.view = 'cloud';
+  }
+
   async function cancel() {
     try {
       await api.cancelJob(current.job_id);
@@ -80,6 +88,8 @@
       {#if menuOpen}
         <div class="menu card" role="menu">
           <button role="menuitem" onclick={() => app.editFolder(preset)}>Edit…</button>
+          <button role="menuitem" onclick={() => app.compareFolder(preset)}>Compare with cloud</button>
+          <button role="menuitem" onclick={() => openCloud()}>Open in Cloud storage</button>
           {#if isDesktop}
             <button role="menuitem" onclick={() => revealPath(preset.source_path)}>Show folder</button>
           {/if}
@@ -167,6 +177,7 @@
     {:else}
       <button class="btn primary sm" disabled={busy} onclick={() => run(false)}><Play size={14} /> Sync now</button>
       <button class="btn sm" disabled={busy} onclick={() => run(true)}><Eye size={15} /> Preview</button>
+      <button class="btn ghost sm" title="What's on this computer vs in the cloud" onclick={() => app.compareFolder(preset)}><GitCompare size={14} /> Compare</button>
       {#if lastFinished?.status === 'failed'}
         <button class="btn ghost sm" onclick={() => app.openJob(lastFinished.job_id)}>View error</button>
       {/if}

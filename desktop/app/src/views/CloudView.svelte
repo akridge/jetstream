@@ -22,6 +22,8 @@
   import Cloud from '@lucide/svelte/icons/cloud';
   import Lock from '@lucide/svelte/icons/lock';
   import X from '@lucide/svelte/icons/x';
+  import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
+  import Laptop from '@lucide/svelte/icons/laptop';
   import CloudOpDialog from '../components/CloudOpDialog.svelte';
   import FileOpDialog from '../components/FileOpDialog.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
@@ -82,6 +84,7 @@
   let selectedEntries = $derived(entries.filter((e) => selected.has(e.path)));
   let single = $derived(selectedEntries.length === 1 ? selectedEntries[0] : null);
   let keepsDeleted = $derived(!access?.known || access.soft_delete_seconds > 0);
+  let syncedFrom = $derived(bucket ? app.presetForCloudPath(bucket, prefix) : null);
   let readOnly = $derived(!!access?.permissions && !can('storage.objects.create') && !can('storage.objects.delete'));
 
   /** Permission check; unknown permissions count as allowed (the call itself will say no). */
@@ -515,6 +518,16 @@
         </div>
       </div>
 
+      {#if syncedFrom && !trash}
+        <div class="synced">
+          <Laptop size={15} />
+          <span class="truncate">
+            Synced from <strong>{syncedFrom.name}</strong> on this computer · <span class="mono" title={syncedFrom.source_path}>{syncedFrom.source_path}</span>
+          </span>
+          <button class="btn ghost sm" onclick={() => app.compareFolder(syncedFrom)}><GitCompare size={14} /> Compare with this computer</button>
+        </div>
+      {/if}
+
       {#if counting || totals}
         <div class="totals">
           {#if counting}
@@ -800,6 +813,20 @@
   }
   .danger {
     color: var(--danger);
+  }
+  .synced {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px 6px 14px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--text-2);
+  }
+  .synced .truncate {
+    flex: 1;
+    min-width: 0;
   }
   .totals {
     display: flex;

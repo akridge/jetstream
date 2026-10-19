@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 use jetstream_transfer::audit::{self, AuditProgress, AuditReport};
 use jetstream_transfer::auth::TokenProvider;
 use jetstream_transfer::browse::{self, FolderTotals, Listing};
+use jetstream_transfer::compare::{self, CompareReport};
+use jetstream_transfer::manifest::{default_data_dir, Manifest};
 use jetstream_transfer::fileops::{self, BucketAccess, DeletedPage, Item, OpProgress, OpResult, Plan, PlanSummary, Undo};
 use jetstream_transfer::gcs::GcsClient;
 use jetstream_transfer::scan::{self, ScanOptions, ScanProgress, ScanReport};
@@ -456,6 +458,27 @@ async fn new_folder(core: tauri::State<'_, Core>, bucket: String, parent: String
     fileops::new_folder(&client, &source, &parent, &name).await.map_err(|e| format!("{e:#}"))
 }
 
+/// Compare a local folder with its cloud copy (read-only). Uses the upload manifest, when
+/// there is one, to confirm matching files by checksum.
+#[tauri::command]
+async fn compare_folder(
+    core: tauri::State<'_, Core>,
+    path: String,
+    destination: String,
+    exclude_patterns: Vec<String>,
+    exclude_folders: Vec<String>,
+    recursive: bool,
+) -> Result<CompareReport, String> {
+    let client = core.client()?;
+    let excludes = compare::exclude_regexes(&exclude_patterns, &exclude_folders).map_err(|e| format!("{e:#}"))?;
+    let data_dir = portable_data_dir().unwrap_or_else(default_data_dir);
+    let manifest_path = data_dir.join("transfer-manifest.db");
+    let manifest = if manifest_path.exists() { Manifest::open(&manifest_path).ok() } else { None };
+    compare::compare(&client, std::path::Path::new(&path), &destination, &excludes, recursive, manifest.as_ref())
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// Portable mode: a "JetStreamData" folder next to the program keeps the job history,
 /// logs and upload manifest with the program (e.g. on a USB drive) instead of the user profile.
 fn portable_data_dir() -> Option<std::path::PathBuf> {
@@ -612,7 +635,8 @@ fn main() {
             cancel_cloud_op,
             restore_objects,
             list_deleted,
-            new_folder
+            new_folder,
+            compare_folder
         ])
         .setup(|app| {
             build_tray(app.handle())?;
