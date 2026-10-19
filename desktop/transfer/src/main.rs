@@ -1,0 +1,141 @@
+//! `jetstream-transfer sync <folder> gs://bucket/prefix` — prints one JSON event per line.
+//!
+//! Exit codes: 0 = everything synced, 2 = finished with failed files, 3 = cancelled, 1 = error.
+
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use regex::Regex;
+
+use jetstream_transfer::auth::TokenProvider;
+use jetstream_transfer::gcs::GcsClient;
+use jetstream_transfer::manifest::{default_data_dir, Manifest};
+use jetstream_transfer::sync::{sync, Emit, SyncOptions};
+
+#[derive(Parser)]
+#[command(version, about = "JetStream upload engine for Google Cloud Storage")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Upload new and changed files from a local folder to gs://bucket/prefix.
+    Sync {
+        /// Local folder to upload.
+        source: PathBuf,
+        /// Destination, e.g. gs://my-bucket/surveys/2026
+        destination: String,
+        /// Files uploaded at the same time.
+        #[arg(long, default_value_t = 32)]
+        concurrency: usize,
+        /// Large files (resumable uploads) at the same time; each holds one chunk in memory.
+        #[arg(long, default_value_t = 4)]
+        large_concurrency: usize,
+        /// Never overwrite objects that already exist in the bucket.
+        #[arg(long)]
+        no_clobber: bool,
+        /// Report what would be uploaded without uploading.
+        #[arg(long)]
+        dry_run: bool,
+        /// Re-check every file against the bucket instead of trusting the local manifest.
+        #[arg(long)]
+        verify: bool,
+        /// Skip relative paths matching this regex (repeatable), e.g. '.*\.tmp$'.
+        #[arg(long = "exclude")]
+        excludes: Vec<String>,
+        /// Files larger than this many MiB use resumable uploads.
+        #[arg(long, default_value_t = 8)]
+        resumable_threshold_mib: u64,
+        /// Resumable chunk size in MiB (rounded to 256 KiB).
+        #[arg(long, default_value_t = 16)]
+        chunk_mib: usize,
+        /// Manifest database (default: <JetStream data folder>/transfer-manifest.db).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
+}
+
+fn main() {
+    let code = match run() {
+        Ok(code) => code,
+        Err(err) => {
+            let event = serde_json::json!({ "event": "error", "error": format!("{err:#}") });
+            println!("{event}");
+            1
+        }
+    };
+    std::process::exit(code);
+}
+
+#[tokio::main]
+async fn run() -> Result<i32> {
+    let Command::Sync {
+        source,
+        destination,
+        concurrency,
+        large_concurrency,
+        no_clobber,
+        dry_run,
+        verify,
+        excludes,
+        resumable_threshold_mib,
+        chunk_mib,
+        manifest,
+    } = Cli::parse().command;
+
+    let mut opts = SyncOptions::new(source, &destination)?;
+    opts.concurrency = concurrency;
+    opts.large_concurrency = large_concurrency;
+    opts.no_clobber = no_clobber;
+    opts.dry_run = dry_run;
+    opts.verify = verify;
+    opts.resumable_threshold = resumable_threshold_mib * 1024 * 1024;
+    opts.chunk_size = chunk_mib * 1024 * 1024;
+    opts.excludes = excludes
+        .iter()
+        .map(|pattern| Regex::new(pattern).with_context(|| format!("invalid --exclude regex: {pattern}")))
+        .collect::<Result<_>>()?;
+    if std::env::var_os("JETSTREAM_TRANSFER_FAST_RETRY").is_some() {
+        opts.retry_base = Duration::from_millis(50);
+    }
+
+    let manifest_path = manifest.unwrap_or_else(|| default_data_dir().join("transfer-manifest.db"));
+    let manifest = Arc::new(Manifest::open(&manifest_path)?);
+
+    let http = GcsClient::http_client();
+    let auth = Arc::new(TokenProvider::from_environment(http.clone())?);
+    let client = GcsClient::new(http, auth.clone());
+
+    let stdout = Mutex::new(std::io::stdout());
+    let emit: Emit = Arc::new(move |event| {
+        let mut out = stdout.lock().unwrap();
+        let _ = serde_json::to_writer(&mut *out, &event);
+        let _ = out.write_all(b"\n");
+        let _ = out.flush();
+    });
+
+    // Ctrl+C / SIGTERM: stop starting new files; large uploads keep their session for next time.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_flag = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel_flag.store(true, Ordering::SeqCst);
+        }
+    });
+
+    let summary = sync(client, manifest, opts, auth.describe(), emit, cancel).await?;
+    Ok(if summary.cancelled {
+        3
+    } else if summary.failed + summary.unreadable > 0 {
+        2
+    } else {
+        0
+    })
+}

@@ -12,3 +12,5 @@ dist/
 !package-lock.json
 !src-tauri/tauri.conf.json
 !src-tauri/capabilities/*.json
+
+transfer/target/
