@@ -12,7 +12,17 @@ The Rust core of JetStream, used by the desktop app (as a library) and as a CLI:
   - archive candidates (large files untouched for a year)
 - **`audit gs://bucket/folder/ [--pattern REGEX]…`:** find junk objects in a bucket: unfinished uploads (`.gstmp`), NAS thumbnail folders (`@eaDir`), `Thumbs.db`, `.DS_Store`, `desktop.ini`, Office lock files (`~$…`) and temporary files. Read-only; `--pattern` replaces the default list. Quarantine stays in the Python server, which copies, verifies and only then deletes.
 
-`ls`, `du`, `scan` and `audit` each print one JSON document, the same data the desktop app shows.
+- **`compare <folder> gs://bucket/folder/`:** what's in sync, only local, only in the cloud, or different. `--exclude GLOB` and `--exclude-folder NAME` apply a synced folder's filters, and the upload manifest confirms matches by checksum.
+- **File operations:** all server-side, checked, and never overwriting. Add `--plan` to see what would happen without changing anything.
+  - `cp SRC... --to gs://b/folder/` and `mv SRC... --to gs://b/folder/`
+  - `rename gs://b/path NEW_NAME`
+  - `rm SRC...`
+  - `mkdir gs://b/parent/ NAME`
+  - Folders end with `/`.
+- **`bucket gs://b`:** bucket settings (soft delete, hierarchical namespace, Autoclass) and your permissions.
+- **`deleted gs://b/folder/` and `restore gs://b NAME#GENERATION...`:** list and restore soft-deleted objects.
+
+`ls`, `du`, `scan`, `audit`, `compare` and the file operations each print one JSON document, the same data the desktop app shows.
 
 ## The upload engine
 

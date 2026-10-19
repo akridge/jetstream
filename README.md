@@ -105,19 +105,26 @@ Once the dashboard is open:
 
 ## Desktop App (preview)
 
-A native desktop version of JetStream is in development in [`desktop/`](./desktop/README.md). It's one installer with no Python or terminal needed, and it has its own interface:
+A native desktop version of JetStream is in [`desktop/`](./desktop/README.md). It needs no Python, Anaconda or terminal, and has its own interface:
 
-- **Synced folders:** add a folder by dropping it on the window, preview, then sync only what's new
-- **Activity:** live job progress
-- **Cloud storage:** browse buckets, see folder sizes, and sync or move data in the cloud
-- **Cloud cleanup:** find junk files in a bucket and move them to quarantine safely
-- **Scheduled syncs:** daily at a set time, or every few hours
-- **Folder insights:** see what a folder holds and get cleanup ideas
-- **Analytics:** charts of job history
-- **Built-in upload engine:** re-syncs unchanged folders almost instantly and resumes large files
-- **Notifications and tray icon:** you're told when jobs finish, and closing the window keeps uploads running
+- **Synced folders:** add a folder by dropping it on the window, preview, then sync only what's new. Syncs can run on a schedule.
+- **Compare with cloud:** see which files are in sync, only on this computer, only in the cloud, or changed.
+- **Cloud storage:** a file manager for buckets.
+  - rename, move, copy, delete and restore, with undo
+  - checks before anything is removed
+  - warnings about early-deletion fees
+- **Cloud cleanup:** find junk files in a bucket and move them to quarantine safely.
+- **Activity, Folder insights and Analytics:** live progress, what a folder holds, and job history charts.
+- **Built-in upload engine:** re-syncs unchanged folders almost instantly and resumes large files.
+- **Notifications and tray icon:** closing the window keeps uploads running.
 
-It uses the same job history as the `pip` version. Installers and a **portable Windows zip** (unzip and run, no install) are built by the **Build desktop app** GitHub workflow, or locally with `desktop/scripts/build_windows.ps1` (see [`desktop/README.md`](./desktop/README.md#building)).
+**Three ways to run JetStream:**
+
+| You want to… | Do this |
+|---|---|
+| Use the desktop app | Download an installer or the **portable Windows zip** (unzip and run, no install). Get it from the **Build desktop app** workflow's artifacts on the Actions tab, or from a release. See [Get the app](./desktop/README.md#get-the-app). |
+| Use the web version | Install with `pip` and run `jetstream`, as described above. It shares the same job history with the desktop app. |
+| Develop or build it yourself | See [Run from source](./desktop/README.md#run-from-source-development), or build an installer or portable zip with `desktop\scripts\build_windows.ps1` ([details](./desktop/README.md#build-installers-and-the-portable-zip)). |
 
 ## Create Desktop Shortcuts
 To create optional Windows desktop and Start Menu shortcuts for JetStream and Google Cloud authentication:
