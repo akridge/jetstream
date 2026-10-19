@@ -10,7 +10,7 @@
   import { openClassic } from '../lib/platform.js';
 
   const tools = [
-    { path: 'static/cloud-audit.html', title: 'Cloud audit', text: 'Find junk files in a bucket and quarantine them safely.', icon: Brush },
+    { path: 'static/cloud-audit.html', title: 'Cloud audit history', text: 'Earlier audit runs and quarantine results (classic view).', icon: Brush },
     { path: 'static/dataset-creator.html', title: 'Cloud catalog tool', text: 'Build browsable catalogs of images and media in a bucket.', icon: LibraryBig },
     { path: 'static/gdrive.html', title: 'Google Drive upload', text: 'Upload or sync folders to Google Drive.', icon: FolderUp },
     { path: 'static/local-audit.html', title: 'Local audit reports', text: 'Saved local audit runs with per-file detail and CSV export.', icon: HardDrive },

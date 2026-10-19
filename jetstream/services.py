@@ -927,6 +927,13 @@ def make_progress_callback(job_id: str, db=None) -> Callable:
     return callback
 
 
+def _relative_to(path: str, root: str) -> str:
+    """Path relative to the upload's source folder, with '/' separators."""
+    normalized = path.replace("\\", "/")
+    base = (root or "").replace("\\", "/").rstrip("/") + "/"
+    return normalized[len(base):] if normalized.startswith(base) else normalized
+
+
 def find_transfer_engine() -> Optional[str]:
     """Path to the jetstream-transfer engine, or None if it isn't installed.
 
@@ -948,6 +955,73 @@ def find_transfer_engine() -> Optional[str]:
     return None
 
 
+class JobActivity:
+    """Recent per-file activity of a running upload, for the live "files" view."""
+
+    MAX_RECENT = 25
+
+    def __init__(self, tool: str):
+        self.tool = tool
+        self.recent: deque = deque(maxlen=self.MAX_RECENT)
+        self.in_flight: Dict[str, Dict] = {}
+        self.files_done = 0
+        self.failed = 0
+        self._lock = threading.Lock()
+
+    def started(self, path: str, size: Optional[int] = None) -> None:
+        with self._lock:
+            self.in_flight[path] = {"path": path, "bytes": size, "started_at": time.time()}
+
+    def finished(self, path: str, size: Optional[int] = None, error: Optional[str] = None) -> None:
+        with self._lock:
+            started = self.in_flight.pop(path, None)
+            if size is None and started:
+                size = started.get("bytes")
+            if error:
+                self.failed += 1
+            else:
+                self.files_done += 1
+            self.recent.appendleft({"path": path, "bytes": size, "at": time.time(), "error": error})
+
+    def snapshot(self) -> Dict:
+        with self._lock:
+            now = time.time()
+            return {
+                "tool": self.tool,
+                "files_done": self.files_done,
+                "failed": self.failed,
+                "in_flight": [
+                    {**item, "seconds": round(now - item["started_at"], 1)} for item in self.in_flight.values()
+                ],
+                "recent": [{**item, "seconds_ago": round(now - item["at"], 1)} for item in self.recent],
+            }
+
+
+_job_activity: "Dict[str, JobActivity]" = {}
+_job_activity_lock = threading.Lock()
+
+
+def start_job_activity(job_id: str, tool: str) -> JobActivity:
+    """Fresh activity record for a job run (keeps the 50 most recent jobs)."""
+    with _job_activity_lock:
+        activity = JobActivity(tool)
+        _job_activity.pop(job_id, None)
+        _job_activity[job_id] = activity
+        while len(_job_activity) > 50:
+            _job_activity.pop(next(iter(_job_activity)))
+        return activity
+
+
+def job_activity(job_id: str) -> Optional[Dict]:
+    with _job_activity_lock:
+        activity = _job_activity.get(job_id)
+    return activity.snapshot() if activity else None
+
+
+# "Copying file://C:\data\a.jpg to gs://bucket/a.jpg" (gcloud) / "Copying file://... [Content-Type=...]" (gsutil)
+_COPY_LINE_RE = re.compile(r"Copying file://(.+?)(?: to gs://| \[Content-Type)")
+
+
 class EngineRunState:
     """Turns jetstream-transfer JSON events into job progress and a readable summary."""
 
@@ -960,6 +1034,7 @@ class EngineRunState:
         self.failure_count = 0
         self.error: Optional[str] = None
         self.dry_run = False
+        self.activity: Optional[JobActivity] = None
 
     def handle(self, line: str, progress_callback: Optional[Callable]) -> None:
         import json
@@ -983,10 +1058,18 @@ class EngineRunState:
                 total_bytes=self.total_bytes,
                 files_uploaded=self.base_files + int(event.get("files_done") or 0),
             )
+        elif kind == "file_started":
+            if self.activity:
+                self.activity.started(event.get("path"), event.get("bytes"))
+        elif kind in ("file_uploaded", "file_would_upload"):
+            if self.activity:
+                self.activity.finished(event.get("path"), event.get("bytes"))
         elif kind == "file_failed":
             self.failure_count += 1
             if len(self.failures) < 20:
                 self.failures.append(f"{event.get('path')}: {event.get('error')}")
+            if self.activity:
+                self.activity.finished(event.get("path"), error=event.get("error"))
         elif kind == "done":
             self.summary = event
         elif kind == "error":
@@ -1240,6 +1323,7 @@ class UploadService:
 
             log_file = open_log()
             capture = OutputCapture(log_file=log_file)
+            activity = start_job_activity(job_id, upload_tool)
             echo = ConsoleEcho()
 
             def run_subprocess():
@@ -1271,6 +1355,9 @@ class UploadService:
                         echo(line)
                         if progress_callback:
                             _parse_progress(line, progress_callback)
+                        copied = _COPY_LINE_RE.search(line)
+                        if copied:
+                            activity.finished(_relative_to(copied.group(1), source_path))
 
                 t1 = threading.Thread(target=_read_stdout, daemon=True)
                 t2 = threading.Thread(target=_read_stderr, daemon=True)
@@ -1388,6 +1475,7 @@ class UploadService:
 
         capture = OutputCapture(log_file=log_file)
         state = EngineRunState()
+        state.activity = start_job_activity(job_id, "jetstream")
 
         def run_engine() -> int:
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0

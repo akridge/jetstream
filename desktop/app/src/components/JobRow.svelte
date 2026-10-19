@@ -22,6 +22,7 @@
       <span class="title truncate">{title}</span>
       <span class="pill" class:accent={job.dry_run}>{kind}</span>
       {#if job.upload_tool === 'jetstream'}<span class="pill">engine</span>{/if}
+      {#if job.filters?.trigger === 'schedule'}<span class="pill" title="Started by the folder's schedule">scheduled</span>{/if}
     </div>
     <div class="detail truncate">
       {#if job.status === 'running'}

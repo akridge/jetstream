@@ -15,7 +15,7 @@ from ..models import (
 from ..events import notify_job
 from ..services import (
     FileFilter, FolderAnalyzer, upload_service, queue_manager, generate_friendly_job_name,
-    make_progress_callback, claim_job_for_run
+    make_progress_callback, claim_job_for_run, job_activity
 )
 
 router = APIRouter()
@@ -305,6 +305,11 @@ async def get_upload_status(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Job not found")
     
     return JobStatusResponse(**job.to_dict())
+
+@router.get("/{job_id}/activity")
+async def get_upload_activity(job_id: str):
+    """Files uploading now and recently finished, while a job runs (empty if unknown)."""
+    return job_activity(job_id) or {"tool": None, "files_done": 0, "failed": 0, "in_flight": [], "recent": []}
 
 @router.get("/{job_id}/log")
 async def download_upload_log(job_id: str, db: Session = Depends(get_db)):

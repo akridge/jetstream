@@ -10,8 +10,9 @@ The Rust core of JetStream, used by the desktop app (as a library) and as a CLI:
   - the biggest subfolders and the largest files
   - junk files
   - archive candidates (large files untouched for a year)
+- **`audit gs://bucket/folder/ [--pattern REGEX]…`:** find junk objects in a bucket: unfinished uploads (`.gstmp`), NAS thumbnail folders (`@eaDir`), `Thumbs.db`, `.DS_Store`, `desktop.ini`, Office lock files (`~$…`) and temporary files. Read-only; `--pattern` replaces the default list. Quarantine stays in the Python server, which copies, verifies and only then deletes.
 
-`ls`, `du` and `scan` each print one JSON document, the same data the desktop app shows.
+`ls`, `du`, `scan` and `audit` each print one JSON document, the same data the desktop app shows.
 
 ## The upload engine
 

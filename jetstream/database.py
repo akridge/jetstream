@@ -428,20 +428,34 @@ class SyncPreset(Base):
     name = Column(String, nullable=False, unique=True)
     source_path = Column(String, nullable=False)
     destination = Column(String, nullable=False)  # bucket/path as typed in the form
-    options = Column(JSON, nullable=True)  # advanced upload form values
+    options = Column(JSON, nullable=True)  # upload options, including options["schedule"]
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    # Scheduled syncs (naive UTC, like other DateTime columns here)
+    next_run_at = Column(DateTime, nullable=True)
+    last_run_at = Column(DateTime, nullable=True)
+    last_run_job_id = Column(String, nullable=True)
 
     def to_dict(self):
         """Convert to dictionary."""
+        def utc(dt):
+            if not dt:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
         return {
             "preset_id": self.preset_id,
             "name": self.name,
             "source_path": self.source_path,
             "destination": self.destination,
             "options": self.options or {},
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "created_at": utc(self.created_at),
+            "updated_at": utc(self.updated_at),
+            "next_run_at": utc(self.next_run_at),
+            "last_run_at": utc(self.last_run_at),
+            "last_run_job_id": self.last_run_job_id,
         }
 
 
@@ -484,6 +498,14 @@ def _run_migrations():
             print("⚙ Running migration: Creating 'local_audit_findings' table...")
             LocalAuditFinding.__table__.create(bind=engine, checkfirst=True)
             print("✓ Migration completed: local_audit_findings table created")
+
+        if 'sync_presets' in tables:
+            preset_columns = {col['name'] for col in inspector.get_columns('sync_presets')}
+            with engine.connect() as conn:
+                for column, ddl in (("next_run_at", "DATETIME"), ("last_run_at", "DATETIME"), ("last_run_job_id", "VARCHAR")):
+                    if column not in preset_columns:
+                        conn.execute(text(f"ALTER TABLE sync_presets ADD COLUMN {column} {ddl}"))
+                conn.commit()
 
         if 'dataset_catalogs' not in tables:
             print("⚙ Running migration: Creating 'dataset_catalogs' table...")

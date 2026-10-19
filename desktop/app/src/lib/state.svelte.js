@@ -127,6 +127,8 @@ class AppState {
       this.#sampleSpeed(job);
     }
     this.jobs[job.job_id] = job;
+    // A schedule just fired: the folder's "next sync" time has moved on.
+    if (!previous && job.filters?.trigger === 'schedule') this.refreshPresets().catch(() => {});
   }
 
   #sampleSpeed(job) {

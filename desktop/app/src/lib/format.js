@@ -53,3 +53,30 @@ export function jobDestination(job) {
 export function basename(path) {
   return (path || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
 }
+
+/** "today 18:30", "tomorrow 09:00", "Mon 09:00" or a date, for upcoming times. */
+export function upcoming(iso) {
+  if (!iso) return '';
+  const then = new Date(iso);
+  const time = then.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(then) - startOfDay(new Date())) / 86400000);
+  if (then.getTime() <= Date.now()) return 'any moment';
+  if (days === 0) return `today ${time}`;
+  if (days === 1) return `tomorrow ${time}`;
+  if (days < 7) return `${then.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+  return `${then.toLocaleDateString()} ${time}`;
+}
+
+/** Short description of a folder's schedule. */
+export function scheduleText(schedule) {
+  if (!schedule || !schedule.mode || schedule.mode === 'off') return '';
+  if (schedule.mode === 'hourly') {
+    const n = Number(schedule.every_hours) || 1;
+    return n === 1 ? 'Every hour' : `Every ${n} hours`;
+  }
+  const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const days = Array.isArray(schedule.days) && schedule.days.length && schedule.days.length < 7 ? schedule.days : null;
+  const which = !days ? 'Daily' : days.join() === '0,1,2,3,4' ? 'Weekdays' : days.map((d) => names[d]).join(', ');
+  return `${which} at ${schedule.time || '18:00'}`;
+}

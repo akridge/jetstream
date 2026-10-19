@@ -110,12 +110,14 @@ A native desktop version of JetStream is in development in [`desktop/`](./deskto
 - **Synced folders:** add a folder by dropping it on the window, preview, then sync only what's new
 - **Activity:** live job progress
 - **Cloud storage:** browse buckets, see folder sizes, and sync or move data in the cloud
+- **Cloud cleanup:** find junk files in a bucket and move them to quarantine safely
+- **Scheduled syncs:** daily at a set time, or every few hours
 - **Folder insights:** see what a folder holds and get cleanup ideas
 - **Analytics:** charts of job history
 - **Built-in upload engine:** re-syncs unchanged folders almost instantly and resumes large files
 - **Notifications and tray icon:** you're told when jobs finish, and closing the window keeps uploads running
 
-It uses the same job history as the `pip` version. Installers are built by the **Build desktop app** GitHub workflow.
+It uses the same job history as the `pip` version. Installers and a **portable Windows zip** (unzip and run, no install) are built by the **Build desktop app** GitHub workflow, or locally with `desktop/scripts/build_windows.ps1` (see [`desktop/README.md`](./desktop/README.md#building)).
 
 ## Create Desktop Shortcuts
 To create optional Windows desktop and Start Menu shortcuts for JetStream and Google Cloud authentication:

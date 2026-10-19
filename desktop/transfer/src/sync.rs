@@ -127,6 +127,8 @@ pub enum Event {
         to_check_bytes: u64,
         listed_objects: Option<u64>,
     },
+    /// A large (resumable) upload started; small files only report when done.
+    FileStarted { path: String, bytes: u64 },
     FileUploaded { path: String, bytes: u64, generation: Option<String>, resumed_from: Option<u64> },
     FileWouldUpload { path: String, bytes: u64 },
     FileSkipped { path: String, reason: String },
@@ -166,6 +168,7 @@ enum Outcome {
 
 struct Ctx {
     client: GcsClient,
+    emit: Emit,
     manifest: Arc<Manifest>,
     opts: SyncOptions,
     dest: String,
@@ -316,6 +319,7 @@ pub async fn sync(
 
     let ctx = Arc::new(Ctx {
         client,
+        emit: emit.clone(),
         manifest,
         large_slots: Semaphore::new(opts.large_concurrency.max(1)),
         opts,
@@ -446,6 +450,7 @@ async fn process(ctx: &Ctx, candidate: Candidate) -> Outcome {
     let name = format!("{}{}", ctx.opts.prefix, file.rel);
     let result = if file.size > ctx.opts.resumable_threshold {
         let _slot = ctx.large_slots.acquire().await.expect("semaphore");
+        (ctx.emit)(Event::FileStarted { path: file.rel.clone(), bytes: file.size });
         upload_resumable(ctx, &file, &record, &name).await
     } else {
         upload_small(ctx, &file, &record, &name).await.map(|info| (info, None))

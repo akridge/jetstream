@@ -99,6 +99,13 @@ class UploadScheduler:
                     job.error_message = f"Failed to queue scheduled upload: {str(e)}"
                     db.commit()
             
+            # Start scheduled folder syncs that are due (folder analysis can be slow, so off-loop).
+            from .schedules import run_due_presets
+            try:
+                await asyncio.to_thread(run_due_presets)
+            except Exception as e:
+                logger.error(f"Scheduled folder sync check failed: {e}", exc_info=True)
+
             # Now process queued jobs one at a time (respecting max concurrent)
             await self._process_queued_jobs(upload_service, queue_manager)
                     

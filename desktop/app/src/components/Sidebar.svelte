@@ -6,6 +6,7 @@
   import Cloud from '@lucide/svelte/icons/cloud';
   import FolderSearch from '@lucide/svelte/icons/folder-search';
   import ChartColumn from '@lucide/svelte/icons/chart-column';
+  import Brush from '@lucide/svelte/icons/brush';
   import { app } from '../lib/state.svelte.js';
 
   const groups = [
@@ -16,7 +17,13 @@
         { id: 'activity', label: 'Activity', icon: Activity },
       ],
     },
-    { title: 'Cloud', items: [{ id: 'cloud', label: 'Cloud storage', icon: Cloud }] },
+    {
+      title: 'Cloud',
+      items: [
+        { id: 'cloud', label: 'Cloud storage', icon: Cloud },
+        { id: 'audit', label: 'Cloud cleanup', icon: Brush },
+      ],
+    },
     {
       title: 'Insights',
       items: [

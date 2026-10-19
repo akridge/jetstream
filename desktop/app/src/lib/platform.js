@@ -138,3 +138,29 @@ export function startScan(path, onProgress) {
 export async function cancelScan(scanId) {
   if (isDesktop && scanId) await invoke('cancel_scan', { scanId });
 }
+
+export async function defaultJunkPatterns() {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('default_junk_patterns');
+}
+
+/** Find junk under gs://bucket/prefix; onProgress({scanned, found}). Cancel with cancelAudit(auditId). */
+export function startAudit(bucket, prefix, patterns, onProgress) {
+  if (!isDesktop) return { auditId: null, done: Promise.reject(desktopOnly()) };
+  const auditId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const done = (async () => {
+    const unlisten = await listen('audit-progress', (event) => {
+      if (event.payload.audit_id === auditId) onProgress?.(event.payload);
+    });
+    try {
+      return await invoke('audit_bucket', { bucket, prefix, patterns, auditId });
+    } finally {
+      unlisten();
+    }
+  })();
+  return { auditId, done };
+}
+
+export async function cancelAudit(auditId) {
+  if (isDesktop && auditId) await invoke('cancel_audit', { auditId });
+}

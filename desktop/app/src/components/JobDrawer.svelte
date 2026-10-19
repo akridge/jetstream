@@ -9,7 +9,7 @@
   import StatusIcon from './StatusIcon.svelte';
   import ProgressBar from './ProgressBar.svelte';
   import { app, ACTIVE, TERMINAL } from '../lib/state.svelte.js';
-  import { api } from '../lib/api.js';
+  import { api, pollActivity } from '../lib/api.js';
   import { basename, bytes, count, dateTime, duration } from '../lib/format.js';
   import { isDesktop, revealPath } from '../lib/platform.js';
 
@@ -30,6 +30,16 @@
     failed: 'Failed',
     cancelled: 'Cancelled',
   };
+
+  let activity = $state(null);
+  let isRunning = $derived(job.status === 'running');
+
+  // While running, poll which files are moving right now.
+  $effect(() => {
+    if (!isRunning || isCloudOp) return;
+    activity = null;
+    return pollActivity(job.job_id, (data) => (activity = data));
+  });
 
   // Reload full details (including output) when the job or its status changes.
   $effect(() => {
@@ -86,6 +96,30 @@
           {#if speed > 0}· {bytes(speed)}/s{/if}
         </div>
       </div>
+    {/if}
+
+    {#if isRunning && activity && (activity.in_flight.length || activity.recent.length)}
+      <section class="files" aria-live="polite">
+        {#if activity.in_flight.length}
+          <div class="label">Uploading now</div>
+          <ul>
+            {#each activity.in_flight.slice(0, 6) as f (f.path)}
+              <li><span class="mono truncate start" title={f.path}><bdi>{f.path}</bdi></span><span class="muted">{f.bytes ? bytes(f.bytes) : ''}{f.seconds >= 5 ? ` · ${duration(f.seconds)}` : ''}</span></li>
+            {/each}
+          </ul>
+        {/if}
+        {#if activity.recent.length}
+          <div class="label">Recently finished{activity.failed ? ` · ${count(activity.failed)} failed` : ''}</div>
+          <ul>
+            {#each activity.recent.slice(0, 8) as f, i (f.path + i)}
+              <li class:failed={f.error}>
+                <span class="mono truncate start" title={f.error ? `${f.path}: ${f.error}` : f.path}><bdi>{f.path}</bdi></span>
+                <span class="muted">{f.error ? 'failed' : f.bytes ? bytes(f.bytes) : 'done'}</span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
     {/if}
 
     {#if job.status === 'failed' && job.error_message}
@@ -202,6 +236,35 @@
     font-size: 28px;
     font-weight: 700;
     letter-spacing: -0.02em;
+  }
+  .files {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .files ul {
+    list-style: none;
+    margin: 0 0 6px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .files li {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12.5px;
+  }
+  .files li .mono {
+    min-width: 0;
+  }
+  .files li .muted {
+    flex-shrink: 0;
+  }
+  .files li.failed .mono,
+  .files li.failed .muted {
+    color: var(--danger);
   }
   .callout {
     padding: 10px 12px;

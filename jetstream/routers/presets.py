@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..database import SyncPreset, get_db
+from ..schedules import next_run
 
 router = APIRouter()
 
@@ -41,6 +42,7 @@ async def save_preset(request: PresetRequest, db: Session = Depends(get_db)) -> 
     preset.destination = request.destination.strip()
     preset.options = request.options or {}
     preset.updated_at = now
+    preset.next_run_at = next_run(preset.options.get("schedule"), now.replace(tzinfo=None))
     db.commit()
     db.refresh(preset)
     return preset.to_dict()

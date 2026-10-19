@@ -20,6 +20,20 @@
   let stats = $state(null);
   let counting = $state(false);
   let nameTouched = $state(untrack(() => !!dialog.previousName));
+  form.options.schedule ??= { mode: 'off' };
+  const sched = form.options.schedule;
+  sched.time ??= '18:00';
+  sched.every_hours ??= 6;
+  sched.days ??= [0, 1, 2, 3, 4, 5, 6];
+  const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  function toggleDay(day) {
+    const days = new Set(sched.days);
+    if (days.has(day)) {
+      if (days.size > 1) days.delete(day);
+    } else days.add(day);
+    sched.days = [...days].sort();
+  }
 
   const QUICK_BUCKETS = ['nmfs_odp_pifsc', 'nmfs_odp_afsc', 'nmfs_odp_swfsc', 'nmfs_odp_sefsc', 'nmfs_odp_nefsc', 'nmfs_odp_nwfsc'];
   const FILTER_PRESETS = {
@@ -182,6 +196,40 @@
           <input type="checkbox" bind:checked={form.options.no_clobber} />
           <span><strong>Never overwrite files already in the cloud</strong><small>Changed local files are skipped if a copy already exists.</small></span>
         </label>
+      </div>
+
+      <div class="field">
+        <span class="label">Sync automatically</span>
+        <div class="segmented" role="radiogroup" aria-label="Sync automatically">
+          {#each [['off', 'Off'], ['daily', 'At a set time'], ['hourly', 'Every few hours']] as [mode, label] (mode)}
+            <button role="radio" aria-checked={sched.mode === mode} class:selected={sched.mode === mode} onclick={() => (sched.mode = mode)}>{label}</button>
+          {/each}
+        </div>
+        {#if sched.mode === 'daily'}
+          <div class="schedule-row">
+            <input type="time" class="input time" aria-label="Time of day" bind:value={sched.time} required />
+            <div class="chips days">
+              {#each DAY_NAMES as name, day (day)}
+                <button class="chip" class:on={sched.days.includes(day)} aria-pressed={sched.days.includes(day)} onclick={() => toggleDay(day)}>{name}</button>
+              {/each}
+            </div>
+          </div>
+        {:else if sched.mode === 'hourly'}
+          <div class="schedule-row">
+            <span>Every</span>
+            <select class="input hours" aria-label="Hours between syncs" bind:value={sched.every_hours}>
+              {#each [1, 2, 3, 4, 6, 8, 12] as n (n)}<option value={n}>{n}</option>{/each}
+            </select>
+            <span>{sched.every_hours === 1 ? 'hour' : 'hours'}</span>
+          </div>
+        {/if}
+        {#if sched.mode !== 'off'}
+          <label class="toggle">
+            <input type="checkbox" bind:checked={sched.preview} />
+            <span><strong>Preview only</strong><small>Scheduled runs check what would upload without uploading.</small></span>
+          </label>
+          <span class="hint">Runs while JetStream is open (it keeps running in the tray when the window is closed).</span>
+        {/if}
       </div>
 
       <button class="link" onclick={() => (showFilters = !showFilters)}>{showFilters ? 'Hide' : 'Skip some files…'}</button>
@@ -385,6 +433,53 @@
     color: var(--accent);
     font-weight: 600;
     cursor: pointer;
+  }
+  .segmented {
+    display: inline-flex;
+    align-self: flex-start;
+    padding: 3px;
+    gap: 2px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+  }
+  .segmented button {
+    border: none;
+    background: none;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-2);
+    font: inherit;
+  }
+  .segmented button.selected {
+    background: var(--surface);
+    color: var(--text);
+    font-weight: 600;
+    box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.12));
+  }
+  .schedule-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .input.time {
+    width: 120px;
+  }
+  .input.hours {
+    width: 76px;
+  }
+  .days .chip.on {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .hint {
+    color: var(--muted);
+    font-size: 12.5px;
   }
   .filters {
     display: flex;

@@ -6,11 +6,12 @@
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import Square from '@lucide/svelte/icons/square';
   import CloudUpload from '@lucide/svelte/icons/cloud-upload';
+  import Clock from '@lucide/svelte/icons/clock';
   import StatusIcon from './StatusIcon.svelte';
   import ProgressBar from './ProgressBar.svelte';
   import { app, ACTIVE, TERMINAL } from '../lib/state.svelte.js';
-  import { api } from '../lib/api.js';
-  import { bytes, count, duration, relativeTime, normalizeDestination } from '../lib/format.js';
+  import { api, pollActivity } from '../lib/api.js';
+  import { bytes, count, duration, relativeTime, normalizeDestination, scheduleText, upcoming } from '../lib/format.js';
   import { isDesktop, revealPath } from '../lib/platform.js';
 
   let { preset } = $props();
@@ -27,6 +28,17 @@
   let remaining = $derived(
     current && speed > 0 ? Math.max(0, (current.total_size_bytes - current.bytes_uploaded) / speed) : null,
   );
+
+  let nowFile = $state('');
+  let runningId = $derived(current?.status === 'running' ? current.job_id : null);
+  $effect(() => {
+    const id = runningId;
+    nowFile = '';
+    if (!id) return;
+    return pollActivity(id, (a) => (nowFile = a.in_flight[0]?.path || a.recent[0]?.path || ''), 2500);
+  });
+  let schedule = $derived(preset.options?.schedule);
+  let scheduled = $derived(schedule && schedule.mode && schedule.mode !== 'off');
 
   let menuOpen = $state(false);
   let busy = $state(false);
@@ -99,6 +111,7 @@
           </span>
         </div>
         <ProgressBar value={current.progress_percent || 0} indeterminate={!current.total_size_bytes} />
+        {#if nowFile}<div class="now mono truncate start" title={nowFile}><bdi>{nowFile}</bdi></div>{/if}
       {:else}
         <div class="row">
           <StatusIcon job={current} size={16} />
@@ -135,6 +148,14 @@
       <div class="row muted">Not synced yet — preview first to see what will upload.</div>
     {/if}
   </div>
+
+  {#if scheduled}
+    <div class="schedule" title={schedule.preview ? 'Scheduled runs are previews only' : ''}>
+      <Clock size={14} />
+      <span>{scheduleText(schedule)}{schedule.preview ? ' · preview only' : ''}</span>
+      {#if preset.next_run_at}<span class="muted">· next {upcoming(preset.next_run_at)}</span>{/if}
+    </div>
+  {/if}
 
   <footer>
     {#if current}
@@ -257,6 +278,18 @@
   .error {
     color: var(--danger);
     font-size: 12.5px;
+  }
+  .now {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .schedule {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-2);
+    font-size: 13px;
+    margin-top: -4px;
   }
   footer {
     display: flex;

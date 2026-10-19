@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use jetstream_transfer::audit::{self, AuditProgress, AuditReport};
 use jetstream_transfer::auth::TokenProvider;
 use jetstream_transfer::browse::{self, FolderTotals, Listing};
 use jetstream_transfer::gcs::GcsClient;
@@ -145,6 +146,7 @@ fn open_classic(app: AppHandle, path: String) -> Result<(), String> {
 struct Core {
     client: Mutex<Option<GcsClient>>,
     scans: Mutex<HashMap<String, Arc<ScanProgress>>>,
+    audits: Mutex<HashMap<String, Arc<AuditProgress>>>,
 }
 
 impl Core {
@@ -236,6 +238,71 @@ fn cancel_scan(core: tauri::State<'_, Core>, scan_id: String) {
     }
 }
 
+#[derive(Clone, Serialize)]
+struct AuditTick {
+    audit_id: String,
+    scanned: u64,
+    found: u64,
+}
+
+#[tauri::command]
+fn default_junk_patterns() -> Vec<String> {
+    audit::DEFAULT_PATTERNS.iter().map(|p| p.to_string()).collect()
+}
+
+/// Find junk objects under gs://bucket/prefix (read-only); emits "audit-progress".
+#[tauri::command]
+async fn audit_bucket(
+    app: AppHandle,
+    core: tauri::State<'_, Core>,
+    bucket: String,
+    prefix: String,
+    patterns: Vec<String>,
+    audit_id: String,
+) -> Result<AuditReport, String> {
+    let client = core.client()?;
+    let progress = Arc::new(AuditProgress::default());
+    core.audits.lock().unwrap().insert(audit_id.clone(), progress.clone());
+
+    let done = Arc::new(AtomicBool::new(false));
+    let (tick_app, tick_progress, tick_done, tick_id) = (app.clone(), progress.clone(), done.clone(), audit_id.clone());
+    std::thread::spawn(move || {
+        while !tick_done.load(Ordering::Relaxed) {
+            let _ = tick_app.emit(
+                "audit-progress",
+                AuditTick {
+                    audit_id: tick_id.clone(),
+                    scanned: tick_progress.scanned.load(Ordering::Relaxed),
+                    found: tick_progress.found.load(Ordering::Relaxed),
+                },
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
+
+    let result = audit::audit_bucket(&client, bucket.trim(), &prefix, &patterns, 0, 20_000, &progress).await;
+    done.store(true, Ordering::Relaxed);
+    core.audits.lock().unwrap().remove(&audit_id);
+    result.map_err(|e| {
+        core.reset_client();
+        format!("{e:#}")
+    })
+}
+
+#[tauri::command]
+fn cancel_audit(core: tauri::State<'_, Core>, audit_id: String) {
+    if let Some(progress) = core.audits.lock().unwrap().get(&audit_id) {
+        progress.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Portable mode: a "JetStreamData" folder next to the program keeps the job history,
+/// logs and upload manifest with the program (e.g. on a USB drive) instead of the user profile.
+fn portable_data_dir() -> Option<std::path::PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.join("JetStreamData");
+    dir.is_dir().then_some(dir)
+}
+
 fn free_port() -> std::io::Result<u16> {
     Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
@@ -268,15 +335,19 @@ fn show_main_window(app: &AppHandle) {
 fn start_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let port = free_port()?;
     let cors = format!("{APP_ORIGINS},http://127.0.0.1:{port}");
-    let (mut events, child) = app
+    let mut command = app
         .shell()
         .sidecar("jetstream-server")?
         .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--no-browser"])
         .env("AUTO_OPEN_BROWSER", "false")
         .env("CORS_ALLOW_ORIGINS", cors)
         .env("JETSTREAM_DESKTOP_PARENT_PID", std::process::id().to_string())
-        .env("PYTHONUNBUFFERED", "1")
-        .spawn()?;
+        .env("PYTHONUNBUFFERED", "1");
+    if let Some(dir) = portable_data_dir() {
+        app.state::<Server>().push_log(format!("Portable mode: data in {}", dir.display()));
+        command = command.env("JETSTREAM_DATA_DIR", dir);
+    }
+    let (mut events, child) = command.spawn()?;
     {
         let server = app.state::<Server>();
         *server.child.lock().unwrap() = Some(child);
@@ -370,7 +441,10 @@ fn main() {
             list_folder,
             folder_totals,
             scan_folder,
-            cancel_scan
+            cancel_scan,
+            default_junk_patterns,
+            audit_bucket,
+            cancel_audit
         ])
         .setup(|app| {
             build_tray(app.handle())?;

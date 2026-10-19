@@ -40,6 +40,26 @@ class QuarantineRequest(BaseModel):
     limit: int = Field(500, ge=1, le=5000, description="Max findings to process")
 
 
+class ImportedFinding(BaseModel):
+    object_name: str
+    size: float = 0
+    updated: str | None = None
+    matched_pattern: str
+
+
+class ImportRunRequest(BaseModel):
+    """A scan done elsewhere (the desktop app's Rust core), stored so it can be quarantined."""
+    bucket_name: str
+    prefix: str = ""
+    patterns: list[str] = Field(default_factory=list)
+    scanned_objects: int = 0
+    scanned_bytes: float = 0
+    junk_objects: int = 0
+    junk_bytes: float = 0
+    reached_scan_limit: bool = False
+    findings: list[ImportedFinding] = Field(default_factory=list, max_length=50_000)
+
+
 class StartScanResponse(BaseModel):
     """Response model for asynchronous scan startup."""
     run_id: str
@@ -555,3 +575,63 @@ async def quarantine_findings(run_id: str, request: QuarantineRequest, db: Sessi
         "errors": error_count,
         "dry_run": request.dry_run,
     }
+
+
+@router.get("/defaults")
+async def audit_defaults():
+    """Default junk patterns, quarantine bucket and protected prefixes for audit UIs."""
+    return {
+        "patterns": settings.GCS_JUNK_REGEX_PATTERNS,
+        "quarantine_bucket": settings.GCS_QUARANTINE_BUCKET,
+        "protected_prefixes": settings.GCS_PROTECTED_PREFIXES or [],
+    }
+
+
+def _parse_time(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+@router.post("/runs/import")
+async def import_run(request: ImportRunRequest, db: Session = Depends(get_db)):
+    """Store an externally performed scan as a completed run so the quarantine step can use it."""
+    _compile_patterns(request.patterns or settings.GCS_JUNK_REGEX_PATTERNS)
+    now = datetime.now(timezone.utc)
+    run = CloudAuditRun(
+        run_id=str(uuid.uuid4()),
+        status="completed",
+        bucket_name=request.bucket_name,
+        prefix=request.prefix,
+        dry_run=True,
+        scan_limit=0,
+        reached_scan_limit=request.reached_scan_limit,
+        regex_patterns=request.patterns or settings.GCS_JUNK_REGEX_PATTERNS,
+        quarantine_bucket=settings.GCS_QUARANTINE_BUCKET,
+        scanned_objects=request.scanned_objects,
+        scanned_bytes=request.scanned_bytes,
+        junk_objects=request.junk_objects,
+        junk_bytes=request.junk_bytes,
+        created_at=now,
+        started_at=now,
+        completed_at=now,
+    )
+    db.add(run)
+    db.bulk_save_objects([
+        CloudAuditFinding(
+            run_id=run.run_id,
+            bucket_name=request.bucket_name,
+            object_name=f.object_name,
+            size_bytes=f.size,
+            updated_at=_parse_time(f.updated),
+            matched_pattern=f.matched_pattern,
+            suggested_action="quarantine",
+            action_status="pending",
+        )
+        for f in request.findings
+    ])
+    db.commit()
+    return run.to_dict()

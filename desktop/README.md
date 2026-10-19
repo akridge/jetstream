@@ -7,7 +7,8 @@ A native desktop app for JetStream, built with [Tauri 2](https://tauri.app) and 
 - **Synced folders:** each folder you add is a card showing:
   - where it goes in the cloud
   - when it last synced, and how much
-  - live progress, speed and time left while it runs
+  - live progress, speed and time left while it runs, and the file being uploaded
+  - its schedule and next run, if it syncs automatically
 
   **Preview** shows what would upload. **Sync now** uploads only what's new.
 - **Add folders your way:** **Add folder** opens the native folder picker, or you can drag a folder from File Explorer onto the window. The dialog counts the folder's files, offers quick bucket choices, and lets you choose:
@@ -15,7 +16,9 @@ A native desktop app for JetStream, built with [Tauri 2](https://tauri.app) and 
   - whether to include subfolders
   - whether files already in the cloud may be overwritten
   - which files to skip
+  - **Sync automatically:** at a set time on chosen days, or every few hours, optionally as a preview only. Scheduled syncs run while JetStream is open (including from the tray). A sync is skipped if the previous one is still running, and a missing folder (e.g. an unplugged drive) shows up as a failed job you can see.
 - **Activity:** every upload, preview and cloud operation, updated live, with filters, search and a details panel. From there you can:
+  - see which files are uploading right now and which just finished or failed
   - read the job's output
   - cancel a job, run it again, or "upload for real" after a preview
   - show the job's log file
@@ -26,6 +29,11 @@ A native desktop app for JetStream, built with [Tauri 2](https://tauri.app) and 
   - **Move…** a file or folder, safely: each object is copied and verified before the original is deleted
 
   Each operation starts as a preview.
+- **Cloud cleanup:** scan a bucket or folder for junk: unfinished uploads (`.gstmp`), NAS thumbnail folders, `Thumbs.db`, `.DS_Store`, Office lock files and temporary files. You can add your own patterns. The Rust core does the scan (read-only, tens of thousands of objects a second), then shows:
+  - totals and a breakdown by kind, which you can click to filter
+  - the matching objects, largest first
+
+  **Move to quarantine…** copies each object to a quarantine bucket, verifies it, then deletes the original. It previews first, never touches protected prefixes, and keeps a record in the classic Cloud audit page.
 - **Folder insights:** analyze any local folder in seconds, by choosing it or dropping it on the window. It shows:
   - size by kind of file and by file type
   - the biggest subfolders, which you can click to drill in
@@ -43,12 +51,13 @@ A native desktop app for JetStream, built with [Tauri 2](https://tauri.app) and 
   - default upload tool
   - light, dark or system theme
   - notifications
-- **More tools:** the cloud audit, the catalog tool, Drive upload, and the original pages. These open in a separate window.
+- **More tools:** cloud audit history, the catalog tool, Drive upload, and the original pages. These open in a separate window.
 - **Desktop behaviour:**
   - notifications when jobs finish
   - closing the window keeps JetStream running in the tray, so uploads continue; **Quit** in the tray menu stops it
   - opening the app again brings the running window to the front
 - **Installers:** an `.msi` or `.exe` on Windows, a `.dmg` on macOS, and an `.AppImage` or `.deb` on Linux.
+- **Portable Windows build:** `JetStream-<version>-windows-x64-portable.zip`. Unzip it anywhere (including a USB drive) and run `JetStream.exe`; nothing is installed. Job history, logs and the upload manifest stay in the `JetStreamData` folder next to the program. Delete that folder to share history with an installed copy instead. Needs the WebView2 runtime, which comes with Windows 10 and 11.
 
 ## Requirements for users
 
@@ -76,6 +85,34 @@ JetStream.app / JetStream.exe        Rust shell (src-tauri/src/main.rs)
 
 ## Building
 
+### Easiest: one command
+
+```powershell
+# Windows (PowerShell), from the repository root
+.\desktop\scripts\build_windows.ps1                 # installers + portable zip
+.\desktop\scripts\build_windows.ps1 -PortableOnly   # portable zip only (faster)
+```
+
+```bash
+# any OS
+python desktop/scripts/build_desktop.py [--portable-only] [--skip-python-deps] [--package-only]
+```
+
+This installs the Python requirements and PyInstaller, then builds:
+- the bundled server
+- the upload engine
+- the UI and app
+
+It puts everything in `desktop/release/`:
+- `JetStream-<version>-<os>-<arch>-portable.zip`
+- the installers (`.msi`, setup `.exe`, `.dmg`, `.AppImage`, `.deb`)
+
+`--package-only` re-zips an existing build. Use a virtual environment if you don't want the Python packages installed globally.
+
+On Windows you also need the Visual Studio C++ Build Tools and the WebView2 runtime (see the Tauri prerequisites link below).
+
+### Step by step
+
 You need Python 3.10+, Rust (stable), Node 18+, and the [Tauri system prerequisites](https://tauri.app/start/prerequisites/) for your OS.
 
 ```bash
@@ -92,5 +129,9 @@ npm run build                                 # builds the UI, then installers i
 - **Development:** `npm run dev` runs the app with live-reloading UI. Rebuild the sidecar after changing Python code, because the app runs the bundled server, not your source tree.
 - **UI only, in a browser:** start `jetstream` with `CORS_ALLOW_ORIGINS=http://localhost:5173`, run `npm run dev:ui`, and open `http://localhost:5173/?api=http://127.0.0.1:8000`. Desktop-only features (folder picker, drag-and-drop) fall back to simple prompts.
 - **Icons:** regenerate them from `jetstream/static/icon.png` with `npm run icons`.
-- **CI:** the **Build desktop app** GitHub workflow (`.github/workflows/desktop.yml`) builds installers for Windows, macOS and Linux. Start it from the Actions tab, or push a tag such as `desktop-v0.1.29` to also create a draft release.
+- **CI:** the **Build desktop app** GitHub workflow (`.github/workflows/desktop.yml`) builds for Windows, macOS and Linux:
+  - It runs on any push that changes `desktop/`, `jetstream/` or `requirements.txt`, when started from the Actions tab, or when a `desktop-v*` tag is pushed.
+  - Each run uploads a `jetstream-desktop-<os>` artifact with the installers and the portable zip. Download it from the run's summary page.
+  - A tag such as `desktop-v0.1.29` also creates a draft release with the installers and portable zips attached.
+  - The **Run workflow** button only appears once the workflow file is on the default branch.
 - **Code signing:** Windows SmartScreen and macOS Gatekeeper warn about unsigned apps. Signing needs certificates that are not set up yet. See the [Tauri signing guides](https://tauri.app/distribute/).

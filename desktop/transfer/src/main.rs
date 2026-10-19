@@ -17,7 +17,7 @@ use jetstream_transfer::auth::TokenProvider;
 use jetstream_transfer::gcs::GcsClient;
 use jetstream_transfer::manifest::{default_data_dir, Manifest};
 use jetstream_transfer::sync::{parse_destination, sync, Emit, SyncOptions};
-use jetstream_transfer::{browse, scan};
+use jetstream_transfer::{audit, browse, scan};
 
 #[derive(Parser)]
 #[command(version, about = "JetStream upload engine for Google Cloud Storage")]
@@ -82,6 +82,18 @@ enum Command {
     },
     /// Analyze a local folder: sizes by type and subfolder, largest, old and junk files.
     Scan { folder: PathBuf },
+    /// Find junk objects (temporary/system files) under gs://bucket/prefix. Read-only.
+    Audit {
+        path: String,
+        /// Regex matched against object names (repeatable); defaults to common junk patterns.
+        #[arg(long = "pattern")]
+        patterns: Vec<String>,
+        /// Stop after scanning this many objects (0 = no limit).
+        #[arg(long, default_value_t = 0)]
+        max_objects: u64,
+        #[arg(long, default_value_t = 20_000)]
+        max_findings: usize,
+    },
 }
 
 fn cloud_client() -> Result<GcsClient> {
@@ -125,6 +137,25 @@ async fn run() -> Result<i32> {
                 scan::scan_folder(&folder, &scan::ScanOptions::default(), &scan::ScanProgress::default())
             })
             .await??;
+            return print_json(&report);
+        }
+        Command::Audit { path, patterns, max_objects, max_findings } => {
+            let (bucket, prefix) = parse_destination(&path)?;
+            let patterns = if patterns.is_empty() {
+                audit::DEFAULT_PATTERNS.iter().map(|p| p.to_string()).collect()
+            } else {
+                patterns
+            };
+            let report = audit::audit_bucket(
+                &cloud_client()?,
+                &bucket,
+                &prefix,
+                &patterns,
+                max_objects,
+                max_findings,
+                &audit::AuditProgress::default(),
+            )
+            .await?;
             return print_json(&report);
         }
         Command::Sync { .. } => {}

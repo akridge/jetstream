@@ -11,6 +11,7 @@
   import CloudView from './views/CloudView.svelte';
   import InsightsView from './views/InsightsView.svelte';
   import AnalyticsView from './views/AnalyticsView.svelte';
+  import AuditView from './views/AuditView.svelte';
   import { app } from './lib/state.svelte.js';
   import { onFolderDrop, serverLog } from './lib/platform.js';
 
@@ -47,6 +48,8 @@
         <ActivityView />
       {:else if app.view === 'cloud'}
         <CloudView />
+      {:else if app.view === 'audit'}
+        <AuditView />
       {:else if app.view === 'insights'}
         <InsightsView />
       {:else if app.view === 'analytics'}

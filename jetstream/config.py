@@ -54,11 +54,16 @@ class Settings(BaseSettings):
     GCS_PROTECTED_PREFIXES: list = ["_critical/", "do-not-touch/"]
 
     # Cloud audit defaults
+    # Regexes matched (case-insensitively) against object names. Keep in sync with
+    # DEFAULT_PATTERNS in desktop/transfer/src/audit.rs.
     GCS_JUNK_REGEX_PATTERNS: list = [
-        r"\\.gstmp$",
-        r"@eaDir",
-        r"Thumbs\\.db$",
-        r"\\.DS_Store$",
+        r"\.gstmp$",
+        r"(^|/)@eaDir/",
+        r"(^|/)Thumbs\.db$",
+        r"(^|/)\.DS_Store$",
+        r"(^|/)desktop\.ini$",
+        r"(^|/)~\$",
+        r"\.(tmp|temp|crdownload|part)$",
     ]
     GCS_AUDIT_SCAN_MAX_OBJECTS: int = 250000
     GCS_AUDIT_FINDINGS_PAGE_SIZE: int = 200

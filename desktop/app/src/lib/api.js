@@ -58,6 +58,10 @@ export const api = {
   cloudTransfer: (body) => request('POST', '/api/cloud/transfer', body),
   cloudMove: (body) => request('POST', '/api/cloud/move', body),
   stats: () => request('GET', '/api/stats/'),
+  jobActivity: (id) => request('GET', `/api/uploads/${encodeURIComponent(id)}/activity`),
+  auditDefaults: () => request('GET', '/api/cloud-audit/defaults'),
+  importAudit: (body) => request('POST', '/api/cloud-audit/runs/import', body),
+  quarantine: (runId, body) => request('POST', `/api/cloud-audit/runs/${encodeURIComponent(runId)}/quarantine`, body),
   uploadTrends: (days = 30) => request('GET', `/api/analytics/upload-trends?days=${days}`),
   successRate: () => request('GET', '/api/analytics/success-rate'),
   performance: () => request('GET', '/api/analytics/performance-metrics'),
@@ -74,4 +78,24 @@ export function logUrl(id) {
 
 export function csvExportUrl() {
   return `${base}/api/analytics/export-csv`;
+}
+
+/** Poll a running job's per-file activity; returns a stop function. */
+export function pollActivity(jobId, callback, intervalMs = 1500) {
+  let stopped = false;
+  let timer;
+  const tick = async () => {
+    try {
+      const data = await api.jobActivity(jobId);
+      if (!stopped) callback(data);
+    } catch {
+      /* transient; try again */
+    }
+    if (!stopped) timer = setTimeout(tick, intervalMs);
+  };
+  tick();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
 }

@@ -297,3 +297,28 @@ async fn browse_lists_one_level_and_totals_a_folder() {
     let small_limit = jetstream_transfer::browse::folder_totals(&env.client, "bucket", "data", 1).await.unwrap();
     assert_eq!((small_limit.objects, small_limit.truncated), (4, false));
 }
+
+#[tokio::test]
+async fn audit_finds_junk_objects_under_a_prefix() {
+    let Some(env) = Env::new().await else { return };
+    env.write("photos/a.jpg", &big(1000, 1));
+    env.write("photos/Thumbs.db", &big(50, 2));
+    env.write("photos/b.jpg.gstmp", &big(700, 3));
+    env.write("nas/@eaDir/a.jpg", &big(30, 4));
+    env.write("docs/~$draft.docx", &big(10, 5));
+    env.run(env.options()).await;
+
+    let patterns: Vec<String> = jetstream_transfer::audit::DEFAULT_PATTERNS.iter().map(|s| s.to_string()).collect();
+    let progress = jetstream_transfer::audit::AuditProgress::default();
+    let report = jetstream_transfer::audit::audit_bucket(&env.client, "bucket", "data", &patterns, 0, 100, &progress)
+        .await
+        .unwrap();
+    assert_eq!((report.scanned_objects, report.junk_objects), (5, 4));
+    assert_eq!(report.junk_bytes, 50 + 700 + 30 + 10);
+    assert_eq!(report.findings[0].object_name, "data/photos/b.jpg.gstmp", "largest first");
+    assert_eq!(report.by_pattern[0].pattern, r"\.gstmp$");
+    assert_eq!(progress.scanned.load(std::sync::atomic::Ordering::Relaxed), 5);
+
+    let limited = jetstream_transfer::audit::audit_bucket(&env.client, "bucket", "data", &patterns, 0, 1, &progress).await.unwrap();
+    assert_eq!((limited.findings.len(), limited.findings_truncated, limited.junk_objects), (1, true, 4));
+}
