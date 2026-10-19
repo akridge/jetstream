@@ -1,0 +1,14 @@
+node_modules/
+src-tauri/target/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+src-tauri/gen/
+build/
+dist/
+*.spec
+
+# The repository root ignores *.json; these are source files for the desktop app.
+!package.json
+!package-lock.json
+!src-tauri/tauri.conf.json
+!src-tauri/capabilities/*.json

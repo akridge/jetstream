@@ -84,6 +84,8 @@ Keep the Anaconda Prompt window open while you use the dashboard. Press `Ctrl+C`
 
 ### 4. Authenticate with Google Cloud when needed
 
+The badge in the top-right corner of every page shows whether you are signed in. Click **Sign in** there to start the Google sign-in in your browser, or run the command below.
+
 Before using GCS upload, bucket browsing, or cloud analysis features, install the Google Cloud SDK and authenticate:
 
 ```powershell
@@ -96,10 +98,20 @@ Your Google account must have permission to access the target bucket. If Google 
 
 Once the dashboard is open:
 
-1. Use **Uploads** to select a local folder and create an upload job.
-2. Use **Jobs** to monitor queued, running, completed, and failed work.
+1. Use **Uploads** to sync a local folder to a bucket. "Preview first (dry run)" is on by default, so you can check what will be copied, then open the finished job and choose **Run Actual Upload**. Save folders you upload often as **presets**.
+2. Use **Jobs** to monitor queued, running, completed, and failed work. Pages update live, and you get a notification when a job finishes (turn this off in **Settings**).
 3. Use **Analytics** to review activity and file types.
 4. Use **Cloud** or **Cloud Audit** after Google Cloud authentication is complete.
+
+## Desktop App (preview)
+
+A native desktop version of JetStream is in development in [`desktop/`](./desktop/README.md). It's one installer with no Python or terminal needed, and it adds:
+
+- a folder picker and drag-and-drop for folders
+- notifications when jobs finish
+- a tray icon that keeps uploads running after you close the window
+
+It uses the same job history as the `pip` version. Installers are built by the **Build desktop app** GitHub workflow.
 
 ## Create Desktop Shortcuts
 To create optional Windows desktop and Start Menu shortcuts for JetStream and Google Cloud authentication:
