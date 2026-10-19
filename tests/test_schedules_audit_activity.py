@@ -260,3 +260,18 @@ def test_activity_endpoint(db_env):
     with TestClient(app) as client:
         assert client.get("/api/uploads/job-y/activity").json()["recent"][0]["path"] == "x.jpg"
         assert client.get("/api/uploads/unknown/activity").json()["recent"] == []
+
+
+# ----- console encoding -----------------------------------------------------------------
+
+def test_server_output_survives_a_non_utf8_pipe():
+    """The desktop app reads the server through a pipe, which on Windows uses cp1252."""
+    import os
+    import subprocess
+    import sys
+
+    code = "from jetstream.cli import use_utf8_output; use_utf8_output(); print('\\U0001f680 NOAA JetStream'); print('\\u274c', file=sys.stderr)"
+    env = dict(os.environ, PYTHONIOENCODING="cp1252")
+    result = subprocess.run([sys.executable, "-c", "import sys; " + code], capture_output=True, env=env)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert "🚀 NOAA JetStream" in result.stdout.decode("utf-8")

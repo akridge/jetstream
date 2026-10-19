@@ -13,6 +13,23 @@ import os
 from pathlib import Path
 
 
+def use_utf8_output():
+    """Print emoji and non-ASCII paths safely wherever output goes.
+
+    When output is piped or redirected on Windows (the desktop app reading the bundled
+    server, a log file, a shortcut), Python encodes it with the ANSI code page (cp1252),
+    which can't encode emoji, and the first print() crashes the server.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        encoding = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if reconfigure and encoding != "utf8":
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def open_browser(url, delay=2.0):
     """Open browser after a delay to ensure server is ready"""
     def _open():
@@ -140,6 +157,7 @@ def handle_cloud_audit_manifest(args) -> int:
 
 def main():
     """Start the JetStream server"""
+    use_utf8_output()
     parser = argparse.ArgumentParser(
         description="NOAA JetStream - Cloud Data Manager"
     )

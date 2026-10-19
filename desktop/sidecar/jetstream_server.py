@@ -20,6 +20,15 @@ def _exit_when_parent_exits(parent_pid: int) -> None:
 def main() -> int:
     multiprocessing.freeze_support()
 
+    # The desktop app reads this process's output through a pipe; on Windows that would use
+    # the ANSI code page and crash on the first emoji. (jetstream.cli does this too.)
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
     parent_pid = os.environ.get("JETSTREAM_DESKTOP_PARENT_PID")
     if parent_pid and parent_pid.isdigit():
         threading.Thread(target=_exit_when_parent_exits, args=(int(parent_pid),), daemon=True).start()

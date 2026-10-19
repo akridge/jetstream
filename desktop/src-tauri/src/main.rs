@@ -525,7 +525,10 @@ fn start_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .env("AUTO_OPEN_BROWSER", "false")
         .env("CORS_ALLOW_ORIGINS", cors)
         .env("JETSTREAM_DESKTOP_PARENT_PID", std::process::id().to_string())
-        .env("PYTHONUNBUFFERED", "1");
+        .env("PYTHONUNBUFFERED", "1")
+        // Output comes through a pipe: make it UTF-8 rather than the Windows code page.
+        .env("PYTHONIOENCODING", "utf-8:replace")
+        .env("PYTHONUTF8", "1");
     if let Some(dir) = portable_data_dir() {
         app.state::<Server>().push_log(format!("Portable mode: data in {}", dir.display()));
         command = command.env("JETSTREAM_DATA_DIR", dir);
