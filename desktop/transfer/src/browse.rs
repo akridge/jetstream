@@ -45,9 +45,10 @@ pub async fn list_folder(
     prefix: &str,
     page_token: Option<&str>,
     max_results: u32,
+    include_folders: bool,
 ) -> Result<Listing> {
     let prefix = folder_prefix(prefix);
-    let page = client.list_dir(bucket, &prefix, page_token, max_results).await?;
+    let page = client.list_dir(bucket, &prefix, page_token, max_results, include_folders).await?;
     let mut entries: Vec<Entry> = page
         .prefixes
         .into_iter()

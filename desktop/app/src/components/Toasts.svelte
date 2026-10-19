@@ -53,6 +53,8 @@
   .msg {
     flex: 1;
     font-size: 13px;
+    white-space: pre-line;
+    word-break: break-word;
   }
   .action {
     border: none;

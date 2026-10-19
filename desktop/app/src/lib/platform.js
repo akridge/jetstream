@@ -107,9 +107,9 @@ function desktopOnly() {
 }
 
 /** One folder level of gs://bucket/prefix: { bucket, prefix, entries, next_page_token }. */
-export async function listFolder(bucket, prefix, pageToken = null) {
+export async function listFolder(bucket, prefix, pageToken = null, includeFolders = false) {
   if (!isDesktop) throw desktopOnly();
-  return invoke('list_folder', { bucket, prefix, pageToken });
+  return invoke('list_folder', { bucket, prefix, pageToken, includeFolders });
 }
 
 /** Total objects/bytes under gs://bucket/prefix. */
@@ -163,4 +163,68 @@ export function startAudit(bucket, prefix, patterns, onProgress) {
 
 export async function cancelAudit(auditId) {
   if (isDesktop && auditId) await invoke('cancel_audit', { auditId });
+}
+
+// ----- Cloud file manager (Rust core) ------------------------------------------------------
+
+export const newOpId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+/** Bucket settings and permissions: { name, soft_delete_seconds, hierarchical_namespace, autoclass, known, permissions }. */
+export async function bucketAccess(bucket) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('bucket_access', { bucket });
+}
+
+/**
+ * Plan an operation without changing anything. request is one of
+ *   { kind: 'copy' | 'move', bucket, paths, dst_bucket, dst_prefix }
+ *   { kind: 'rename', bucket, path, new_name }
+ *   { kind: 'delete', bucket, paths }
+ * Folder paths end with "/". Returns the plan summary; run it with runCloudOp(opId).
+ */
+export async function planCloudOp(opId, request) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('plan_cloud_op', { opId, request });
+}
+
+async function withOpProgress(opId, onProgress, call) {
+  const unlisten = await listen('cloud-op-progress', (event) => {
+    if (event.payload.op_id === opId) onProgress?.(event.payload);
+  });
+  try {
+    return await call();
+  } finally {
+    unlisten();
+  }
+}
+
+/** Run a planned operation; onProgress({done, skipped, failed, bytes}). */
+export function runCloudOp(opId, onProgress) {
+  return withOpProgress(opId, onProgress, () => invoke('run_cloud_op', { opId }));
+}
+
+/** Reverse a finished operation; runs as a new operation newOpId. */
+export function undoCloudOp(opId, newOpId, onProgress) {
+  return withOpProgress(newOpId, onProgress, () => invoke('undo_cloud_op', { opId, newOpId }));
+}
+
+export async function cancelCloudOp(opId) {
+  if (isDesktop && opId) await invoke('cancel_cloud_op', { opId });
+}
+
+/** objects: [{ name, generation }] from listDeleted. */
+export function restoreObjects(opId, bucket, objects, onProgress) {
+  if (!isDesktop) return Promise.reject(desktopOnly());
+  return withOpProgress(opId, onProgress, () => invoke('restore_objects', { opId, bucket, objects }));
+}
+
+/** Soft-deleted objects under a folder: { objects, next_page_token }. */
+export async function listDeleted(bucket, prefix, pageToken = null) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('list_deleted', { bucket, prefix, pageToken });
+}
+
+export async function newFolder(bucket, parent, name) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('new_folder', { bucket, parent, name });
 }

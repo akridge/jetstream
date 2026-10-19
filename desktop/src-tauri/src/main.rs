@@ -2,8 +2,8 @@
 //
 // Starts the bundled JetStream server (a PyInstaller sidecar) on a private localhost
 // port and reports its status to the desktop UI (Svelte, in ../app), which talks to the
-// server's HTTP API for jobs and presets. Cloud Storage browsing and local folder
-// analysis run in-process in the Rust core (../transfer). The original web pages stay
+// server's HTTP API for jobs and presets. Cloud Storage browsing and file management, and
+// local folder analysis, run in-process in the Rust core (../transfer). The original web pages stay
 // available in a separate "classic" window. A tray icon keeps uploads running when the
 // window is closed.
 
@@ -19,9 +19,10 @@ use std::time::{Duration, Instant};
 use jetstream_transfer::audit::{self, AuditProgress, AuditReport};
 use jetstream_transfer::auth::TokenProvider;
 use jetstream_transfer::browse::{self, FolderTotals, Listing};
+use jetstream_transfer::fileops::{self, BucketAccess, DeletedPage, Item, OpProgress, OpResult, Plan, PlanSummary, Undo};
 use jetstream_transfer::gcs::GcsClient;
 use jetstream_transfer::scan::{self, ScanOptions, ScanProgress, ScanReport};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -147,6 +148,12 @@ struct Core {
     client: Mutex<Option<GcsClient>>,
     scans: Mutex<HashMap<String, Arc<ScanProgress>>>,
     audits: Mutex<HashMap<String, Arc<AuditProgress>>>,
+    /// Planned (not yet run) file operations, by operation id.
+    plans: Mutex<HashMap<String, (Plan, bool)>>,
+    /// Running file operations, for cancelling.
+    running: Mutex<HashMap<String, Arc<OpProgress>>>,
+    /// How to undo finished operations (with the bucket's soft-delete setting).
+    undos: Mutex<HashMap<String, (Undo, bool)>>,
 }
 
 impl Core {
@@ -175,9 +182,11 @@ async fn list_folder(
     bucket: String,
     prefix: String,
     page_token: Option<String>,
+    include_folders: Option<bool>,
 ) -> Result<Listing, String> {
     let client = core.client()?;
-    browse::list_folder(&client, bucket.trim(), &prefix, page_token.as_deref(), 500).await.map_err(|e| {
+    let include_folders = include_folders.unwrap_or(false);
+    browse::list_folder(&client, bucket.trim(), &prefix, page_token.as_deref(), 500, include_folders).await.map_err(|e| {
         core.reset_client();
         format!("{e:#}")
     })
@@ -294,6 +303,157 @@ fn cancel_audit(core: tauri::State<'_, Core>, audit_id: String) {
     if let Some(progress) = core.audits.lock().unwrap().get(&audit_id) {
         progress.cancel.store(true, Ordering::Relaxed);
     }
+}
+
+// ----- Cloud file manager ------------------------------------------------------------------
+
+/// Bucket settings (soft delete, hierarchical namespace, ...) and the user's permissions.
+#[tauri::command]
+async fn bucket_access(core: tauri::State<'_, Core>, bucket: String) -> Result<BucketAccess, String> {
+    Ok(fileops::bucket_access(&core.client()?, bucket.trim()).await)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+enum OpRequest {
+    Copy { bucket: String, paths: Vec<String>, dst_bucket: String, dst_prefix: String },
+    Move { bucket: String, paths: Vec<String>, dst_bucket: String, dst_prefix: String },
+    Rename { bucket: String, path: String, new_name: String },
+    Delete { bucket: String, paths: Vec<String> },
+}
+
+#[derive(Serialize)]
+struct PlannedOp {
+    #[serde(flatten)]
+    summary: PlanSummary,
+    soft_delete_seconds: u64,
+}
+
+fn items(paths: &[String]) -> Vec<Item> {
+    paths.iter().map(|p| Item { path: p.clone() }).collect()
+}
+
+/// Work out what an operation will do (objects, clashes, fees) without changing anything.
+/// Run it with `run_cloud_op` using the same id.
+#[tauri::command]
+async fn plan_cloud_op(core: tauri::State<'_, Core>, op_id: String, request: OpRequest) -> Result<PlannedOp, String> {
+    let client = core.client()?;
+    let bucket_name = match &request {
+        OpRequest::Copy { bucket, .. } | OpRequest::Move { bucket, .. } | OpRequest::Rename { bucket, .. } | OpRequest::Delete { bucket, .. } => {
+            bucket.trim().to_string()
+        }
+    };
+    let source = fileops::bucket_access(&client, &bucket_name).await.bucket;
+    let plan = match &request {
+        OpRequest::Copy { paths, dst_bucket, dst_prefix, .. } => {
+            fileops::plan_transfer(&client, &source, &items(paths), dst_bucket.trim(), dst_prefix, None, false).await
+        }
+        OpRequest::Move { paths, dst_bucket, dst_prefix, .. } => {
+            fileops::plan_transfer(&client, &source, &items(paths), dst_bucket.trim(), dst_prefix, None, true).await
+        }
+        OpRequest::Rename { path, new_name, .. } => {
+            let parent = path.trim_end_matches('/').rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
+            fileops::plan_transfer(&client, &source, &[Item { path: path.clone() }], &bucket_name, &parent, Some(new_name), true).await
+        }
+        OpRequest::Delete { paths, .. } => fileops::plan_delete(&client, &source, &items(paths)).await,
+    }
+    .map_err(|e| format!("{e:#}"))?;
+    let planned = PlannedOp { summary: plan.summary.clone(), soft_delete_seconds: source.soft_delete_seconds };
+    core.plans.lock().unwrap().insert(op_id, (plan, source.soft_delete_seconds > 0));
+    Ok(planned)
+}
+
+#[derive(Clone, Serialize)]
+struct OpTick {
+    op_id: String,
+    done: u64,
+    skipped: u64,
+    failed: u64,
+    bytes: u64,
+}
+
+async fn run_with_progress(app: &AppHandle, core: &Core, op_id: &str, plan: &Plan, soft_delete: bool) -> Result<OpResult, String> {
+    let client = core.client()?;
+    let progress = Arc::new(OpProgress::default());
+    core.running.lock().unwrap().insert(op_id.to_string(), progress.clone());
+    let finished = Arc::new(AtomicBool::new(false));
+    let (tick_app, tick_progress, tick_done, tick_id) = (app.clone(), progress.clone(), finished.clone(), op_id.to_string());
+    std::thread::spawn(move || {
+        while !tick_done.load(Ordering::Relaxed) {
+            let _ = tick_app.emit(
+                "cloud-op-progress",
+                OpTick {
+                    op_id: tick_id.clone(),
+                    done: tick_progress.done.load(Ordering::Relaxed),
+                    skipped: tick_progress.skipped.load(Ordering::Relaxed),
+                    failed: tick_progress.failed.load(Ordering::Relaxed),
+                    bytes: tick_progress.bytes.load(Ordering::Relaxed),
+                },
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
+    let result = fileops::run(&client, plan, soft_delete, &progress).await;
+    finished.store(true, Ordering::Relaxed);
+    core.running.lock().unwrap().remove(op_id);
+    if let Some(undo) = &result.undo {
+        core.undos.lock().unwrap().insert(op_id.to_string(), (undo.clone(), soft_delete));
+    }
+    Ok(result)
+}
+
+/// Run a planned operation; emits "cloud-op-progress".
+#[tauri::command]
+async fn run_cloud_op(app: AppHandle, core: tauri::State<'_, Core>, op_id: String) -> Result<OpResult, String> {
+    let (plan, soft_delete) = core.plans.lock().unwrap().remove(&op_id).ok_or("This operation was already run or has expired; plan it again.")?;
+    run_with_progress(&app, &core, &op_id, &plan, soft_delete).await
+}
+
+/// Reverse a finished operation (as a new operation, `new_op_id`).
+#[tauri::command]
+async fn undo_cloud_op(app: AppHandle, core: tauri::State<'_, Core>, op_id: String, new_op_id: String) -> Result<OpResult, String> {
+    let (undo, soft_delete) = core.undos.lock().unwrap().remove(&op_id).ok_or("Nothing to undo")?;
+    run_with_progress(&app, &core, &new_op_id, &fileops::plan_undo(&undo), soft_delete).await
+}
+
+#[tauri::command]
+fn cancel_cloud_op(core: tauri::State<'_, Core>, op_id: String) {
+    core.plans.lock().unwrap().remove(&op_id);
+    if let Some(progress) = core.running.lock().unwrap().get(&op_id) {
+        progress.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+#[derive(Deserialize)]
+struct DeletedObject {
+    name: String,
+    generation: String,
+}
+
+/// Bring back soft-deleted objects; a live object with the same name is never replaced.
+#[tauri::command]
+async fn restore_objects(
+    app: AppHandle,
+    core: tauri::State<'_, Core>,
+    op_id: String,
+    bucket: String,
+    objects: Vec<DeletedObject>,
+) -> Result<OpResult, String> {
+    let pairs: Vec<(String, String)> = objects.into_iter().map(|o| (o.name, o.generation)).collect();
+    run_with_progress(&app, &core, &op_id, &fileops::plan_restore(bucket.trim(), &pairs), true).await
+}
+
+/// Soft-deleted objects under a folder (recursively).
+#[tauri::command]
+async fn list_deleted(core: tauri::State<'_, Core>, bucket: String, prefix: String, page_token: Option<String>) -> Result<DeletedPage, String> {
+    fileops::list_deleted(&core.client()?, bucket.trim(), &prefix, page_token.as_deref()).await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn new_folder(core: tauri::State<'_, Core>, bucket: String, parent: String, name: String) -> Result<String, String> {
+    let client = core.client()?;
+    let source = fileops::bucket_access(&client, bucket.trim()).await.bucket;
+    fileops::new_folder(&client, &source, &parent, &name).await.map_err(|e| format!("{e:#}"))
 }
 
 /// Portable mode: a "JetStreamData" folder next to the program keeps the job history,
@@ -444,7 +604,15 @@ fn main() {
             cancel_scan,
             default_junk_patterns,
             audit_bucket,
-            cancel_audit
+            cancel_audit,
+            bucket_access,
+            plan_cloud_op,
+            run_cloud_op,
+            undo_cloud_op,
+            cancel_cloud_op,
+            restore_objects,
+            list_deleted,
+            new_folder
         ])
         .setup(|app| {
             build_tray(app.handle())?;

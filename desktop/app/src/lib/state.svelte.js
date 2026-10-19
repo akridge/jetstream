@@ -45,6 +45,8 @@ class AppState {
   scanRequest = $state(null);
   /** Add/edit folder dialog: { preset, previousName } or null. */
   folderDialog = $state(null);
+  /** Last place browsed in Cloud storage, kept while switching views. */
+  cloudLocation = null;
 
   jobList = $derived(
     Object.values(this.jobs).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')),

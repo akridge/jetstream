@@ -267,13 +267,13 @@ async fn browse_lists_one_level_and_totals_a_folder() {
     env.write("video/c.mp4", &big(5000, 3));
     env.run(env.options()).await;
 
-    let root = jetstream_transfer::browse::list_folder(&env.client, "bucket", "data", None, 100).await.unwrap();
+    let root = jetstream_transfer::browse::list_folder(&env.client, "bucket", "data", None, 100, false).await.unwrap();
     assert_eq!(root.prefix, "data/");
     let names: Vec<(&str, bool)> = root.entries.iter().map(|e| (e.name.as_str(), e.is_folder)).collect();
     assert_eq!(names, [("photos/", true), ("video/", true), ("readme.txt", false)]);
     assert_eq!(root.entries[2].size, Some(5));
 
-    let photos = jetstream_transfer::browse::list_folder(&env.client, "bucket", "data/photos/", None, 100).await.unwrap();
+    let photos = jetstream_transfer::browse::list_folder(&env.client, "bucket", "data/photos/", None, 100, false).await.unwrap();
     let names: Vec<&str> = photos.entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["raw/", "a.jpg"]);
 
@@ -281,7 +281,7 @@ async fn browse_lists_one_level_and_totals_a_folder() {
     let mut seen = Vec::new();
     let mut token: Option<String> = None;
     loop {
-        let page = jetstream_transfer::browse::list_folder(&env.client, "bucket", "data/", token.as_deref(), 1).await.unwrap();
+        let page = jetstream_transfer::browse::list_folder(&env.client, "bucket", "data/", token.as_deref(), 1, false).await.unwrap();
         seen.extend(page.entries.into_iter().map(|e| e.name));
         match page.next_page_token {
             Some(next) => token = Some(next),
@@ -321,4 +321,128 @@ async fn audit_finds_junk_objects_under_a_prefix() {
 
     let limited = jetstream_transfer::audit::audit_bucket(&env.client, "bucket", "data", &patterns, 0, 1, &progress).await.unwrap();
     assert_eq!((limited.findings.len(), limited.findings_truncated, limited.junk_objects), (1, true, 4));
+}
+
+// ----- file manager operations ------------------------------------------------------------
+
+mod files {
+    use super::*;
+    use jetstream_transfer::fileops::{self, Item, OpProgress};
+
+    async fn put(env: &Env, name: &str, data: &[u8]) {
+        env.client.upload_multipart("bucket", name, data.to_vec(), crc32c::crc32c(data), false).await.unwrap();
+    }
+
+    async fn names(env: &Env, prefix: &str) -> Vec<String> {
+        let mut names: Vec<String> = env.client.list("bucket", prefix).await.unwrap().into_iter().map(|o| o.name).collect();
+        names.sort();
+        names
+    }
+
+    fn items(paths: &[&str]) -> Vec<Item> {
+        paths.iter().map(|p| Item { path: p.to_string() }).collect()
+    }
+
+    #[tokio::test]
+    async fn rename_folder_moves_everything_keeps_metadata_and_undoes() {
+        let Some(env) = Env::new().await else { return };
+        put(&env, "data/photos/", b"").await; // placeholder object, as the Console creates
+        put(&env, "data/photos/a.jpg", &big(3000, 1)).await;
+        put(&env, "data/photos/sub/b.jpg", &big(500, 2)).await;
+        put(&env, "data/photos-raw/c.jpg", &big(10, 3)).await; // same prefix text, different folder
+        let patch = format!("{}/storage/v1/b/bucket/o/{}", env.emulator.base, jetstream_transfer::gcs::encode("data/photos/a.jpg"));
+        env.http.patch(patch).json(&serde_json::json!({"contentType": "image/jpeg", "metadata": {"survey": "kona"}})).send().await.unwrap();
+
+        let bucket = env.client.get_bucket("bucket").await.unwrap();
+        let plan = fileops::plan_transfer(&env.client, &bucket, &items(&["data/photos/"]), "bucket", "data/", Some("pics"), true)
+            .await
+            .unwrap();
+        assert_eq!((plan.summary.objects, plan.summary.bytes, plan.summary.conflicts), (3, 3500, 0));
+        assert_eq!(plan.summary.example.as_deref(), Some("gs://bucket/data/pics/"));
+
+        let result = fileops::run(&env.client, &plan, false, &OpProgress::default()).await;
+        assert_eq!((result.done, result.failed, result.skipped), (3, 0, 0), "{:?}", result.failures);
+        assert_eq!(
+            names(&env, "data/").await,
+            ["data/photos-raw/c.jpg", "data/pics/", "data/pics/a.jpg", "data/pics/sub/b.jpg"]
+        );
+        assert_eq!(env.object("data/pics/a.jpg").await.unwrap().1, big(3000, 1));
+        let moved = env.client.get_object_raw("bucket", "data/pics/a.jpg").await.unwrap().unwrap();
+        assert_eq!(moved["contentType"], "image/jpeg");
+        assert_eq!(moved["metadata"]["survey"], "kona");
+
+        assert!(result.undoable);
+        let undo = fileops::plan_undo(result.undo.as_ref().unwrap());
+        let undone = fileops::run(&env.client, &undo, false, &OpProgress::default()).await;
+        assert_eq!((undone.done, undone.failed), (3, 0), "{:?}", undone.failures);
+        assert_eq!(
+            names(&env, "data/").await,
+            ["data/photos-raw/c.jpg", "data/photos/", "data/photos/a.jpg", "data/photos/sub/b.jpg"]
+        );
+    }
+
+    #[tokio::test]
+    async fn move_leaves_conflicts_alone_and_finishes_interrupted_moves() {
+        let Some(env) = Env::new().await else { return };
+        put(&env, "in/x.csv", b"new x").await;
+        put(&env, "in/y.csv", b"same y").await;
+        put(&env, "in/z.csv", b"z").await;
+        put(&env, "out/in/x.csv", b"different x").await; // a real clash
+        put(&env, "out/in/y.csv", b"same y").await; // copied by a move that was interrupted
+
+        let bucket = env.client.get_bucket("bucket").await.unwrap();
+        let plan = fileops::plan_transfer(&env.client, &bucket, &items(&["in/"]), "bucket", "out/", None, true).await.unwrap();
+        assert_eq!((plan.summary.objects, plan.summary.conflicts, plan.summary.already_copied), (3, 1, 1));
+        assert_eq!(plan.summary.conflict_examples, ["out/in/x.csv"]);
+
+        let result = fileops::run(&env.client, &plan, false, &OpProgress::default()).await;
+        assert_eq!((result.done, result.skipped, result.failed), (2, 1, 0));
+        assert_eq!(names(&env, "in/").await, ["in/x.csv"], "the clashing file stays where it was");
+        assert_eq!(env.object("out/in/x.csv").await.unwrap().1, b"different x", "never overwritten");
+        assert_eq!(env.object("out/in/z.csv").await.unwrap().1, b"z");
+    }
+
+    #[tokio::test]
+    async fn copy_rename_file_delete_and_new_folder() {
+        let Some(env) = Env::new().await else { return };
+        put(&env, "docs/report.pdf", &big(800, 4)).await;
+        let bucket = env.client.get_bucket("bucket").await.unwrap();
+
+        // Copy keeps the original.
+        let copy = fileops::plan_transfer(&env.client, &bucket, &items(&["docs/report.pdf"]), "bucket", "archive/", None, false)
+            .await
+            .unwrap();
+        let result = fileops::run(&env.client, &copy, false, &OpProgress::default()).await;
+        assert_eq!((result.done, result.undoable), (1, false));
+
+        // Rename a file in place.
+        let rename = fileops::plan_transfer(&env.client, &bucket, &items(&["docs/report.pdf"]), "bucket", "docs/", Some("final.pdf"), true)
+            .await
+            .unwrap();
+        fileops::run(&env.client, &rename, false, &OpProgress::default()).await;
+        assert_eq!(names(&env, "").await, ["archive/report.pdf", "docs/final.pdf"]);
+
+        // Guard rails.
+        let into_itself = fileops::plan_transfer(&env.client, &bucket, &items(&["docs/"]), "bucket", "docs/inner/", None, true).await;
+        assert!(into_itself.err().unwrap().to_string().contains("inside itself"));
+        put(&env, "docs/old/a.txt", b"a").await;
+        put(&env, "docs/new/b.txt", b"b").await;
+        let onto_existing = fileops::plan_transfer(&env.client, &bucket, &items(&["docs/old/"]), "bucket", "docs/", Some("new"), true).await;
+        assert!(onto_existing.err().unwrap().to_string().contains("already exists"), "renaming never merges folders");
+        let bad_name = fileops::plan_transfer(&env.client, &bucket, &items(&["docs/"]), "bucket", "", Some("a/b"), true).await;
+        assert!(bad_name.is_err());
+
+        // New folder, then a duplicate.
+        assert_eq!(fileops::new_folder(&env.client, &bucket, "docs", "2026").await.unwrap(), "docs/2026/");
+        assert!(fileops::new_folder(&env.client, &bucket, "docs/", "2026").await.is_err());
+        let listing = jetstream_transfer::browse::list_folder(&env.client, "bucket", "docs/", None, 100, false).await.unwrap();
+        assert!(listing.entries.iter().any(|e| e.is_folder && e.name == "2026/"));
+
+        // Delete a folder: everything under it, including the placeholder.
+        let delete = fileops::plan_delete(&env.client, &bucket, &items(&["docs/"])).await.unwrap();
+        assert_eq!(delete.summary.objects, 4);
+        let deleted = fileops::run(&env.client, &delete, false, &OpProgress::default()).await;
+        assert_eq!((deleted.done, deleted.undoable), (4, false), "no soft delete, so no undo");
+        assert_eq!(names(&env, "").await, ["archive/report.pdf"]);
+    }
 }

@@ -1,4 +1,5 @@
-//! Minimal Cloud Storage JSON API client: multipart and resumable uploads, and listing.
+//! Minimal Cloud Storage JSON API client: multipart and resumable uploads, listing, and the
+//! object operations behind the cloud file manager (server-side copy, delete, restore).
 //!
 //! Written against the documented REST API (rather than a higher-level SDK) so that a
 //! resumable session URI can be saved and continued after the app restarts.
@@ -75,7 +76,43 @@ pub struct ObjectInfo {
     pub storage_class: Option<String>,
     #[serde(default, rename(deserialize = "contentType"))]
     pub content_type: Option<String>,
+    #[serde(default, rename(deserialize = "timeCreated"))]
+    pub time_created: Option<String>,
+    /// Set on soft-deleted objects (listed with `softDeleted=true`).
+    #[serde(default, rename(deserialize = "softDeleteTime"))]
+    pub soft_delete_time: Option<String>,
+    #[serde(default, rename(deserialize = "hardDeleteTime"))]
+    pub hard_delete_time: Option<String>,
+    /// When the storage class last changed; the early-deletion clock starts here.
+    #[serde(default, rename(deserialize = "timeStorageClassUpdated"))]
+    pub time_storage_class_updated: Option<String>,
+    #[serde(default, rename(deserialize = "temporaryHold"))]
+    pub temporary_hold: Option<bool>,
+    #[serde(default, rename(deserialize = "eventBasedHold"))]
+    pub event_based_hold: Option<bool>,
+    #[serde(default, rename(deserialize = "kmsKeyName"))]
+    pub kms_key_name: Option<String>,
 }
+
+/// The bucket settings that decide how the file manager behaves.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct BucketInfo {
+    pub name: String,
+    pub location: Option<String>,
+    pub storage_class: Option<String>,
+    pub versioning: bool,
+    /// Soft delete retention; 0 when soft delete is off (deletes are permanent).
+    pub soft_delete_seconds: u64,
+    /// Hierarchical namespace: folders are real resources.
+    pub hierarchical_namespace: bool,
+    /// Autoclass manages storage classes and charges no early-deletion fees.
+    pub autoclass: bool,
+}
+
+/// Metadata kept when an object is copied with `rewrite` (a rewrite with a request body uses
+/// that body instead of the source's metadata, so these are passed through explicitly).
+pub const KEPT_METADATA: &[&str] =
+    &["contentType", "contentEncoding", "contentDisposition", "contentLanguage", "cacheControl", "metadata", "customTime", "storageClass"];
 
 fn de_u64_string<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<u64, D::Error> {
     #[derive(Deserialize)]
@@ -341,7 +378,15 @@ impl GcsClient {
     }
 
     /// One page of objects and subfolders directly under `prefix` (delimiter "/").
-    pub async fn list_dir(&self, bucket: &str, prefix: &str, page_token: Option<&str>, max_results: u32) -> Result<DirPage> {
+    /// `include_folders` also lists empty folders of hierarchical-namespace buckets.
+    pub async fn list_dir(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        page_token: Option<&str>,
+        max_results: u32,
+        include_folders: bool,
+    ) -> Result<DirPage> {
         let mut url = format!(
             "{}/storage/v1/b/{}/o?prefix={}&delimiter=%2F&maxResults={max_results}\
              &fields=items(name,size,updated,storageClass,contentType),prefixes,nextPageToken",
@@ -349,6 +394,9 @@ impl GcsClient {
             encode(bucket),
             encode(prefix)
         );
+        if include_folders {
+            url.push_str("&includeFoldersAsPrefixes=true");
+        }
         if let Some(token) = page_token {
             url.push_str(&format!("&pageToken={}", encode(token)));
         }
@@ -381,6 +429,290 @@ impl GcsClient {
         }
         let page: ListPage = response.json().await?;
         Ok(DirPage { prefixes: Vec::new(), objects: page.items, next_page_token: page.next_page_token.filter(|t| !t.is_empty()) })
+    }
+
+    /// One page of objects under `prefix` as raw JSON, with the given `fields` selector for items.
+    pub async fn list_raw(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        page_token: Option<&str>,
+        item_fields: &str,
+        soft_deleted: bool,
+    ) -> Result<(Vec<serde_json::Value>, Option<String>)> {
+        let mut url = format!(
+            "{}/storage/v1/b/{}/o?prefix={}&maxResults=1000&fields={}",
+            self.base,
+            encode(bucket),
+            encode(prefix),
+            encode(&format!("items({item_fields}),nextPageToken"))
+        );
+        if soft_deleted {
+            url.push_str("&softDeleted=true");
+        }
+        if let Some(token) = page_token {
+            url.push_str(&format!("&pageToken={}", encode(token)));
+        }
+        let response = self.send(self.http.get(url)).await.map_err(|e| anyhow!("{e}"))?;
+        if !response.status().is_success() {
+            return Err(anyhow!("listing gs://{bucket}/{prefix} failed: {}", Self::error_for(response).await));
+        }
+        #[derive(Deserialize)]
+        struct RawPage {
+            #[serde(default)]
+            items: Vec<serde_json::Value>,
+            #[serde(rename = "nextPageToken")]
+            next_page_token: Option<String>,
+        }
+        let page: RawPage = response.json().await?;
+        Ok((page.items, page.next_page_token.filter(|t| !t.is_empty())))
+    }
+
+    /// Metadata for one object, or `None` if it doesn't exist.
+    pub async fn get_object(&self, bucket: &str, name: &str) -> Result<Option<ObjectInfo>, GcsError> {
+        match self.get_object_raw(bucket, name).await? {
+            Some(raw) => Ok(Some(serde_json::from_value(raw).map_err(|e| GcsError::Retryable(e.to_string()))?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Full JSON resource for one object (including custom metadata), or `None` if missing.
+    pub async fn get_object_raw(&self, bucket: &str, name: &str) -> Result<Option<serde_json::Value>, GcsError> {
+        let url = format!("{}/storage/v1/b/{}/o/{}", self.base, encode(bucket), encode(name));
+        let response = self.send(self.http.get(url)).await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(Self::error_for(response).await);
+        }
+        Ok(Some(response.json().await.map_err(|e| GcsError::Retryable(e.to_string()))?))
+    }
+
+    /// Server-side copy (nothing passes through this computer). Loops on the rewrite token,
+    /// which large or cross-location/class copies need. `metadata` becomes the copy's metadata.
+    /// With `no_clobber`, an existing destination fails with `AlreadyExists` (which, as with any
+    /// 412, can also mean the source generation no longer matches). `kms_key` keeps a
+    /// customer-managed encryption key on the copy.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rewrite(
+        &self,
+        src_bucket: &str,
+        src: &str,
+        src_generation: Option<&str>,
+        dst_bucket: &str,
+        dst: &str,
+        metadata: &serde_json::Value,
+        no_clobber: bool,
+        kms_key: Option<&str>,
+    ) -> Result<ObjectInfo, GcsError> {
+        #[derive(Deserialize)]
+        struct RewriteResponse {
+            #[serde(default)]
+            done: bool,
+            #[serde(rename = "rewriteToken")]
+            rewrite_token: Option<String>,
+            resource: Option<ObjectInfo>,
+        }
+        let mut token: Option<String> = None;
+        loop {
+            let mut url = format!(
+                "{}/storage/v1/b/{}/o/{}/rewriteTo/b/{}/o/{}?fields=done,rewriteToken,resource",
+                self.base,
+                encode(src_bucket),
+                encode(src),
+                encode(dst_bucket),
+                encode(dst)
+            );
+            if no_clobber {
+                url.push_str("&ifGenerationMatch=0");
+            }
+            if let Some(generation) = src_generation {
+                url.push_str(&format!("&ifSourceGenerationMatch={generation}"));
+            }
+            if let Some(key) = kms_key {
+                // The object reports the key version; the destination takes the key itself.
+                let key = key.split("/cryptoKeyVersions/").next().unwrap_or(key);
+                url.push_str(&format!("&destinationKmsKeyName={}", encode(key)));
+            }
+            if let Some(t) = &token {
+                url.push_str(&format!("&rewriteToken={}", encode(t)));
+            }
+            let response = self.send(self.http.post(url).json(metadata)).await?;
+            if !response.status().is_success() {
+                return Err(Self::error_for(response).await);
+            }
+            let body: RewriteResponse = response.json().await.map_err(|e| GcsError::Retryable(e.to_string()))?;
+            if body.done {
+                return body.resource.ok_or_else(|| GcsError::Retryable("rewrite finished without object metadata".into()));
+            }
+            token = Some(body.rewrite_token.filter(|t| !t.is_empty()).ok_or_else(|| GcsError::Retryable("rewrite returned no token".into()))?);
+        }
+    }
+
+    /// Delete one object. With `generation`, only that version is deleted, so an object replaced
+    /// since it was listed is left alone. A missing object counts as deleted.
+    pub async fn delete_object(&self, bucket: &str, name: &str, generation: Option<&str>) -> Result<(), GcsError> {
+        let mut url = format!("{}/storage/v1/b/{}/o/{}", self.base, encode(bucket), encode(name));
+        if let Some(generation) = generation {
+            url.push_str(&format!("?ifGenerationMatch={generation}"));
+        }
+        let response = self.send(self.http.delete(url)).await?;
+        if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        if response.status() == StatusCode::PRECONDITION_FAILED {
+            return Err(GcsError::Fatal("changed since it was listed; left in place".into()));
+        }
+        Err(Self::error_for(response).await)
+    }
+
+    /// Bring back a soft-deleted object. Fails with `AlreadyExists` rather than replacing a live
+    /// object of the same name.
+    pub async fn restore_object(&self, bucket: &str, name: &str, generation: &str) -> Result<ObjectInfo, GcsError> {
+        let url = format!(
+            "{}/storage/v1/b/{}/o/{}/restore?generation={generation}&ifGenerationMatch=0",
+            self.base,
+            encode(bucket),
+            encode(name)
+        );
+        let response = self.send(self.http.post(url)).await?;
+        if !response.status().is_success() {
+            return Err(Self::error_for(response).await);
+        }
+        response.json().await.map_err(|e| GcsError::Retryable(e.to_string()))
+    }
+
+    pub async fn get_bucket(&self, bucket: &str) -> Result<BucketInfo> {
+        let url = format!(
+            "{}/storage/v1/b/{}?fields=name,location,storageClass,versioning,softDeletePolicy,hierarchicalNamespace,autoclass",
+            self.base,
+            encode(bucket)
+        );
+        let response = self.send(self.http.get(url)).await.map_err(|e| anyhow!("{e}"))?;
+        if !response.status().is_success() {
+            return Err(anyhow!("reading bucket {bucket} failed: {}", Self::error_for(response).await));
+        }
+        let raw: serde_json::Value = response.json().await?;
+        Ok(BucketInfo {
+            name: raw["name"].as_str().unwrap_or(bucket).to_string(),
+            location: raw["location"].as_str().map(str::to_string),
+            storage_class: raw["storageClass"].as_str().map(str::to_string),
+            versioning: raw["versioning"]["enabled"].as_bool().unwrap_or(false),
+            soft_delete_seconds: match &raw["softDeletePolicy"]["retentionDurationSeconds"] {
+                serde_json::Value::String(s) => s.parse().unwrap_or(0),
+                v => v.as_u64().unwrap_or(0),
+            },
+            hierarchical_namespace: raw["hierarchicalNamespace"]["enabled"].as_bool().unwrap_or(false),
+            autoclass: raw["autoclass"]["enabled"].as_bool().unwrap_or(false),
+        })
+    }
+
+    /// Create a folder in a hierarchical-namespace bucket (and any missing parents).
+    pub async fn create_folder(&self, bucket: &str, folder: &str) -> Result<(), GcsError> {
+        let url = format!("{}/storage/v1/b/{}/folders?recursive=true", self.base, encode(bucket));
+        let response = self.send(self.http.post(url).json(&serde_json::json!({ "name": folder }))).await?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        if response.status() == StatusCode::CONFLICT {
+            return Err(GcsError::AlreadyExists);
+        }
+        Err(Self::error_for(response).await)
+    }
+
+    /// Rename a folder in a hierarchical-namespace bucket. Google does this as one operation
+    /// (no per-object copies); this waits for it to finish.
+    pub async fn rename_folder(&self, bucket: &str, from: &str, to: &str) -> Result<(), GcsError> {
+        let url = format!(
+            "{}/storage/v1/b/{}/folders/{}/renameTo/folders/{}",
+            self.base,
+            encode(bucket),
+            encode(from),
+            encode(to)
+        );
+        let response = self.send(self.http.post(url)).await?;
+        if response.status() == StatusCode::CONFLICT {
+            return Err(GcsError::AlreadyExists);
+        }
+        if !response.status().is_success() {
+            return Err(Self::error_for(response).await);
+        }
+        let mut operation: serde_json::Value = response.json().await.map_err(|e| GcsError::Retryable(e.to_string()))?;
+        let mut delay = Duration::from_millis(250);
+        loop {
+            if operation["done"].as_bool().unwrap_or(false) {
+                if let Some(error) = operation.get("error").filter(|e| !e.is_null()) {
+                    return Err(GcsError::Fatal(format!("folder rename failed: {}", error["message"].as_str().unwrap_or("unknown error"))));
+                }
+                return Ok(());
+            }
+            let name = operation["name"].as_str().unwrap_or_default();
+            // "projects/_/buckets/<bucket>/operations/<id>" -> "<id>"
+            let id = name.rsplit('/').next().unwrap_or(name);
+            if id.is_empty() {
+                return Err(GcsError::Fatal("folder rename returned no operation".into()));
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(5));
+            let url = format!("{}/storage/v1/b/{}/operations/{}", self.base, encode(bucket), encode(id));
+            let response = self.send(self.http.get(url)).await?;
+            if !response.status().is_success() {
+                return Err(Self::error_for(response).await);
+            }
+            operation = response.json().await.map_err(|e| GcsError::Retryable(e.to_string()))?;
+        }
+    }
+
+    /// Folders under a prefix in a hierarchical-namespace bucket (all levels).
+    pub async fn list_folders(&self, bucket: &str, prefix: &str) -> Result<Vec<String>> {
+        let mut folders = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut url = format!("{}/storage/v1/b/{}/folders?prefix={}&pageSize=1000", self.base, encode(bucket), encode(prefix));
+            if let Some(t) = &token {
+                url.push_str(&format!("&pageToken={}", encode(t)));
+            }
+            let response = self.send(self.http.get(url)).await.map_err(|e| anyhow!("{e}"))?;
+            if !response.status().is_success() {
+                return Err(anyhow!("listing folders failed: {}", Self::error_for(response).await));
+            }
+            let page: serde_json::Value = response.json().await?;
+            if let Some(items) = page["items"].as_array() {
+                folders.extend(items.iter().filter_map(|f| f["name"].as_str().map(str::to_string)));
+            }
+            match page["nextPageToken"].as_str() {
+                Some(t) if !t.is_empty() => token = Some(t.to_string()),
+                _ => break,
+            }
+        }
+        Ok(folders)
+    }
+
+    /// Delete an (empty) folder in a hierarchical-namespace bucket.
+    pub async fn delete_folder(&self, bucket: &str, folder: &str) -> Result<(), GcsError> {
+        let url = format!("{}/storage/v1/b/{}/folders/{}", self.base, encode(bucket), encode(folder));
+        let response = self.send(self.http.delete(url)).await?;
+        if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Err(Self::error_for(response).await)
+    }
+
+    /// Which of `permissions` the signed-in user holds on the bucket.
+    pub async fn test_permissions(&self, bucket: &str, permissions: &[&str]) -> Result<Vec<String>> {
+        let query: Vec<String> = permissions.iter().map(|p| format!("permissions={}", encode(p))).collect();
+        let url = format!("{}/storage/v1/b/{}/iam/testPermissions?{}", self.base, encode(bucket), query.join("&"));
+        let response = self.send(self.http.get(url)).await.map_err(|e| anyhow!("{e}"))?;
+        if !response.status().is_success() {
+            return Err(anyhow!("permission check failed: {}", Self::error_for(response).await));
+        }
+        #[derive(Deserialize)]
+        struct Granted {
+            #[serde(default)]
+            permissions: Vec<String>,
+        }
+        Ok(response.json::<Granted>().await?.permissions)
     }
 
     /// All objects under a prefix (one request per 1000 objects).

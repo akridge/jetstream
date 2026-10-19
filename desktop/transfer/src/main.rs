@@ -17,6 +17,7 @@ use jetstream_transfer::auth::TokenProvider;
 use jetstream_transfer::gcs::GcsClient;
 use jetstream_transfer::manifest::{default_data_dir, Manifest};
 use jetstream_transfer::sync::{parse_destination, sync, Emit, SyncOptions};
+use jetstream_transfer::fileops::{self, Item, OpProgress, Plan};
 use jetstream_transfer::{audit, browse, scan};
 
 #[derive(Parser)]
@@ -94,6 +95,95 @@ enum Command {
         #[arg(long, default_value_t = 20_000)]
         max_findings: usize,
     },
+    /// Bucket settings (soft delete, hierarchical namespace, Autoclass) and your permissions.
+    Bucket { bucket: String },
+    /// Copy objects or folders (gs://b/folder/ ends with "/") into a folder, server-side.
+    /// Existing destinations are never overwritten.
+    Cp {
+        #[arg(required = true, num_args = 1..)]
+        sources: Vec<String>,
+        /// Destination folder, gs://bucket/folder/
+        #[arg(long)]
+        to: String,
+        /// Only report what would happen.
+        #[arg(long)]
+        plan: bool,
+    },
+    /// Move objects or folders into a folder: copy, verify, then remove each original.
+    Mv {
+        #[arg(required = true, num_args = 1..)]
+        sources: Vec<String>,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        plan: bool,
+    },
+    /// Rename an object or folder (gs://b/folder/ ends with "/") in place.
+    Rename {
+        path: String,
+        new_name: String,
+        #[arg(long)]
+        plan: bool,
+    },
+    /// Delete objects or folders (recursively).
+    Rm {
+        #[arg(required = true, num_args = 1..)]
+        sources: Vec<String>,
+        #[arg(long)]
+        plan: bool,
+    },
+    /// Create an empty folder NAME inside gs://bucket/parent/.
+    Mkdir { parent: String, name: String },
+    /// List soft-deleted objects under gs://bucket/prefix.
+    Deleted {
+        path: String,
+        #[arg(long)]
+        page_token: Option<String>,
+    },
+    /// Restore soft-deleted objects, given as NAME#GENERATION (from `deleted`).
+    Restore {
+        bucket: String,
+        #[arg(required = true, num_args = 1..)]
+        objects: Vec<String>,
+    },
+}
+
+/// "gs://bucket/a/b/" -> ("bucket", "a/b/"), keeping a trailing "/" (a folder).
+fn split_gs(path: &str) -> Result<(String, String)> {
+    let trimmed = path.trim().trim_start_matches("gs://");
+    let (bucket, name) = trimmed.split_once('/').unwrap_or((trimmed, ""));
+    if bucket.is_empty() {
+        anyhow::bail!("expected gs://bucket/path, got {path}");
+    }
+    Ok((bucket.to_string(), name.to_string()))
+}
+
+/// Sources must all be in one bucket.
+fn split_sources(sources: &[String]) -> Result<(String, Vec<Item>)> {
+    let mut bucket = String::new();
+    let mut items = Vec::new();
+    for source in sources {
+        let (b, path) = split_gs(source)?;
+        if !bucket.is_empty() && b != bucket {
+            anyhow::bail!("all sources must be in the same bucket");
+        }
+        bucket = b;
+        items.push(Item { path });
+    }
+    Ok((bucket, items))
+}
+
+/// Print the plan, or run it and print the result (exit 2 if anything failed).
+async fn plan_or_run(client: &GcsClient, plan: Plan, soft_delete_seconds: u64, only_plan: bool) -> Result<i32> {
+    if only_plan {
+        let mut value = serde_json::to_value(&plan.summary)?;
+        value["soft_delete_seconds"] = soft_delete_seconds.into();
+        return print_json(&value);
+    }
+    let progress = OpProgress::default();
+    let result = fileops::run(client, &plan, soft_delete_seconds > 0, &progress).await;
+    print_json(&result)?;
+    Ok(if result.failed > 0 { 2 } else { 0 })
 }
 
 fn cloud_client() -> Result<GcsClient> {
@@ -122,15 +212,67 @@ fn main() {
 #[tokio::main]
 async fn run() -> Result<i32> {
     let command = Cli::parse().command;
+    let is_move = matches!(command, Command::Mv { .. });
     match command {
         Command::Ls { path, max_results, page_token } => {
             let (bucket, prefix) = parse_destination(&path)?;
-            let listing = browse::list_folder(&cloud_client()?, &bucket, &prefix, page_token.as_deref(), max_results).await?;
+            let listing = browse::list_folder(&cloud_client()?, &bucket, &prefix, page_token.as_deref(), max_results, false).await?;
             return print_json(&listing);
         }
         Command::Du { path, limit } => {
             let (bucket, prefix) = parse_destination(&path)?;
             return print_json(&browse::folder_totals(&cloud_client()?, &bucket, &prefix, limit).await?);
+        }
+        Command::Bucket { bucket } => {
+            let bucket = bucket.trim_start_matches("gs://").trim_end_matches('/');
+            return print_json(&fileops::bucket_access(&cloud_client()?, bucket).await);
+        }
+        Command::Cp { sources, to, plan } | Command::Mv { sources, to, plan } => {
+            let delete_source = is_move;
+            let client = cloud_client()?;
+            let (bucket, items) = split_sources(&sources)?;
+            let (dst_bucket, dst_prefix) = split_gs(&to)?;
+            let source = fileops::bucket_access(&client, &bucket).await.bucket;
+            let soft = source.soft_delete_seconds;
+            let op = fileops::plan_transfer(&client, &source, &items, &dst_bucket, &dst_prefix, None, delete_source).await?;
+            return plan_or_run(&client, op, soft, plan).await;
+        }
+        Command::Rename { path, new_name, plan } => {
+            let client = cloud_client()?;
+            let (bucket, name) = split_gs(&path)?;
+            let parent = name.trim_end_matches('/').rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
+            let source = fileops::bucket_access(&client, &bucket).await.bucket;
+            let soft = source.soft_delete_seconds;
+            let op = fileops::plan_transfer(&client, &source, &[Item { path: name }], &bucket, &parent, Some(&new_name), true).await?;
+            return plan_or_run(&client, op, soft, plan).await;
+        }
+        Command::Rm { sources, plan } => {
+            let client = cloud_client()?;
+            let (bucket, items) = split_sources(&sources)?;
+            let source = fileops::bucket_access(&client, &bucket).await.bucket;
+            let soft = source.soft_delete_seconds;
+            let op = fileops::plan_delete(&client, &source, &items).await?;
+            return plan_or_run(&client, op, soft, plan).await;
+        }
+        Command::Mkdir { parent, name } => {
+            let client = cloud_client()?;
+            let (bucket, parent) = split_gs(&parent)?;
+            let source = fileops::bucket_access(&client, &bucket).await.bucket;
+            let path = fileops::new_folder(&client, &source, &parent, &name).await?;
+            return print_json(&serde_json::json!({ "created": format!("gs://{bucket}/{path}") }));
+        }
+        Command::Deleted { path, page_token } => {
+            let (bucket, prefix) = split_gs(&path)?;
+            return print_json(&fileops::list_deleted(&cloud_client()?, &bucket, &prefix, page_token.as_deref()).await?);
+        }
+        Command::Restore { bucket, objects } => {
+            let client = cloud_client()?;
+            let bucket = bucket.trim_start_matches("gs://").trim_end_matches('/').to_string();
+            let pairs = objects
+                .iter()
+                .map(|o| o.rsplit_once('#').map(|(n, g)| (n.to_string(), g.to_string())).context("expected NAME#GENERATION"))
+                .collect::<Result<Vec<_>>>()?;
+            return plan_or_run(&client, fileops::plan_restore(&bucket, &pairs), 1, false).await;
         }
         Command::Scan { folder } => {
             let report = tokio::task::spawn_blocking(move || {

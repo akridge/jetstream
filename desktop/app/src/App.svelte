@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import Sidebar from './components/Sidebar.svelte';
   import Toasts from './components/Toasts.svelte';
+  import OpsTray from './components/OpsTray.svelte';
   import DropOverlay from './components/DropOverlay.svelte';
   import FolderDialog from './components/FolderDialog.svelte';
   import FoldersView from './views/FoldersView.svelte';
@@ -67,6 +68,7 @@
     {/key}
   {/if}
   {#if dragging}<DropOverlay />{/if}
+  <OpsTray />
   <Toasts />
 {:else}
   <div class="splash">
