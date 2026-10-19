@@ -60,7 +60,7 @@ impl std::fmt::Display for GcsError {
 
 impl std::error::Error for GcsError {}
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct ObjectInfo {
     pub name: String,
     #[serde(default, deserialize_with = "de_u64_string")]
@@ -69,6 +69,12 @@ pub struct ObjectInfo {
     pub crc32c: Option<String>,
     #[serde(default)]
     pub generation: Option<String>,
+    #[serde(default)]
+    pub updated: Option<String>,
+    #[serde(default, rename(deserialize = "storageClass"))]
+    pub storage_class: Option<String>,
+    #[serde(default, rename(deserialize = "contentType"))]
+    pub content_type: Option<String>,
 }
 
 fn de_u64_string<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<u64, D::Error> {
@@ -88,8 +94,18 @@ fn de_u64_string<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<
 struct ListPage {
     #[serde(default)]
     items: Vec<ObjectInfo>,
+    #[serde(default)]
+    prefixes: Vec<String>,
     #[serde(rename = "nextPageToken")]
     next_page_token: Option<String>,
+}
+
+/// One page of a delimiter listing: "subfolders" (prefixes) and objects directly under a prefix.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DirPage {
+    pub prefixes: Vec<String>,
+    pub objects: Vec<ObjectInfo>,
+    pub next_page_token: Option<String>,
 }
 
 /// Progress of a resumable upload after a chunk or status query.
@@ -324,6 +340,49 @@ impl GcsClient {
         Self::resumable_response(response, size, crc).await
     }
 
+    /// One page of objects and subfolders directly under `prefix` (delimiter "/").
+    pub async fn list_dir(&self, bucket: &str, prefix: &str, page_token: Option<&str>, max_results: u32) -> Result<DirPage> {
+        let mut url = format!(
+            "{}/storage/v1/b/{}/o?prefix={}&delimiter=%2F&maxResults={max_results}\
+             &fields=items(name,size,updated,storageClass,contentType),prefixes,nextPageToken",
+            self.base,
+            encode(bucket),
+            encode(prefix)
+        );
+        if let Some(token) = page_token {
+            url.push_str(&format!("&pageToken={}", encode(token)));
+        }
+        let response = self.send(self.http.get(url)).await.map_err(|e| anyhow!("{e}"))?;
+        if !response.status().is_success() {
+            return Err(anyhow!("listing gs://{bucket}/{prefix} failed: {}", Self::error_for(response).await));
+        }
+        let page: ListPage = response.json().await?;
+        Ok(DirPage {
+            prefixes: page.prefixes,
+            objects: page.items,
+            next_page_token: page.next_page_token.filter(|t| !t.is_empty()),
+        })
+    }
+
+    /// One page (up to 1000) of all objects under `prefix`, recursively, with size details.
+    pub async fn list_flat(&self, bucket: &str, prefix: &str, page_token: Option<&str>) -> Result<DirPage> {
+        let mut url = format!(
+            "{}/storage/v1/b/{}/o?prefix={}&maxResults=1000&fields=items(name,size,updated,storageClass),nextPageToken",
+            self.base,
+            encode(bucket),
+            encode(prefix)
+        );
+        if let Some(token) = page_token {
+            url.push_str(&format!("&pageToken={}", encode(token)));
+        }
+        let response = self.send(self.http.get(url)).await.map_err(|e| anyhow!("{e}"))?;
+        if !response.status().is_success() {
+            return Err(anyhow!("listing gs://{bucket}/{prefix} failed: {}", Self::error_for(response).await));
+        }
+        let page: ListPage = response.json().await?;
+        Ok(DirPage { prefixes: Vec::new(), objects: page.items, next_page_token: page.next_page_token.filter(|t| !t.is_empty()) })
+    }
+
     /// All objects under a prefix (one request per 1000 objects).
     pub async fn list(&self, bucket: &str, prefix: &str) -> Result<Vec<ObjectInfo>> {
         let mut objects = Vec::new();
@@ -375,7 +434,7 @@ mod tests {
 
     #[test]
     fn checksum_mismatch_is_retryable() {
-        let info = ObjectInfo { name: "x".into(), size: 1, crc32c: Some(crc32c_b64(1)), generation: None };
+        let info = ObjectInfo { name: "x".into(), size: 1, crc32c: Some(crc32c_b64(1)), ..Default::default() };
         assert!(matches!(GcsClient::check_crc(&info, 2), Err(GcsError::Retryable(_))));
         assert!(GcsClient::check_crc(&info, 1).is_ok());
         let no_crc = ObjectInfo { crc32c: None, ..info };

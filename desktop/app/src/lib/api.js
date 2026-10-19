@@ -55,6 +55,13 @@ export const api = {
   signIn: () => request('POST', '/api/system/auth-login'),
   uploadTools: () => request('GET', '/api/system/upload-tools'),
   analyzeFolder: (path) => request('POST', '/api/folders/analyze', { path, recursive: true }),
+  cloudTransfer: (body) => request('POST', '/api/cloud/transfer', body),
+  cloudMove: (body) => request('POST', '/api/cloud/move', body),
+  stats: () => request('GET', '/api/stats/'),
+  uploadTrends: (days = 30) => request('GET', `/api/analytics/upload-trends?days=${days}`),
+  successRate: () => request('GET', '/api/analytics/success-rate'),
+  performance: () => request('GET', '/api/analytics/performance-metrics'),
+  topDestinations: (limit = 6) => request('GET', `/api/analytics/top-destinations?limit=${limit}`),
 };
 
 export function eventsUrl() {
@@ -63,4 +70,8 @@ export function eventsUrl() {
 
 export function logUrl(id) {
   return `${base}/api/uploads/${encodeURIComponent(id)}/log`;
+}
+
+export function csvExportUrl() {
+  return `${base}/api/analytics/export-csv`;
 }

@@ -1,4 +1,5 @@
 //! `jetstream-transfer sync <folder> gs://bucket/prefix` — prints one JSON event per line.
+//! `ls`, `du` and `scan` print one JSON document (the same data the desktop app shows).
 //!
 //! Exit codes: 0 = everything synced, 2 = finished with failed files, 3 = cancelled, 1 = error.
 
@@ -15,7 +16,8 @@ use regex::Regex;
 use jetstream_transfer::auth::TokenProvider;
 use jetstream_transfer::gcs::GcsClient;
 use jetstream_transfer::manifest::{default_data_dir, Manifest};
-use jetstream_transfer::sync::{sync, Emit, SyncOptions};
+use jetstream_transfer::sync::{parse_destination, sync, Emit, SyncOptions};
+use jetstream_transfer::{browse, scan};
 
 #[derive(Parser)]
 #[command(version, about = "JetStream upload engine for Google Cloud Storage")]
@@ -63,6 +65,34 @@ enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+    /// List one folder level of gs://bucket/prefix (folders and files).
+    Ls {
+        path: String,
+        #[arg(long, default_value_t = 500)]
+        max_results: u32,
+        #[arg(long)]
+        page_token: Option<String>,
+    },
+    /// Total objects and bytes under gs://bucket/prefix.
+    Du {
+        path: String,
+        /// Stop counting after this many objects.
+        #[arg(long, default_value_t = 1_000_000)]
+        limit: u64,
+    },
+    /// Analyze a local folder: sizes by type and subfolder, largest, old and junk files.
+    Scan { folder: PathBuf },
+}
+
+fn cloud_client() -> Result<GcsClient> {
+    let http = GcsClient::http_client();
+    let auth = Arc::new(TokenProvider::from_environment(http.clone())?);
+    Ok(GcsClient::new(http, auth))
+}
+
+fn print_json<T: serde::Serialize>(value: &T) -> Result<i32> {
+    println!("{}", serde_json::to_string(value)?);
+    Ok(0)
 }
 
 fn main() {
@@ -79,6 +109,26 @@ fn main() {
 
 #[tokio::main]
 async fn run() -> Result<i32> {
+    let command = Cli::parse().command;
+    match command {
+        Command::Ls { path, max_results, page_token } => {
+            let (bucket, prefix) = parse_destination(&path)?;
+            let listing = browse::list_folder(&cloud_client()?, &bucket, &prefix, page_token.as_deref(), max_results).await?;
+            return print_json(&listing);
+        }
+        Command::Du { path, limit } => {
+            let (bucket, prefix) = parse_destination(&path)?;
+            return print_json(&browse::folder_totals(&cloud_client()?, &bucket, &prefix, limit).await?);
+        }
+        Command::Scan { folder } => {
+            let report = tokio::task::spawn_blocking(move || {
+                scan::scan_folder(&folder, &scan::ScanOptions::default(), &scan::ScanProgress::default())
+            })
+            .await??;
+            return print_json(&report);
+        }
+        Command::Sync { .. } => {}
+    }
     let Command::Sync {
         source,
         destination,
@@ -92,7 +142,10 @@ async fn run() -> Result<i32> {
         resumable_threshold_mib,
         chunk_mib,
         manifest,
-    } = Cli::parse().command;
+    } = command
+    else {
+        unreachable!()
+    };
 
     let mut opts = SyncOptions::new(source, &destination)?;
     opts.concurrency = concurrency;

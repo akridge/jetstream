@@ -39,11 +39,11 @@ export async function serverLog() {
 }
 
 /** Native folder picker; returns a path or null. */
-export async function pickFolder(defaultPath) {
+export async function pickFolder(defaultPath, title = 'Choose a folder to sync') {
   if (!isDesktop) {
     return window.prompt('Folder path on this computer:', defaultPath || '') || null;
   }
-  const selected = await openDialog({ directory: true, multiple: false, defaultPath: defaultPath || undefined, title: 'Choose a folder to sync' });
+  const selected = await openDialog({ directory: true, multiple: false, defaultPath: defaultPath || undefined, title });
   return Array.isArray(selected) ? selected[0] : selected;
 }
 
@@ -98,4 +98,43 @@ export async function revealPath(path) {
 export async function openClassic(path, base) {
   if (isDesktop) await invoke('open_classic', { path });
   else window.open(`${base}/${path.replace(/^\//, '')}`, '_blank');
+}
+
+// ----- Rust core (in-process in the desktop app) -------------------------------------
+
+function desktopOnly() {
+  return new Error('This runs in the JetStream desktop app.');
+}
+
+/** One folder level of gs://bucket/prefix: { bucket, prefix, entries, next_page_token }. */
+export async function listFolder(bucket, prefix, pageToken = null) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('list_folder', { bucket, prefix, pageToken });
+}
+
+/** Total objects/bytes under gs://bucket/prefix. */
+export async function folderTotals(bucket, prefix) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('folder_totals', { bucket, prefix });
+}
+
+/** Analyze a local folder; onProgress({files, bytes}) while it runs. Cancel with cancelScan(scanId). */
+export function startScan(path, onProgress) {
+  if (!isDesktop) return { scanId: null, done: Promise.reject(desktopOnly()) };
+  const scanId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const done = (async () => {
+    const unlisten = await listen('scan-progress', (event) => {
+      if (event.payload.scan_id === scanId) onProgress?.(event.payload);
+    });
+    try {
+      return await invoke('scan_folder', { path, scanId });
+    } finally {
+      unlisten();
+    }
+  })();
+  return { scanId, done };
+}
+
+export async function cancelScan(scanId) {
+  if (isDesktop && scanId) await invoke('cancel_scan', { scanId });
 }

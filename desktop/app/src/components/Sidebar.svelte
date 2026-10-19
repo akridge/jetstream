@@ -3,13 +3,34 @@
   import Activity from '@lucide/svelte/icons/activity';
   import Settings from '@lucide/svelte/icons/settings';
   import LayoutGrid from '@lucide/svelte/icons/layout-grid';
+  import Cloud from '@lucide/svelte/icons/cloud';
+  import FolderSearch from '@lucide/svelte/icons/folder-search';
+  import ChartColumn from '@lucide/svelte/icons/chart-column';
   import { app } from '../lib/state.svelte.js';
 
-  const items = [
-    { id: 'folders', label: 'Synced folders', icon: FolderSync },
-    { id: 'activity', label: 'Activity', icon: Activity },
-    { id: 'more', label: 'More tools', icon: LayoutGrid },
-    { id: 'settings', label: 'Settings', icon: Settings },
+  const groups = [
+    {
+      title: 'Sync',
+      items: [
+        { id: 'folders', label: 'Synced folders', icon: FolderSync },
+        { id: 'activity', label: 'Activity', icon: Activity },
+      ],
+    },
+    { title: 'Cloud', items: [{ id: 'cloud', label: 'Cloud storage', icon: Cloud }] },
+    {
+      title: 'Insights',
+      items: [
+        { id: 'insights', label: 'Folder insights', icon: FolderSearch },
+        { id: 'analytics', label: 'Analytics', icon: ChartColumn },
+      ],
+    },
+    {
+      title: '',
+      items: [
+        { id: 'more', label: 'More tools', icon: LayoutGrid },
+        { id: 'settings', label: 'Settings', icon: Settings },
+      ],
+    },
   ];
 
   let auth = $derived(app.auth);
@@ -28,17 +49,22 @@
   </div>
 
   <nav>
-    {#each items as item (item.id)}
-      {@const Icon = item.icon}
-      <button class="nav-item" class:active={app.view === item.id} onclick={() => (app.view = item.id)}>
-        <Icon size={18} />
-        <span>{item.label}</span>
-        {#if item.id === 'activity' && app.activeCount}
-          <span class="badge">{app.activeCount}</span>
-        {:else if item.id === 'activity' && app.failedCount}
-          <span class="badge danger" title="Failed jobs">{app.failedCount}</span>
-        {/if}
-      </button>
+    {#each groups as group, g (g)}
+      <div class="group" class:spacer={!group.title}>
+        {#if group.title}<div class="group-title">{group.title}</div>{/if}
+        {#each group.items as item (item.id)}
+          {@const Icon = item.icon}
+          <button class="nav-item" class:active={app.view === item.id} onclick={() => (app.view = item.id)}>
+            <Icon size={18} />
+            <span>{item.label}</span>
+            {#if item.id === 'activity' && app.activeCount}
+              <span class="badge">{app.activeCount}</span>
+            {:else if item.id === 'activity' && app.failedCount}
+              <span class="badge danger" title="Failed jobs">{app.failedCount}</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
     {/each}
   </nav>
 
@@ -98,8 +124,25 @@
   nav {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 14px;
     flex: 1;
+  }
+  .group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .group.spacer {
+    margin-top: auto;
+    padding-bottom: 8px;
+  }
+  .group-title {
+    padding: 0 12px 4px;
+    color: var(--sidebar-muted);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
   .nav-item {
     display: flex;

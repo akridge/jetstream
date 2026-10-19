@@ -19,12 +19,31 @@ A native desktop app for JetStream, built with [Tauri 2](https://tauri.app) and 
   - read the job's output
   - cancel a job, run it again, or "upload for real" after a preview
   - show the job's log file
+- **Cloud storage:** browse buckets folder by folder, with sizes, last-updated times and storage classes. From any folder you can:
+  - total everything in it
+  - copy its `gs://` path
+  - **Sync to…** another location (gcloud storage rsync)
+  - **Move…** a file or folder, safely: each object is copied and verified before the original is deleted
+
+  Each operation starts as a preview.
+- **Folder insights:** analyze any local folder in seconds, by choosing it or dropping it on the window. It shows:
+  - size by kind of file and by file type
+  - the biggest subfolders, which you can click to drill in
+  - the largest files
+  - cleanup ideas: temporary and system files, and large files untouched for a year
+
+  **Sync this folder…** turns the folder into a synced folder.
+- **Analytics:**
+  - data uploaded, job counts, success rate and average speed
+  - a 30-day chart of completed and failed jobs, with a table view
+  - top destinations
+  - CSV export
 - **Settings:**
   - Google Cloud sign-in status, with a **Sign in with Google** button
   - default upload tool
   - light, dark or system theme
   - notifications
-- **More tools:** cloud operations, cloud and local audits, the catalog tool, analytics and Drive upload. These open the original pages in a separate window while they're rebuilt for the new interface.
+- **More tools:** the cloud audit, the catalog tool, Drive upload, and the original pages. These open in a separate window.
 - **Desktop behaviour:**
   - notifications when jobs finish
   - closing the window keeps JetStream running in the tray, so uploads continue; **Quit** in the tray menu stops it
@@ -43,9 +62,11 @@ JetStream.app / JetStream.exe        Rust shell (src-tauri/src/main.rs)
  ├─ starts binaries/jetstream-server  bundled JetStream server (PyInstaller)
  │         on 127.0.0.1:<random port>, and reports its status to the UI
  ├─ ships  binaries/jetstream-transfer  Rust upload engine (transfer/)
- ├─ main window: the desktop UI (Svelte, app/ → dist/), which calls the
- │         server's HTTP API and live event stream, and uses Tauri for the
- │         folder picker, drag-and-drop, notifications and opening files
+ ├─ Rust core, in-process (transfer/ as a library): Cloud Storage browsing,
+ │         folder totals and parallel local folder analysis
+ ├─ main window: the desktop UI (Svelte, app/ → dist/). Jobs, presets,
+ │         sign-in and analytics come from the server's HTTP API and live
+ │         event stream; browsing and analysis call the Rust core directly
  └─ "classic" window: the original pages from the server, opened from More tools
 ```
 

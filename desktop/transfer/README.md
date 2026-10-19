@@ -1,5 +1,20 @@
 # jetstream-transfer
 
+The Rust core of JetStream, used by the desktop app (as a library) and as a CLI:
+
+- **`sync`:** the upload engine, described below.
+- **`ls gs://bucket/folder/`:** one folder level, folders first, with size, updated time and storage class.
+- **`du gs://bucket/folder/`:** total objects and bytes under a folder, broken down by storage class.
+- **`scan <folder>`:** fast local folder analysis. Subfolders are walked in parallel. It reports:
+  - size by kind of file and by file type
+  - the biggest subfolders and the largest files
+  - junk files
+  - archive candidates (large files untouched for a year)
+
+`ls`, `du` and `scan` each print one JSON document, the same data the desktop app shows.
+
+## The upload engine
+
 A prototype upload engine for JetStream, written in Rust. It syncs a local folder to `gs://bucket/prefix` with:
 
 - **Incremental re-syncs:** a local manifest (SQLite) records what's already uploaded, so unchanged files are skipped without listing the bucket.

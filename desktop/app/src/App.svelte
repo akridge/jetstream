@@ -8,6 +8,9 @@
   import ActivityView from './views/ActivityView.svelte';
   import SettingsView from './views/SettingsView.svelte';
   import MoreView from './views/MoreView.svelte';
+  import CloudView from './views/CloudView.svelte';
+  import InsightsView from './views/InsightsView.svelte';
+  import AnalyticsView from './views/AnalyticsView.svelte';
   import { app } from './lib/state.svelte.js';
   import { onFolderDrop, serverLog } from './lib/platform.js';
 
@@ -21,6 +24,7 @@
       (paths) => {
         if (app.server.phase !== 'ready') return;
         if (app.folderDialog && dialogRef) dialogRef.setFolder(paths[0]);
+        else if (app.view === 'insights') app.scanRequest = paths[0];
         else app.addFolder(paths[0]);
       },
       (hovering) => (dragging = hovering && app.server.phase === 'ready'),
@@ -41,6 +45,12 @@
         <FoldersView />
       {:else if app.view === 'activity'}
         <ActivityView />
+      {:else if app.view === 'cloud'}
+        <CloudView />
+      {:else if app.view === 'insights'}
+        <InsightsView />
+      {:else if app.view === 'analytics'}
+        <AnalyticsView />
       {:else if app.view === 'settings'}
         <SettingsView />
       {:else}

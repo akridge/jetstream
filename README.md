@@ -109,6 +109,9 @@ A native desktop version of JetStream is in development in [`desktop/`](./deskto
 
 - **Synced folders:** add a folder by dropping it on the window, preview, then sync only what's new
 - **Activity:** live job progress
+- **Cloud storage:** browse buckets, see folder sizes, and sync or move data in the cloud
+- **Folder insights:** see what a folder holds and get cleanup ideas
+- **Analytics:** charts of job history
 - **Built-in upload engine:** re-syncs unchanged folders almost instantly and resumes large files
 - **Notifications and tray icon:** you're told when jobs finish, and closing the window keeps uploads running
 

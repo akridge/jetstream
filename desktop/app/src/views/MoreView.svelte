@@ -3,7 +3,6 @@
   import Brush from '@lucide/svelte/icons/brush';
   import HardDrive from '@lucide/svelte/icons/hard-drive';
   import LibraryBig from '@lucide/svelte/icons/library-big';
-  import ChartColumn from '@lucide/svelte/icons/chart-column';
   import FolderUp from '@lucide/svelte/icons/folder-up';
   import Upload from '@lucide/svelte/icons/upload';
   import ExternalLink from '@lucide/svelte/icons/external-link';
@@ -11,20 +10,19 @@
   import { openClassic } from '../lib/platform.js';
 
   const tools = [
-    { path: 'static/cloud.html', title: 'Cloud operations', text: 'Sync or move data between buckets and folders in the cloud.', icon: Cloud },
     { path: 'static/cloud-audit.html', title: 'Cloud audit', text: 'Find junk files in a bucket and quarantine them safely.', icon: Brush },
-    { path: 'static/local-audit.html', title: 'Local audit', text: 'See what a drive contains and get cleanup and archive suggestions.', icon: HardDrive },
     { path: 'static/dataset-creator.html', title: 'Cloud catalog tool', text: 'Build browsable catalogs of images and media in a bucket.', icon: LibraryBig },
-    { path: 'static/analytics.html', title: 'Analytics', text: 'Upload trends, success rates and bucket analysis.', icon: ChartColumn },
     { path: 'static/gdrive.html', title: 'Google Drive upload', text: 'Upload or sync folders to Google Drive.', icon: FolderUp },
-    { path: 'static/uploads.html', title: 'Classic uploads page', text: 'The original upload form, with every option and schedule.', icon: Upload },
+    { path: 'static/local-audit.html', title: 'Local audit reports', text: 'Saved local audit runs with per-file detail and CSV export.', icon: HardDrive },
+    { path: 'static/uploads.html', title: 'Classic uploads page', text: 'The original upload form, with scheduling and split-by-subfolder.', icon: Upload },
+    { path: 'static/cloud.html', title: 'Classic cloud operations', text: 'The original cloud sync and move page.', icon: Cloud },
   ];
 </script>
 
 <section class="view">
   <header class="view-head">
     <h1>More tools</h1>
-    <p class="sub">These open in a separate window while they move into the new app.</p>
+    <p class="sub">Tools that haven't moved into the new app yet open in a separate window.</p>
   </header>
 
   <div class="grid">

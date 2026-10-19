@@ -1,19 +1,25 @@
 // JetStream desktop shell.
 //
 // Starts the bundled JetStream server (a PyInstaller sidecar) on a private localhost
-// port and reports its status to the desktop UI (Svelte, in ../app), which then talks
-// to the server's HTTP API. The original web pages stay available in a separate
-// "classic" window. A tray icon keeps uploads running when the window is closed.
+// port and reports its status to the desktop UI (Svelte, in ../app), which talks to the
+// server's HTTP API for jobs and presets. Cloud Storage browsing and local folder
+// analysis run in-process in the Rust core (../transfer). The original web pages stay
+// available in a separate "classic" window. A tray icon keeps uploads running when the
+// window is closed.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use jetstream_transfer::auth::TokenProvider;
+use jetstream_transfer::browse::{self, FolderTotals, Listing};
+use jetstream_transfer::gcs::GcsClient;
+use jetstream_transfer::scan::{self, ScanOptions, ScanProgress, ScanReport};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -130,6 +136,104 @@ fn open_classic(app: AppHandle, path: String) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ----- Rust core: Cloud Storage browsing and local folder analysis ---------------------------
+
+/// Cloud Storage client and running folder scans, shared by the core commands.
+#[derive(Default)]
+struct Core {
+    client: Mutex<Option<GcsClient>>,
+    scans: Mutex<HashMap<String, Arc<ScanProgress>>>,
+}
+
+impl Core {
+    /// Reuse one client (it caches the access token); recreated after errors so a new
+    /// sign-in is picked up.
+    fn client(&self) -> Result<GcsClient, String> {
+        let mut slot = self.client.lock().unwrap();
+        if let Some(client) = slot.as_ref() {
+            return Ok(client.clone());
+        }
+        let http = GcsClient::http_client();
+        let auth = TokenProvider::from_environment(http.clone()).map_err(|e| format!("{e:#}"))?;
+        let client = GcsClient::new(http, Arc::new(auth));
+        *slot = Some(client.clone());
+        Ok(client)
+    }
+
+    fn reset_client(&self) {
+        *self.client.lock().unwrap() = None;
+    }
+}
+
+#[tauri::command]
+async fn list_folder(
+    core: tauri::State<'_, Core>,
+    bucket: String,
+    prefix: String,
+    page_token: Option<String>,
+) -> Result<Listing, String> {
+    let client = core.client()?;
+    browse::list_folder(&client, bucket.trim(), &prefix, page_token.as_deref(), 500).await.map_err(|e| {
+        core.reset_client();
+        format!("{e:#}")
+    })
+}
+
+#[tauri::command]
+async fn folder_totals(core: tauri::State<'_, Core>, bucket: String, prefix: String) -> Result<FolderTotals, String> {
+    let client = core.client()?;
+    browse::folder_totals(&client, bucket.trim(), &prefix, 2_000_000).await.map_err(|e| {
+        core.reset_client();
+        format!("{e:#}")
+    })
+}
+
+#[derive(Clone, Serialize)]
+struct ScanTick {
+    scan_id: String,
+    files: u64,
+    bytes: u64,
+}
+
+/// Analyze a local folder; emits "scan-progress" while running.
+#[tauri::command]
+async fn scan_folder(app: AppHandle, core: tauri::State<'_, Core>, path: String, scan_id: String) -> Result<ScanReport, String> {
+    let progress = Arc::new(ScanProgress::default());
+    core.scans.lock().unwrap().insert(scan_id.clone(), progress.clone());
+
+    let done = Arc::new(AtomicBool::new(false));
+    let (tick_app, tick_progress, tick_done, tick_id) = (app.clone(), progress.clone(), done.clone(), scan_id.clone());
+    std::thread::spawn(move || {
+        while !tick_done.load(Ordering::Relaxed) {
+            let _ = tick_app.emit(
+                "scan-progress",
+                ScanTick {
+                    scan_id: tick_id.clone(),
+                    files: tick_progress.files.load(Ordering::Relaxed),
+                    bytes: tick_progress.bytes.load(Ordering::Relaxed),
+                },
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    });
+
+    let scan_progress = progress.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        scan::scan_folder(std::path::Path::new(&path), &ScanOptions::default(), &scan_progress)
+    })
+    .await;
+    done.store(true, Ordering::Relaxed);
+    core.scans.lock().unwrap().remove(&scan_id);
+    result.map_err(|e| e.to_string())?.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn cancel_scan(core: tauri::State<'_, Core>, scan_id: String) {
+    if let Some(progress) = core.scans.lock().unwrap().get(&scan_id) {
+        progress.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 fn free_port() -> std::io::Result<u16> {
@@ -258,7 +362,16 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Server::default())
-        .invoke_handler(tauri::generate_handler![server_status, server_log, open_classic])
+        .manage(Core::default())
+        .invoke_handler(tauri::generate_handler![
+            server_status,
+            server_log,
+            open_classic,
+            list_folder,
+            folder_totals,
+            scan_folder,
+            cancel_scan
+        ])
         .setup(|app| {
             build_tray(app.handle())?;
             if let Err(err) = start_server(app.handle()) {

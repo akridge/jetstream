@@ -257,3 +257,43 @@ async fn large_files_upload_in_chunks_and_partial_objects_are_never_accepted() {
     assert_eq!(env.object("data/video.bin").await.unwrap().1, data);
     assert!(env.manifest.session("gs://bucket/data/", "video.bin").unwrap().is_none(), "session cleared");
 }
+
+#[tokio::test]
+async fn browse_lists_one_level_and_totals_a_folder() {
+    let Some(env) = Env::new().await else { return };
+    env.write("readme.txt", b"hello");
+    env.write("photos/a.jpg", &big(1000, 1));
+    env.write("photos/raw/b.dng", &big(3000, 2));
+    env.write("video/c.mp4", &big(5000, 3));
+    env.run(env.options()).await;
+
+    let root = jetstream_transfer::browse::list_folder(&env.client, "bucket", "data", None, 100).await.unwrap();
+    assert_eq!(root.prefix, "data/");
+    let names: Vec<(&str, bool)> = root.entries.iter().map(|e| (e.name.as_str(), e.is_folder)).collect();
+    assert_eq!(names, [("photos/", true), ("video/", true), ("readme.txt", false)]);
+    assert_eq!(root.entries[2].size, Some(5));
+
+    let photos = jetstream_transfer::browse::list_folder(&env.client, "bucket", "data/photos/", None, 100).await.unwrap();
+    let names: Vec<&str> = photos.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["raw/", "a.jpg"]);
+
+    // Paging with tiny pages still visits every entry exactly once.
+    let mut seen = Vec::new();
+    let mut token: Option<String> = None;
+    loop {
+        let page = jetstream_transfer::browse::list_folder(&env.client, "bucket", "data/", token.as_deref(), 1).await.unwrap();
+        seen.extend(page.entries.into_iter().map(|e| e.name));
+        match page.next_page_token {
+            Some(next) => token = Some(next),
+            None => break,
+        }
+    }
+    seen.sort();
+    assert_eq!(seen, ["photos/", "readme.txt", "video/"]);
+
+    let totals = jetstream_transfer::browse::folder_totals(&env.client, "bucket", "data/photos", 1_000).await.unwrap();
+    assert_eq!((totals.objects, totals.bytes, totals.truncated), (2, 4000, false));
+    // The limit is checked per page of up to 1000 objects, so a small folder is counted fully.
+    let small_limit = jetstream_transfer::browse::folder_totals(&env.client, "bucket", "data", 1).await.unwrap();
+    assert_eq!((small_limit.objects, small_limit.truncated), (4, false));
+}

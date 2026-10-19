@@ -17,6 +17,7 @@ crc32c = "0.6"
 futures = "0.3"
 percent-encoding = "2"
 rand = "0.9"
+rayon = "1"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.37", features = ["bundled"] }

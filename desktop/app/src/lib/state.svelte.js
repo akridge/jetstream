@@ -5,7 +5,7 @@ import { jobDestination, normalizeDestination, basename } from './format.js';
 import { ensureNotificationPermission, getServerStatus, notify, onServerStatus } from './platform.js';
 
 const PREFS_KEY = 'jetstreamDesktopPrefs';
-const DEFAULT_PREFS = { theme: 'system', notifications: true, default_upload_tool: 'gcloud' };
+const DEFAULT_PREFS = { theme: 'system', notifications: true, default_upload_tool: 'gcloud', recent_buckets: [], recent_scans: [] };
 
 function loadPrefs() {
   try {
@@ -41,6 +41,8 @@ class AppState {
   toasts = $state([]);
   loaded = $state(false);
   selectedJobId = $state(null);
+  /** Folder the Insights view should scan next (set by drag-and-drop or other views). */
+  scanRequest = $state(null);
   /** Add/edit folder dialog: { preset, previousName } or null. */
   folderDialog = $state(null);
 
@@ -185,6 +187,12 @@ class AppState {
     const theme = this.prefs.theme;
     if (theme === 'system') delete document.documentElement.dataset.theme;
     else document.documentElement.dataset.theme = theme;
+  }
+
+  /** Keep a short most-recent-first list in prefs (recent buckets, scanned folders). */
+  remember(key, value, limit = 6) {
+    const list = [value, ...(this.prefs[key] || []).filter((v) => v !== value)].slice(0, limit);
+    this.savePrefs({ [key]: list });
   }
 
   toolAvailable(id) {
