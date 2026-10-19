@@ -24,7 +24,7 @@ class UploadRequest(BaseModel):
     recursive: bool = Field(True, description="Include subfolders")
     threads: int = Field(4, description="Number of parallel threads")
     split_by_folder: bool = Field(False, description="Split into separate jobs per subfolder")
-    upload_tool: str = Field("gcloud", description="Upload tool: 'gcloud' or 'gsutil'")
+    upload_tool: str = Field("gcloud", description="Upload tool: 'gcloud', 'jetstream' (Rust engine) or 'gsutil'")
     scheduled_for: Optional[datetime] = Field(None, description="Schedule upload for specific datetime (ISO format)")
     
     exclude_patterns: Optional[List[str]] = Field(None, description="Regex patterns for files to exclude")
@@ -58,6 +58,13 @@ class UploadRequest(BaseModel):
         # Store as naive UTC to match SQLite DateTime behavior in this app.
         return v.astimezone(timezone.utc).replace(tzinfo=None)
     
+    @validator('upload_tool')
+    def validate_upload_tool(cls, v):
+        """Only known upload tools."""
+        if v not in ("gcloud", "jetstream", "gsutil"):
+            raise ValueError("upload_tool must be 'gcloud', 'jetstream' or 'gsutil'")
+        return v
+
     @validator('source_path')
     def validate_source_path(cls, v):
         """Validate source path exists."""

@@ -9,6 +9,7 @@ A native desktop app for JetStream, built with [Tauri 2](https://tauri.app). It 
 - **Notifications:** desktop notifications when uploads, previews and cloud operations finish or fail.
 - **Tray icon:** closing the window keeps JetStream running in the tray, so uploads continue. Use **Quit** in the tray menu to stop it.
 - **Single instance:** opening the app again brings the running window to the front.
+- **Built-in upload engine:** the JetStream engine is included as an upload tool you can choose. It re-syncs unchanged folders almost instantly and resumes large files; see [`transfer/README.md`](transfer/README.md). `gcloud storage rsync` stays the default.
 
 ## Requirements for users
 
@@ -39,6 +40,7 @@ You need Python 3.10+, Rust (stable), Node 18+, and the [Tauri system prerequisi
 # from the repository root
 pip install -r requirements.txt pyinstaller
 python desktop/scripts/build_sidecar.py      # -> desktop/src-tauri/binaries/jetstream-server-<target>
+python desktop/scripts/build_engine.py       # -> desktop/src-tauri/binaries/jetstream-transfer-<target>
 
 cd desktop
 npm install

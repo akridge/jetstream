@@ -15,7 +15,7 @@ from sqlalchemy.orm import defer
 from .. import database
 from ..database import UploadJob
 from ..events import broker
-from ..services import check_gcloud_auth, clear_auth_cache, find_gcloud
+from ..services import check_gcloud_auth, clear_auth_cache, find_gcloud, list_upload_tools
 
 logger = logging.getLogger(__name__)
 
@@ -164,3 +164,9 @@ async def auth_login(request: Request):
         raise HTTPException(status_code=500, detail=f"Could not start gcloud: {e}")
     clear_auth_cache()
     return {"status": "started"}
+
+
+@router.get("/upload-tools")
+async def upload_tools():
+    """Upload tools the user can choose from, and whether each is installed here."""
+    return await run_in_threadpool(list_upload_tools)

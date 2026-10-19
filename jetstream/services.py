@@ -14,6 +14,7 @@ import asyncio
 import time
 import logging
 import shutil
+import sys
 
 from .config import settings
 from .database import UploadJob, FolderStats, get_db
@@ -926,6 +927,128 @@ def make_progress_callback(job_id: str, db=None) -> Callable:
     return callback
 
 
+def find_transfer_engine() -> Optional[str]:
+    """Path to the jetstream-transfer engine, or None if it isn't installed.
+
+    Looks at JETSTREAM_TRANSFER_BIN, next to the running executable (the desktop app
+    bundles it beside the server), on PATH, and in a source checkout's build output.
+    """
+    exe = "jetstream-transfer.exe" if sys.platform == "win32" else "jetstream-transfer"
+    override = os.environ.get("JETSTREAM_TRANSFER_BIN")
+    candidates = [override] if override else []
+    candidates.append(os.path.join(os.path.dirname(sys.executable), exe))
+    on_path = shutil.which("jetstream-transfer")
+    if on_path:
+        candidates.append(on_path)
+    repo_build = Path(__file__).resolve().parent.parent / "desktop" / "transfer" / "target"
+    candidates += [str(repo_build / "release" / exe), str(repo_build / "debug" / exe)]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+class EngineRunState:
+    """Turns jetstream-transfer JSON events into job progress and a readable summary."""
+
+    def __init__(self):
+        self.base_bytes = 0      # bytes already in the cloud before this run (unchanged files)
+        self.base_files = 0
+        self.total_bytes = 0
+        self.summary: Optional[Dict] = None
+        self.failures: List[str] = []
+        self.failure_count = 0
+        self.error: Optional[str] = None
+        self.dry_run = False
+
+    def handle(self, line: str, progress_callback: Optional[Callable]) -> None:
+        import json
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return
+        kind = event.get("event")
+        if kind == "start":
+            self.dry_run = bool(event.get("dry_run"))
+        elif kind == "plan":
+            self.total_bytes = int(event.get("local_bytes") or 0)
+            self.base_bytes = self.total_bytes - int(event.get("to_check_bytes") or 0)
+            self.base_files = int(event.get("local_files") or 0) - int(event.get("to_check") or 0)
+            if progress_callback:
+                progress_callback(bytes_uploaded=self.base_bytes, total_bytes=self.total_bytes,
+                                  files_uploaded=self.base_files)
+        elif kind == "progress" and progress_callback:
+            progress_callback(
+                bytes_uploaded=self.base_bytes + int(event.get("bytes_done") or 0),
+                total_bytes=self.total_bytes,
+                files_uploaded=self.base_files + int(event.get("files_done") or 0),
+            )
+        elif kind == "file_failed":
+            self.failure_count += 1
+            if len(self.failures) < 20:
+                self.failures.append(f"{event.get('path')}: {event.get('error')}")
+        elif kind == "done":
+            self.summary = event
+        elif kind == "error":
+            self.error = event.get("error")
+
+    def summary_text(self, returncode: Optional[int]) -> str:
+        if self.summary is None:
+            return f"Upload engine failed: {self.error or f'exit code {returncode}'}"
+        s = self.summary
+        mb = lambda n: f"{(n or 0) / (1024 * 1024):.1f} MB"
+        if self.dry_run:
+            head = f"Preview: {s.get('would_upload', 0)} file(s), {mb(s.get('would_upload_bytes'))} would be uploaded."
+        else:
+            head = f"Uploaded {s.get('uploaded', 0)} file(s), {mb(s.get('uploaded_bytes'))}."
+        lines = [
+            head,
+            f"Unchanged: {s.get('unchanged', 0)}  |  Already in cloud: {s.get('already_in_cloud', 0)}  |  "
+            f"Resumed: {s.get('resumed', 0)}  |  Skipped (exists): {s.get('skipped_exists', 0)}  |  "
+            f"Excluded: {s.get('excluded', 0)}",
+            f"Failed: {s.get('failed', 0)}  |  Unreadable: {s.get('unreadable', 0)}  |  "
+            f"Time: {s.get('elapsed_seconds', 0)} s",
+        ]
+        if s.get("cancelled"):
+            lines.append("Cancelled before finishing; run the job again to continue.")
+        if self.failures:
+            lines.append("Failed files:")
+            lines.extend(f"  {f}" for f in self.failures)
+            if self.failure_count > len(self.failures):
+                lines.append(f"  ... and {self.failure_count - len(self.failures)} more")
+        return "\n".join(lines)
+
+
+def list_upload_tools() -> List[Dict]:
+    """Upload tools the user can choose from, with availability on this computer."""
+    gcloud = find_gcloud()
+    engine = find_transfer_engine()
+    return [
+        {
+            "id": "gcloud",
+            "label": "gcloud storage rsync",
+            "description": "Google's standard tool. Recommended default.",
+            "available": gcloud is not None,
+            "detail": None if gcloud else "Google Cloud SDK (gcloud) is not installed.",
+        },
+        {
+            "id": "jetstream",
+            "label": "JetStream engine (beta)",
+            "description": "Near-instant re-syncs of unchanged folders, resumes large files after interruptions, "
+                           "uses much less CPU.",
+            "available": engine is not None,
+            "detail": None if engine else "Included with the JetStream desktop app.",
+        },
+        {
+            "id": "gsutil",
+            "label": "gsutil rsync (legacy)",
+            "description": "Older Google tool, kept for compatibility.",
+            "available": shutil.which("gsutil") is not None,
+            "detail": None if shutil.which("gsutil") else "gsutil is not installed.",
+        },
+    ]
+
+
 def claim_job_for_run(db, job_id: str) -> bool:
     """Atomically move a pending/queued job to running.
 
@@ -1015,6 +1138,13 @@ class UploadService:
                 all_exclude_patterns.append(f".*/{re.escape(folder)}/.*")
                 all_exclude_patterns.append(f"^{re.escape(folder)}/.*")
         
+        if upload_tool == "jetstream":
+            return await self._upload_with_engine(
+                job_id=job_id, source_path=source_path, gcs_path=gcs_path, dry_run=dry_run,
+                recursive=recursive, log_path=log_path, exclude_patterns=all_exclude_patterns,
+                no_clobber=no_clobber, progress_callback=progress_callback,
+            )
+
         # Build command based on selected tool
         if upload_tool == "gsutil":
             # Build gsutil command
@@ -1217,6 +1347,86 @@ class UploadService:
                     log_file.close()
                 except Exception:
                     pass
+
+    async def _upload_with_engine(self, job_id: str, source_path: str, gcs_path: str, dry_run: bool,
+                                  recursive: bool, log_path: Optional[str], exclude_patterns: List[str],
+                                  no_clobber: bool, progress_callback: Optional[Callable]) -> Tuple[bool, str]:
+        """Upload with the JetStream transfer engine (Rust), mapping its JSON events to job progress."""
+        engine = find_transfer_engine()
+        if not engine:
+            message = ("The JetStream upload engine is not installed. It ships with the JetStream desktop app; "
+                       "choose 'gcloud storage' as the upload tool instead.")
+            return False, message
+
+        cmd = [engine, "sync", source_path, gcs_path]
+        if dry_run:
+            cmd.append("--dry-run")
+        if not recursive:
+            cmd.append("--no-recursive")
+        if no_clobber:
+            cmd.append("--no-clobber")
+        for pattern in exclude_patterns:
+            cmd.extend(["--exclude", pattern])
+        display_cmd = redact_sensitive_text(" ".join(f'"{c}"' if " " in c else c for c in cmd))
+        print(f"🚀 Executing: {display_cmd}")
+
+        log_file = None
+        if log_path:
+            try:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                log_file = open(log_path, 'w', encoding='utf-8')
+                log_file.write("=" * 80 + "\nJETSTREAM UPLOAD JOB LOG (JetStream engine)\n" + "=" * 80 + "\n\n")
+                log_file.write(f"Job ID:          {job_id}\n")
+                log_file.write(f"Timestamp:       {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                log_file.write(f"Source Path:     {source_path}\n")
+                log_file.write(f"Destination:     {gcs_path}\n")
+                log_file.write(f"Dry Run:         {dry_run}\n")
+                log_file.write(f"Command:         {display_cmd}\n\n")
+            except Exception as log_error:
+                print(f"⚠ Warning: Could not open log file: {log_error}")
+                log_file = None
+
+        capture = OutputCapture(log_file=log_file)
+        state = EngineRunState()
+
+        def run_engine() -> int:
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace", bufsize=1, creationflags=creationflags,
+            )
+            self.active_uploads[job_id] = process
+
+            def _read_stderr():
+                for line in process.stderr:
+                    capture.add(line, "stderr")
+
+            reader = threading.Thread(target=_read_stderr, daemon=True)
+            reader.start()
+            for line in process.stdout:
+                capture.add(line, "stdout")
+                state.handle(line, progress_callback)
+            reader.join()
+            return process.wait()
+
+        try:
+            returncode = await asyncio.to_thread(run_engine)
+        except Exception as e:
+            returncode = None
+            state.error = f"Could not run the upload engine: {e}"
+        finally:
+            self.active_uploads.pop(job_id, None)
+
+        output = cap_output(redact_sensitive_text(state.summary_text(returncode) + "\n\n" + capture.summary()))
+        if log_file is not None:
+            try:
+                log_file.write("\n" + "=" * 80 + "\n" + state.summary_text(returncode) + "\n")
+                log_file.close()
+            except Exception:
+                pass
+        success = returncode == 0
+        print(("✓ " if success else "❌ ") + state.summary_text(returncode).splitlines()[0])
+        return success, output
 
     def cancel_upload(self, job_id: str) -> bool:
         """Cancel an active upload."""

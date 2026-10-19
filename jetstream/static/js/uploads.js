@@ -18,9 +18,53 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     document.getElementById('dry-run').addEventListener('change', updateSubmitLabel);
+    document.getElementById('upload-tool').addEventListener('change', updateUploadToolHelp);
     updateSubmitLabel();
     loadPresets();
+    loadUploadTools();
 });
+
+// ===== UPLOAD TOOL CHOICE =====
+
+let uploadTools = [];
+
+async function loadUploadTools() {
+    try {
+        const response = await fetch('/api/system/upload-tools');
+        if (!response.ok) return;
+        uploadTools = await response.json();
+    } catch (e) {
+        return;
+    }
+    const select = document.getElementById('upload-tool');
+    uploadTools.forEach(tool => {
+        const option = select.querySelector('option[value="' + tool.id + '"]');
+        if (!option) return;
+        option.disabled = !tool.available;
+        option.textContent = tool.label + (tool.id === 'gcloud' ? ' (recommended)' : '') + (tool.available ? '' : ' — not installed');
+    });
+    // Preferred default from Settings, if it's installed here.
+    const preferred = getUIPreferences().default_upload_tool;
+    const preferredTool = uploadTools.find(t => t.id === preferred && t.available);
+    if (preferredTool) {
+        select.value = preferredTool.id;
+    } else if (select.selectedOptions[0] && select.selectedOptions[0].disabled) {
+        const firstAvailable = uploadTools.find(t => t.available);
+        if (firstAvailable) select.value = firstAvailable.id;
+    }
+    updateUploadToolHelp();
+}
+
+function updateUploadToolHelp() {
+    const select = document.getElementById('upload-tool');
+    const tool = uploadTools.find(t => t.id === select.value);
+    const help = document.getElementById('upload-tool-help');
+    if (!tool) {
+        help.textContent = '';
+        return;
+    }
+    help.textContent = tool.description + (tool.available ? '' : ' ' + (tool.detail || ''));
+}
 
 function submitLabel() {
     return document.getElementById('dry-run').checked ? '🔍 Start Preview' : '🚀 Start Upload';
@@ -324,6 +368,7 @@ function applyPresetOptions(options) {
     setChecked('split-by-folder', options.split_by_folder);
     setChecked('dry-run', options.dry_run);
     setValue('upload-tool', options.upload_tool);
+    updateUploadToolHelp();
     setValue('exclude-folders', options.exclude_folders);
     setValue('exclude-patterns', options.exclude_patterns);
     setChecked('no-clobber', options.no_clobber);

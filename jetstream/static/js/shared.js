@@ -58,6 +58,7 @@ function getUIPreferences() {
     return {
         theme: prefs.theme || DEFAULT_UI_PREFERENCES.theme,
         refresh_interval: prefs.refresh_interval || DEFAULT_UI_PREFERENCES.refresh_interval,
+        default_upload_tool: prefs.default_upload_tool || 'gcloud',
         notifications: prefs.notifications !== false,
         confirm_delete: prefs.confirm_delete !== false,
         beta_pages: {
@@ -484,6 +485,11 @@ async function showJobDetails(jobId) {
         var command = '';
         if (isCloudSync && job.filters && job.filters.display_command) {
             command = job.filters.display_command;
+        } else if (uploadTool === 'jetstream') {
+            command = 'jetstream-transfer sync';
+            if (job.dry_run) command += ' --dry-run';
+            if (!job.recursive) command += ' --no-recursive';
+            if (job.no_clobber) command += ' --no-clobber';
         } else if (uploadTool === 'gsutil') {
             command = 'gsutil -m rsync';
             if (job.dry_run) command += ' -n';
@@ -509,7 +515,9 @@ async function showJobDetails(jobId) {
             }
             if (excludePatterns.length > 0) {
                 var combinedPattern = excludePatterns.map(function(p) { return '(' + p + ')'; }).join('|');
-                if (uploadTool === 'gsutil') {
+                if (uploadTool === 'jetstream') {
+                    command += excludePatterns.map(function(p) { return ' --exclude "' + p + '"'; }).join('');
+                } else if (uploadTool === 'gsutil') {
                     command += ' -x "' + combinedPattern + '"';
                 } else {
                     command += ' --exclude="' + combinedPattern + '"';
@@ -561,7 +569,7 @@ async function showJobDetails(jobId) {
         html += '<div class="detail-item"><span class="detail-label">Data</span><span class="detail-text">' + formatBytes(job.bytes_uploaded) + ' / ' + formatBytes(job.total_size_bytes) + '</span></div>';
         html += '<div class="detail-item"><span class="detail-label">Dry Run</span><span class="detail-text">' + (job.dry_run ? 'Yes' : 'No') + '</span></div>';
         html += '<div class="detail-item"><span class="detail-label">Recursive</span><span class="detail-text">' + (job.recursive ? 'Yes' : 'No') + '</span></div>';
-        html += '<div class="detail-item"><span class="detail-label">Upload Tool</span><span class="detail-text">' + uploadTool + '</span></div>';
+        html += '<div class="detail-item"><span class="detail-label">Upload Tool</span><span class="detail-text">' + ({ gcloud: 'gcloud storage rsync', jetstream: 'JetStream engine', gsutil: 'gsutil rsync' }[uploadTool] || escapeHtml(uploadTool)) + '</span></div>';
         html += '</div></div>';
 
         // Show filters if configured

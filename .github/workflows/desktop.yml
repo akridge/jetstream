@@ -40,7 +40,9 @@ jobs:
       - name: Cache Rust build
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: desktop/src-tauri -> target
+          workspaces: |
+            desktop/src-tauri -> target
+            desktop/transfer -> target
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -52,6 +54,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
           python desktop/scripts/build_sidecar.py
+
+      - name: Build JetStream upload engine
+        run: python desktop/scripts/build_engine.py
 
       - name: Install Tauri CLI
         working-directory: desktop

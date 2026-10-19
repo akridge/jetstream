@@ -29,7 +29,7 @@
     "category": "Utility",
     "shortDescription": "Upload and manage data in Google Cloud Storage",
     "longDescription": "NOAA JetStream manages uploads from local folders to Google Cloud Storage, cloud-to-cloud sync and moves, and bucket audits.",
-    "externalBin": ["binaries/jetstream-server"],
+    "externalBin": ["binaries/jetstream-server", "binaries/jetstream-transfer"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -36,6 +36,8 @@ pub struct SyncOptions {
     pub large_concurrency: usize,
     pub no_clobber: bool,
     pub dry_run: bool,
+    /// Include subfolders (otherwise only files directly in `source`).
+    pub recursive: bool,
     /// Compare every file against a fresh bucket listing instead of trusting the manifest.
     pub verify: bool,
     /// Regexes matched against the relative path (with '/' separators); matches are skipped.
@@ -58,6 +60,7 @@ impl SyncOptions {
             large_concurrency: 4,
             no_clobber: false,
             dry_run: false,
+            recursive: true,
             verify: false,
             excludes: Vec::new(),
             resumable_threshold: 8 * 1024 * 1024,
@@ -174,14 +177,15 @@ struct Ctx {
     files_done: AtomicU64,
 }
 
-fn scan(source: &Path, excludes: &[Regex]) -> Result<(Vec<LocalFile>, u64, u64)> {
+fn scan(source: &Path, excludes: &[Regex], recursive: bool) -> Result<(Vec<LocalFile>, u64, u64)> {
     if !source.is_dir() {
         bail!("{} is not a folder", source.display());
     }
     let mut files = Vec::new();
     let mut excluded = 0;
     let mut unreadable = 0;
-    for entry in walkdir::WalkDir::new(source).follow_links(false) {
+    let walker = walkdir::WalkDir::new(source).follow_links(false).max_depth(if recursive { usize::MAX } else { 1 });
+    for entry in walker {
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
@@ -254,7 +258,8 @@ pub async fn sync(
 
     let source = opts.source.clone();
     let excludes = opts.excludes.clone();
-    let (files, excluded, unreadable) = tokio::task::spawn_blocking(move || scan(&source, &excludes)).await??;
+    let recursive = opts.recursive;
+    let (files, excluded, unreadable) = tokio::task::spawn_blocking(move || scan(&source, &excludes, recursive)).await??;
 
     let records = manifest.load(&dest)?;
     let mut summary = Summary {
@@ -628,10 +633,13 @@ mod tests {
         std::fs::write(dir.path().join("sub/c.tmp"), b"3").unwrap();
         std::fs::write(dir.path().join("sub/_archive/d.jpg"), b"4").unwrap();
         let excludes = vec![Regex::new(r".*\.tmp$").unwrap(), Regex::new(r"(^|/)_archive/").unwrap()];
-        let (files, excluded, unreadable) = scan(dir.path(), &excludes).unwrap();
+        let (files, excluded, unreadable) = scan(dir.path(), &excludes, true).unwrap();
         let mut rels: Vec<_> = files.iter().map(|f| f.rel.as_str()).collect();
         rels.sort();
         assert_eq!(rels, ["a.jpg", "sub/b.jpg"]);
         assert_eq!((excluded, unreadable), (2, 0));
+
+        let (top_level, _, _) = scan(dir.path(), &excludes, false).unwrap();
+        assert_eq!(top_level.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), ["a.jpg"]);
     }
 }

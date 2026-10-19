@@ -5,6 +5,7 @@
   "description": "NOAA JetStream desktop app (Tauri shell around the JetStream server)",
   "scripts": {
     "sidecar": "python scripts/build_sidecar.py",
+    "engine": "python scripts/build_engine.py",
     "icons": "tauri icon ../jetstream/static/icon.png",
     "dev": "tauri dev",
     "build": "tauri build"

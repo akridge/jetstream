@@ -102,6 +102,7 @@ function saveUIPreferences() {
     const uiPrefs = {
         theme: document.getElementById('setting-theme').value,
         refresh_interval: parseInt(document.getElementById('setting-refresh-interval').value),
+        default_upload_tool: document.getElementById('setting-default-upload-tool').value,
         notifications: document.getElementById('setting-notifications').checked,
         confirm_delete: document.getElementById('setting-confirm-delete').checked,
         beta_pages: {
@@ -132,6 +133,7 @@ function loadUIPreferencesFromStorage() {
             const betaPages = prefs.beta_pages || {};
             document.getElementById('setting-theme').value = prefs.theme || 'light';
             document.getElementById('setting-refresh-interval').value = prefs.refresh_interval || 5;
+            document.getElementById('setting-default-upload-tool').value = prefs.default_upload_tool || 'gcloud';
             document.getElementById('setting-notifications').checked = prefs.notifications !== false;
             document.getElementById('setting-confirm-delete').checked = prefs.confirm_delete !== false;
             document.getElementById('setting-beta-drive-upload').checked = betaPages.drive_upload === true;

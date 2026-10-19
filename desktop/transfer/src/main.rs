@@ -44,6 +44,9 @@ enum Command {
         /// Report what would be uploaded without uploading.
         #[arg(long)]
         dry_run: bool,
+        /// Only upload files directly in the folder, not subfolders.
+        #[arg(long)]
+        no_recursive: bool,
         /// Re-check every file against the bucket instead of trusting the local manifest.
         #[arg(long)]
         verify: bool,
@@ -83,6 +86,7 @@ async fn run() -> Result<i32> {
         large_concurrency,
         no_clobber,
         dry_run,
+        no_recursive,
         verify,
         excludes,
         resumable_threshold_mib,
@@ -95,6 +99,7 @@ async fn run() -> Result<i32> {
     opts.large_concurrency = large_concurrency;
     opts.no_clobber = no_clobber;
     opts.dry_run = dry_run;
+    opts.recursive = !no_recursive;
     opts.verify = verify;
     opts.resumable_threshold = resumable_threshold_mib * 1024 * 1024;
     opts.chunk_size = chunk_mib * 1024 * 1024;

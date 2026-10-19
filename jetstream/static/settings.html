@@ -135,6 +135,15 @@
                         <label for="setting-refresh-interval">Refresh Interval (seconds)</label>
                         <input type="number" id="setting-refresh-interval" value="5" min="1" max="60">
                     </div>
+                    <div class="form-group">
+                        <label for="setting-default-upload-tool">Default upload tool</label>
+                        <select id="setting-default-upload-tool">
+                            <option value="gcloud">gcloud storage rsync (recommended)</option>
+                            <option value="jetstream">JetStream engine (beta)</option>
+                            <option value="gsutil">gsutil rsync (legacy)</option>
+                        </select>
+                        <small style="color: #64748b; display: block; margin-top: 4px;">The JetStream engine re-syncs unchanged folders almost instantly and resumes large files; it is included with the desktop app. You can still change the tool for a single job under Advanced options.</small>
+                    </div>
                 </div>
                 
                 <div class="checkbox-group" style="margin-top: 15px;">

@@ -8,7 +8,12 @@ A prototype upload engine for JetStream, written in Rust. It syncs a local folde
 - **Your own Google sign-in:** OAuth through Application Default Credentials or `gcloud`. No HMAC keys or other shared secrets.
 - **Machine-readable progress:** one JSON event per line, ready to feed JetStream's live updates.
 
-It isn't wired into the app yet. It runs alongside `gcloud storage rsync` until a benchmark on a real bucket shows it should replace it (see below).
+In JetStream, it's an **upload tool you can choose**: **Settings → UI Preferences → Default upload tool**, or per job under the Uploads page's **Advanced options**. The choices are:
+- **gcloud storage rsync** (the default)
+- **JetStream engine (beta)**
+- **gsutil rsync** (legacy)
+
+The desktop app bundles the engine beside its server. A pip install shows the option as "not installed" unless `jetstream-transfer` is on `PATH` or `JETSTREAM_TRANSFER_BIN` points to it.
 
 ## Why not HMAC keys?
 
@@ -109,5 +114,4 @@ Results go here before deciding to replace `gcloud rsync` in the app.
 
 - **JetStream's own sign-in (loopback OAuth):** removing the SDK requirement entirely needs an OAuth client ID registered by your Google Cloud org. Until then, sign-in reuses gcloud's ADC.
 - **Service-account key files:** these fall back to `gcloud` for now.
-- **Integration:** running the engine from `UploadService`, with `gcloud rsync` as the fallback and engine events mapped to job progress.
 - **Bandwidth limit and upload time windows.**
