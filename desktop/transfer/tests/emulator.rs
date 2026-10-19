@@ -479,3 +479,47 @@ async fn compare_shows_what_is_synced_local_only_cloud_only_and_changed() {
     let top = report.folders.iter().find(|f| f.folder.is_empty()).unwrap();
     assert_eq!((top.local_only, top.cloud_only), (1, 1));
 }
+
+#[tokio::test]
+async fn download_folder_and_files_then_upload_files_back() {
+    use jetstream_transfer::fileops::{Item, OpProgress};
+    use jetstream_transfer::localops;
+    use jetstream_transfer::throttle::Throttle;
+    let Some(env) = Env::new().await else { return };
+    let put = |name: &'static str, data: Vec<u8>| {
+        let client = env.client.clone();
+        async move { client.upload_multipart("bucket", name, data.clone(), crc32c::crc32c(&data), false).await.unwrap() }
+    };
+    put("survey/photos/", Vec::new()).await;
+    put("survey/photos/a.jpg", big(3000, 1)).await;
+    put("survey/photos/deep/b.jpg", big(9_500_000, 2)).await;
+    put("survey/notes.txt", b"hello".to_vec()).await;
+    put("survey/photos/../escape.txt", b"no".to_vec()).await;
+
+    let dest = env.dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("notes.txt"), b"mine, different").unwrap();
+    let items = [Item { path: "survey/photos/".into() }, Item { path: "survey/notes.txt".into() }];
+    let progress = OpProgress::default();
+    let result = localops::download(&env.client, "bucket", &items, &dest, &Throttle::default(), &progress).await.unwrap();
+
+    assert_eq!(std::fs::read(dest.join("photos/a.jpg")).unwrap(), big(3000, 1));
+    assert_eq!(std::fs::read(dest.join("photos/deep/b.jpg")).unwrap(), big(9_500_000, 2));
+    assert_eq!(std::fs::read(dest.join("notes.txt")).unwrap(), b"mine, different", "local files are never replaced");
+    assert!(!dest.join("escape.txt").exists() && !env.dir.path().join("escape.txt").exists());
+    assert_eq!((result.done, result.skipped, result.failed), (2, 0, 2), "{:?}", result.failures);
+    assert!(result.failures.iter().any(|f| f.error.contains("unsafe")));
+    assert!(std::fs::read_dir(dest.join("photos")).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".jetstream-part")));
+
+    // Downloading again skips what's already there.
+    let again = localops::download(&env.client, "bucket", &items[..1], &dest, &Throttle::default(), &OpProgress::default()).await.unwrap();
+    assert_eq!((again.done, again.skipped), (0, 2));
+
+    // Upload files (one small, one resumable) and never overwrite.
+    let files = vec![dest.join("photos/a.jpg"), dest.join("photos/deep/b.jpg")];
+    let up = localops::upload_files(&env.client, &files, "bucket", "incoming", &Throttle::default(), &OpProgress::default()).await.unwrap();
+    assert_eq!((up.done, up.failed), (2, 0), "{:?}", up.failures);
+    assert_eq!(env.object("incoming/b.jpg").await.unwrap().1, big(9_500_000, 2));
+    let twice = localops::upload_files(&env.client, &files, "bucket", "incoming/", &Throttle::default(), &OpProgress::default()).await.unwrap();
+    assert_eq!((twice.done, twice.skipped), (0, 2));
+}

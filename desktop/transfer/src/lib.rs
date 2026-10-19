@@ -8,6 +8,8 @@ pub mod browse;
 pub mod compare;
 pub mod fileops;
 pub mod gcs;
+pub mod localops;
 pub mod manifest;
 pub mod scan;
 pub mod sync;
+pub mod throttle;

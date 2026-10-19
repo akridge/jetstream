@@ -24,6 +24,7 @@ use tokio::sync::Semaphore;
 
 use crate::gcs::{GcsClient, GcsError, ObjectInfo, ResumableStatus, CHUNK_ALIGN};
 use crate::manifest::{FileRecord, Manifest};
+use crate::throttle::Throttle;
 
 #[derive(Debug, Clone)]
 pub struct SyncOptions {
@@ -47,6 +48,8 @@ pub struct SyncOptions {
     pub chunk_size: usize,
     pub max_attempts: u32,
     pub retry_base: Duration,
+    /// Bandwidth limit and pause, shared with whoever controls the sync.
+    pub throttle: Arc<Throttle>,
 }
 
 impl SyncOptions {
@@ -67,6 +70,7 @@ impl SyncOptions {
             chunk_size: 16 * 1024 * 1024,
             max_attempts: 6,
             retry_base: Duration::from_secs(1),
+            throttle: Arc::new(Throttle::default()),
         })
     }
 
@@ -133,7 +137,7 @@ pub enum Event {
     FileWouldUpload { path: String, bytes: u64 },
     FileSkipped { path: String, reason: String },
     FileFailed { path: String, error: String },
-    Progress { files_done: u64, files_total: u64, bytes_done: u64, bytes_total: u64 },
+    Progress { files_done: u64, files_total: u64, bytes_done: u64, bytes_total: u64, paused: bool },
     Done {
         #[serde(flatten)]
         summary: Summary,
@@ -345,6 +349,7 @@ pub async fn sync(
                 files_total,
                 bytes_done: ticker_ctx.bytes_done.load(Ordering::Relaxed),
                 bytes_total: to_check_bytes,
+                paused: ticker_ctx.opts.throttle.is_paused(),
             });
         }
     });
@@ -401,6 +406,7 @@ pub async fn sync(
         files_total,
         bytes_done: ctx.bytes_done.load(Ordering::Relaxed),
         bytes_total: to_check_bytes,
+        paused: false,
     });
 
     summary.elapsed_seconds = (started.elapsed().as_secs_f64() * 100.0).round() / 100.0;
@@ -494,6 +500,7 @@ async fn upload_small(ctx: &Ctx, file: &LocalFile, record: &FileRecord, name: &s
         if data.len() as u64 != record.size || crc32c::crc32c(&data) != record.crc32c {
             return Err(UploadError::Io("file changed while it was being uploaded; it will be retried on the next sync".into()));
         }
+        ctx.opts.throttle.take(record.size, || ctx.cancel.load(Ordering::Relaxed)).await;
         match ctx.client.upload_multipart(&ctx.opts.bucket, name, data, record.crc32c, ctx.opts.no_clobber).await {
             Ok(info) => {
                 ctx.bytes_done.fetch_add(record.size, Ordering::Relaxed);
@@ -580,6 +587,7 @@ async fn upload_resumable(
 
         let len = chunk.min((record.size - offset) as usize);
         let data = read_at(&file.abs, offset, len).await?;
+        ctx.opts.throttle.take(data.len() as u64, || ctx.cancel.load(Ordering::Relaxed)).await;
         match ctx.client.put_chunk(&uri, offset, data, record.size, record.crc32c).await {
             Ok(ResumableStatus::Incomplete { offset: have }) => {
                 ctx.bytes_done.fetch_add(have.saturating_sub(offset), Ordering::Relaxed);

@@ -74,3 +74,26 @@ async def get_settings(request: Request):
         gdrive_router_error=getattr(request.app.state, "gdrive_router_import_error", None),
         gdrive_client_configured=bool(settings.GDRIVE_CLIENT_ID and settings.GDRIVE_CLIENT_SECRET),
     )
+
+
+class TransferSettings(BaseModel):
+    """Upload speed limit in megabits per second (0 = no limit). Applies to the JetStream
+    engine and to transfers in the desktop app; gcloud uploads aren't limited."""
+    max_mbps: float = 0.0
+
+
+@router.get("/transfer")
+async def get_transfer_settings() -> dict:
+    from ..transfer_settings import load
+
+    return load()
+
+
+@router.put("/transfer")
+async def put_transfer_settings(body: TransferSettings) -> dict:
+    from ..services import upload_service
+    from ..transfer_settings import save
+
+    saved = save({"max_mbps": max(0.0, body.max_mbps)})
+    saved["applied_to_running"] = upload_service.apply_speed_limit(saved["max_mbps"])
+    return saved

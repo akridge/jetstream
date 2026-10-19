@@ -750,7 +750,9 @@ async def run_cloud_transfer(job_id: str, cmd: list):
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
 
             # Keep only a bounded tail; sync output is one line per object.

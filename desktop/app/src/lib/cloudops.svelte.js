@@ -15,22 +15,23 @@ class CloudOps {
 
   /**
    * Start an operation. start(onProgress) must call the platform function that runs it.
-   * verb is the past tense for the result ("Moved", "Deleted", ...).
+   * verb is the past tense for the result ("Moved", "Deleted", ...). action: an extra toast
+   * button for the result (e.g. "Show folder") when there's no Undo.
    */
-  async start(opId, label, total, verb, start) {
+  async start(opId, label, total, verb, start, { action = null } = {}) {
     const op = { id: opId, label, total, done: 0, skipped: 0, failed: 0, status: 'running', shown: false };
     this.list = [...this.list, op];
     const entry = () => this.list.find((o) => o.id === opId);
     setTimeout(() => entry() && (entry().shown = true), 700);
     try {
-      const result = await start((tick) => Object.assign(entry() || {}, tick));
+      const result = await start(({ total: known, ...tick }) => Object.assign(entry() || {}, tick, known ? { total: known } : {}));
       Object.assign(entry() || {}, {
         done: result.done,
         skipped: result.skipped,
         failed: result.failed,
         status: result.cancelled ? 'cancelled' : result.failed ? 'failed' : 'done',
       });
-      this.#report(opId, label, verb, result);
+      this.#report(opId, label, verb, result, action);
       return result;
     } catch (err) {
       Object.assign(entry() || {}, { status: 'failed' });
@@ -42,7 +43,7 @@ class CloudOps {
     }
   }
 
-  #report(opId, label, verb, result) {
+  #report(opId, label, verb, result, extra) {
     const parts = [`${verb} ${count(result.done)} ${result.done === 1 ? 'file' : 'files'}`];
     if (result.skipped) parts.push(`${count(result.skipped)} left as they were (already there)`);
     if (result.failed) parts.push(`${count(result.failed)} failed`);
@@ -58,7 +59,9 @@ class CloudOps {
             this.start(id, `Undo: ${label}`, result.done, 'Undid', (onProgress) => undoCloudOp(opId, id, onProgress));
           },
         }
-      : null;
+      : result.done && extra
+        ? extra
+        : null;
     app.toast(message, kind, { action, timeout: result.undoable ? 15000 : result.failed ? 12000 : 5000 });
   }
 

@@ -1,12 +1,14 @@
 <script>
   import FolderDown from '@lucide/svelte/icons/folder-down';
+
+  let { title = 'Drop a folder to sync it', text = 'JetStream will ask where in the cloud it should go.' } = $props();
 </script>
 
 <div class="overlay">
   <div class="box">
     <FolderDown size={44} />
-    <strong>Drop a folder to sync it</strong>
-    <span>JetStream will ask where in the cloud it should go.</span>
+    <strong>{title}</strong>
+    <span class="mono-ish">{text}</span>
   </div>
 </div>
 

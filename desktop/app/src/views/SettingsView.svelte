@@ -9,6 +9,20 @@
   import { api, apiBase } from '../lib/api.js';
   import { ensureNotificationPermission, openClassic, openUrl } from '../lib/platform.js';
 
+  const LIMITS = [[0, 'No limit'], [5, '5 Mbit/s'], [20, '20 Mbit/s'], [50, '50 Mbit/s'], [100, '100 Mbit/s']];
+  let custom = $state('');
+
+  async function setLimit(value) {
+    try {
+      const saved = await app.saveTransfer({ max_mbps: Math.max(0, Number(value) || 0) });
+      custom = '';
+      const running = saved.applied_to_running ? ` (also applied to ${saved.applied_to_running} running ${saved.applied_to_running === 1 ? 'upload' : 'uploads'})` : '';
+      app.toast(saved.max_mbps ? `Speed limit set to ${saved.max_mbps} Mbit/s${running}` : `Speed limit removed${running}`, 'success', { timeout: 3000 });
+    } catch (err) {
+      app.toast(`Couldn't save the speed limit: ${err.message}`, 'error');
+    }
+  }
+
   let checking = $state(false);
   let signingIn = $state(false);
   let auth = $derived(app.auth);
@@ -110,6 +124,27 @@
             </span>
           </label>
         {/each}
+      </div>
+
+      <div class="limit">
+        <span class="label">Upload and download speed limit</span>
+        <p class="sub">
+          Keeps JetStream from using all of a shared or slow connection (e.g. on a ship or at a field station). Applies to the JetStream engine and to
+          downloads and file uploads in the app, including transfers already running; gcloud uploads aren't limited.
+        </p>
+        <div class="chips" role="radiogroup" aria-label="Speed limit">
+          {#each LIMITS as [value, label] (value)}
+            <button class="chip" role="radio" aria-checked={app.transfer.max_mbps === value} class:on={app.transfer.max_mbps === value} onclick={() => setLimit(value)}>{label}</button>
+          {/each}
+          <form class="custom" onsubmit={(e) => { e.preventDefault(); setLimit(Number(custom)); }}>
+            <input class="input" type="number" min="0" step="1" placeholder="Custom" aria-label="Custom limit in megabits per second" bind:value={custom} />
+            <span class="muted">Mbit/s</span>
+            <button class="btn sm" type="submit" disabled={custom === '' || custom === null}>Set</button>
+          </form>
+        </div>
+        <span class="muted">
+          {#if app.transfer.max_mbps}Limited to {app.transfer.max_mbps} Mbit/s (about {(app.transfer.max_mbps / 8).toFixed(1)} MB/s).{:else}No limit.{/if}
+        </span>
       </div>
     </div>
 
@@ -280,5 +315,53 @@
     background: var(--surface);
     color: var(--text);
     box-shadow: var(--shadow);
+  }
+  .limit {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .limit .sub {
+    margin: 0;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .chip {
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-2);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+  }
+  .chip.on {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .custom {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 6px;
+  }
+  .custom .input {
+    width: 90px;
+    height: 30px;
+  }
+  .limit .muted {
+    color: var(--muted);
+    font-size: 13px;
   }
 </style>

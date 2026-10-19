@@ -966,6 +966,7 @@ class JobActivity:
         self.in_flight: Dict[str, Dict] = {}
         self.files_done = 0
         self.failed = 0
+        self.paused = False
         self._lock = threading.Lock()
 
     def started(self, path: str, size: Optional[int] = None) -> None:
@@ -988,6 +989,7 @@ class JobActivity:
             now = time.time()
             return {
                 "tool": self.tool,
+                "paused": self.paused,
                 "files_done": self.files_done,
                 "failed": self.failed,
                 "in_flight": [
@@ -1010,6 +1012,11 @@ def start_job_activity(job_id: str, tool: str) -> JobActivity:
         while len(_job_activity) > 50:
             _job_activity.pop(next(iter(_job_activity)))
         return activity
+
+
+def job_activity_object(job_id: str) -> Optional[JobActivity]:
+    with _job_activity_lock:
+        return _job_activity.get(job_id)
 
 
 def job_activity(job_id: str) -> Optional[Dict]:
@@ -1052,7 +1059,11 @@ class EngineRunState:
             if progress_callback:
                 progress_callback(bytes_uploaded=self.base_bytes, total_bytes=self.total_bytes,
                                   files_uploaded=self.base_files)
-        elif kind == "progress" and progress_callback:
+        elif kind == "progress":
+            if self.activity is not None:
+                self.activity.paused = bool(event.get("paused"))
+            if not progress_callback:
+                return
             progress_callback(
                 bytes_uploaded=self.base_bytes + int(event.get("bytes_done") or 0),
                 total_bytes=self.total_bytes,
@@ -1156,6 +1167,7 @@ class UploadService:
     
     def __init__(self):
         self.active_uploads = {}  # Track active upload processes
+        self.engine_jobs = set()  # Jobs run by the JetStream engine (can pause / change speed)
     
     async def upload_to_gcs(self, job_id: str, source_path: str,
                            destination_bucket: str, destination_path: str = "",
@@ -1340,6 +1352,9 @@ class UploadService:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    # Never let an undecodable file name in gcloud's output stop the reader.
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                     universal_newlines=True
                 )
@@ -1445,7 +1460,12 @@ class UploadService:
                        "choose 'gcloud storage' as the upload tool instead.")
             return False, message
 
-        cmd = [engine, "sync", source_path, gcs_path]
+        from .transfer_settings import load as load_transfer_settings
+
+        cmd = [engine, "sync", source_path, gcs_path, "--control-stdin"]
+        max_mbps = load_transfer_settings()["max_mbps"]
+        if max_mbps > 0:
+            cmd.extend(["--max-mbps", f"{max_mbps:g}"])
         if dry_run:
             cmd.append("--dry-run")
         if not recursive:
@@ -1480,10 +1500,11 @@ class UploadService:
         def run_engine() -> int:
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 encoding="utf-8", errors="replace", bufsize=1, creationflags=creationflags,
             )
             self.active_uploads[job_id] = process
+            self.engine_jobs.add(job_id)
 
             def _read_stderr():
                 for line in process.stderr:
@@ -1504,6 +1525,7 @@ class UploadService:
             state.error = f"Could not run the upload engine: {e}"
         finally:
             self.active_uploads.pop(job_id, None)
+            self.engine_jobs.discard(job_id)
 
         # Raw JSON events stay in the log file; the job output is the readable summary.
         stderr_tail = capture.stderr_text()
@@ -1520,6 +1542,39 @@ class UploadService:
         success = returncode == 0
         print(("✓ " if success else "❌ ") + state.summary_text(returncode).splitlines()[0])
         return success, output
+
+    def _send_engine_command(self, job_id: str, command: Dict) -> bool:
+        """Send a control command (pause, resume, limit) to a running engine job."""
+        import json
+
+        process = self.active_uploads.get(job_id)
+        if job_id not in self.engine_jobs or process is None or process.stdin is None:
+            return False
+        try:
+            process.stdin.write(json.dumps(command) + "\n")
+            process.stdin.flush()
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def pause_upload(self, job_id: str) -> bool:
+        """Pause a running engine upload (nothing new is sent until resumed)."""
+        ok = self._send_engine_command(job_id, {"cmd": "pause"})
+        activity = job_activity_object(job_id)
+        if ok and activity is not None:
+            activity.paused = True
+        return ok
+
+    def resume_upload(self, job_id: str) -> bool:
+        ok = self._send_engine_command(job_id, {"cmd": "resume"})
+        activity = job_activity_object(job_id)
+        if ok and activity is not None:
+            activity.paused = False
+        return ok
+
+    def apply_speed_limit(self, max_mbps: float) -> int:
+        """Change the bandwidth limit of every running engine upload; returns how many."""
+        return sum(self._send_engine_command(job_id, {"cmd": "limit", "mbps": max_mbps}) for job_id in list(self.engine_jobs))
 
     def cancel_upload(self, job_id: str) -> bool:
         """Cancel an active upload."""

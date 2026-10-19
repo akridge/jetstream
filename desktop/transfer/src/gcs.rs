@@ -567,6 +567,20 @@ impl GcsClient {
         Err(Self::error_for(response).await)
     }
 
+    /// Start downloading an object's bytes (pinned to `generation` when given). Read the body
+    /// with `Response::chunk`.
+    pub async fn download(&self, bucket: &str, name: &str, generation: Option<&str>) -> Result<Response, GcsError> {
+        let mut url = format!("{}/storage/v1/b/{}/o/{}?alt=media", self.base, encode(bucket), encode(name));
+        if let Some(generation) = generation {
+            url.push_str(&format!("&generation={generation}"));
+        }
+        let response = self.send(self.http.get(url)).await?;
+        if !response.status().is_success() {
+            return Err(Self::error_for(response).await);
+        }
+        Ok(response)
+    }
+
     /// Bring back a soft-deleted object. Fails with `AlreadyExists` rather than replacing a live
     /// object of the same name.
     pub async fn restore_object(&self, bucket: &str, name: &str, generation: &str) -> Result<ObjectInfo, GcsError> {

@@ -19,6 +19,7 @@ The Rust core of JetStream, used by the desktop app (as a library) and as a CLI:
   - `rm SRC...`
   - `mkdir gs://b/parent/ NAME`
   - Folders end with `/`.
+- **`download SRC... --to FOLDER`** and **`upload FILE... --to gs://b/folder/`:** copy between the cloud and this computer, checked by checksum, never replacing what's already there. `--max-mbps N` limits the speed.
 - **`bucket gs://b`:** bucket settings (soft delete, hierarchical namespace, Autoclass) and your permissions.
 - **`deleted gs://b/folder/` and `restore gs://b NAME#GENERATION...`:** list and restore soft-deleted objects.
 
@@ -64,6 +65,8 @@ target/release/jetstream-transfer sync D:\Survey\2026 gs://my-bucket/surveys/202
 | `--verify` | Compare every file against a fresh bucket listing instead of trusting the manifest; repairs objects deleted or changed in the cloud |
 | `--exclude REGEX` | Skip relative paths (`/` separators) matching the regex; repeatable |
 | `--concurrency N` | Files in flight (default 32). `--large-concurrency` (default 4) caps resumable uploads, each holding one chunk in memory |
+| `--max-mbps N` | Bandwidth limit in megabits per second (default: none) |
+| `--control-stdin` | Read `{"cmd":"pause"}`, `{"cmd":"resume"}` and `{"cmd":"limit","mbps":N}` lines from stdin while running (the JetStream server uses this for Pause and the speed limit) |
 | `--manifest PATH` | Default: `<JetStream data folder>/transfer-manifest.db` |
 
 **Sign-in,** in order of preference:

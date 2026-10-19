@@ -43,6 +43,7 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - where it goes in the cloud
   - when it last synced, and how much
   - live progress, speed and time left while it runs, and the file being uploaded
+  - **Pause** and **Resume** for uploads using the JetStream engine (nothing is lost; gcloud uploads can only be cancelled)
   - its schedule and next run, if it syncs automatically
 
   **Preview** shows what would upload. **Sync now** uploads only what's new.
@@ -72,6 +73,8 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - **Recently deleted:** in buckets with soft delete, lists deleted files with **Restore**. A restore never replaces a file that exists now.
   - **Real folders:** buckets with hierarchical namespace rename folders in one step, however many files they hold.
   - **Permissions:** actions you don't have permission for are greyed out. Read-only buckets are labelled.
+  - **Download…** files or folders to this computer. Each file is checked against the cloud checksum before it's saved, and files you already have are never replaced.
+  - **Upload by dropping** files or folders onto the window while a cloud folder is open (or right-click → **Upload a folder here…**). Folders upload as jobs you can follow in Activity; nothing in the cloud is overwritten.
   - **More actions:** total a folder's size, copy `gs://` paths (Ctrl+C), copy a public link, open in the Cloud Console, **Sync to…** another location (gcloud storage rsync).
   - **Synced folders:** inside a synced folder's cloud copy, a banner shows which folder on this computer it comes from.
 - **Compare with cloud:** for any synced folder, see exactly what is:
@@ -101,6 +104,7 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
 - **Settings:**
   - Google Cloud sign-in status, with a **Sign in with Google** button
   - default upload tool
+  - **speed limit** for uploads and downloads (e.g. 20 Mbit/s on a shared ship or field-station connection). It changes running engine uploads too.
   - light, dark or system theme
   - notifications
 - **More tools:** cloud audit history, the catalog tool, Drive upload, and the original pages. These open in a separate window.

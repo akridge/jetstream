@@ -311,6 +311,19 @@ async def get_upload_activity(job_id: str):
     """Files uploading now and recently finished, while a job runs (empty if unknown)."""
     return job_activity(job_id) or {"tool": None, "files_done": 0, "failed": 0, "in_flight": [], "recent": []}
 
+@router.post("/{job_id}/pause")
+async def pause_upload(job_id: str):
+    """Pause a running upload. Works for the JetStream engine; gcloud uploads can only be cancelled."""
+    if not upload_service.pause_upload(job_id):
+        raise HTTPException(status_code=409, detail="Only running uploads using the JetStream engine can be paused.")
+    return {"job_id": job_id, "paused": True}
+
+@router.post("/{job_id}/resume")
+async def resume_upload(job_id: str):
+    if not upload_service.resume_upload(job_id):
+        raise HTTPException(status_code=409, detail="This upload isn't running with the JetStream engine.")
+    return {"job_id": job_id, "paused": False}
+
 @router.get("/{job_id}/log")
 async def download_upload_log(job_id: str, db: Session = Depends(get_db)):
     """Download the full job log file, falling back to the stored output tail."""

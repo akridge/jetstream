@@ -25,6 +25,9 @@
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import Laptop from '@lucide/svelte/icons/laptop';
   import CloudOpDialog from '../components/CloudOpDialog.svelte';
+  import UploadDropDialog from '../components/UploadDropDialog.svelte';
+  import Download from '@lucide/svelte/icons/download';
+  import Upload from '@lucide/svelte/icons/upload';
   import FileOpDialog from '../components/FileOpDialog.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
   import { app } from '../lib/state.svelte.js';
@@ -38,8 +41,11 @@
     listFolder,
     newFolder,
     newOpId,
+    downloadCloud,
     openUrl,
+    pickFolder,
     planCloudOp,
+    revealPath,
     restoreObjects,
     runCloudOp,
   } from '../lib/platform.js';
@@ -213,6 +219,7 @@
 
   function backgroundMenu(e) {
     e.preventDefault();
+    e.stopPropagation();
     clearSelection();
     menu = { x: e.clientX, y: e.clientY, items: folderMenu() };
   }
@@ -270,6 +277,7 @@
     return [
       ...(one?.is_folder ? [{ label: 'Open', icon: FolderOpen, shortcut: 'Enter', run: () => open(bucket, one.path, { remember: false }) }] : []),
       { label: n > 1 ? `Copy ${n} paths` : 'Copy path', icon: Copy, shortcut: 'Ctrl+C', run: copyPaths },
+      { label: n > 1 ? `Download ${n} items…` : 'Download…', icon: Download, disabled: !can('storage.objects.get'), run: () => download() },
       ...(one && !one.is_folder ? [{ label: 'Copy public link', icon: Link, run: () => copyText(publicUrl(one.path), 'Link copied') }] : []),
       ...(one ? [{ label: 'Open in Cloud Console', icon: ExternalLink, run: () => openUrl(consoleUrl(one)) }] : []),
       'separator',
@@ -295,6 +303,7 @@
   function folderMenu() {
     return [
       { label: 'New folder', icon: FolderPlus, shortcut: 'Ctrl+Shift+N', disabled: !can('storage.objects.create'), title: noPermission('storage.objects.create'), run: startNewFolder },
+      { label: 'Upload a folder here…', icon: Upload, disabled: !can('storage.objects.create'), run: pickFilesToUpload },
       { label: 'Refresh', icon: RefreshCw, run: () => refresh() },
       'separator',
       { label: 'Copy path of this folder', icon: Copy, run: () => copyText(gsPath(prefix), 'Path copied') },
@@ -418,6 +427,24 @@
     }
   }
 
+  async function download(paths = selectedPaths()) {
+    if (!paths.length) return;
+    const dest = await pickFolder(app.prefs.last_download_dir || '', 'Choose where to save');
+    if (!dest) return;
+    app.savePrefs({ last_download_dir: dest });
+    const name = paths.length === 1 ? `“${paths[0].replace(/\/$/, '').split('/').pop()}”` : `${count(paths.length)} items`;
+    const id = newOpId();
+    cloudOps.start(id, `Download ${name}`, 0, 'Downloaded', (onProgress) => downloadCloud(id, bucket, paths, dest, onProgress), {
+      action: { label: 'Show folder', run: () => revealPath(dest) },
+    });
+  }
+
+  async function pickFilesToUpload() {
+    // The folder picker is the only native picker wired up; files can be dropped onto the window.
+    const folder = await pickFolder('', 'Choose a folder to upload here');
+    if (folder) app.cloudDrop = [folder];
+  }
+
   function askDelete() {
     if (!selectedEntries.length || !can('storage.objects.delete')) return;
     fileOp = { kind: 'delete', paths: selectedPaths() };
@@ -499,6 +526,7 @@
             {#if single}
               <button class="btn ghost sm" disabled={!can('storage.objects.delete')} title={noPermission('storage.objects.delete') || 'Rename (F2)'} onclick={() => startRename(single)}><Pencil size={14} /> Rename</button>
             {/if}
+            <button class="btn ghost sm" title="Download to this computer" onclick={() => download()}><Download size={14} /> Download</button>
             <button class="btn ghost sm" onclick={() => (fileOp = { kind: 'transfer', paths: selectedPaths() })}><ArrowRightLeft size={14} /> Move/copy…</button>
             {#if single?.is_folder}
               <button class="btn ghost sm" onclick={() => (syncDialog = itemFor(single))}><FolderSync size={14} /> Sync to…</button>
@@ -669,7 +697,7 @@
       {/if}
     </div>
     <p class="hints muted">
-      Click to select · Ctrl+click or Shift+click for several · Enter opens · Backspace goes up · F2 renames · Del deletes · Ctrl+C copies paths
+      Click to select · Ctrl+click or Shift+click for several · Enter opens · Backspace goes up · F2 renames · Del deletes · Ctrl+C copies paths · Drop files or folders here to upload
     </p>
   {:else}
     <div class="card notice">Open a bucket above, or pick one of the shortcuts.</div>
@@ -681,6 +709,9 @@
 {/if}
 {#if syncDialog}
   <CloudOpDialog item={syncDialog} mode="copy" onclose={() => (syncDialog = null)} />
+{/if}
+{#if app.cloudDrop && bucket}
+  <UploadDropDialog {bucket} {prefix} paths={app.cloudDrop} onclose={() => (app.cloudDrop = null)} />
 {/if}
 {#if fileOp}
   <FileOpDialog

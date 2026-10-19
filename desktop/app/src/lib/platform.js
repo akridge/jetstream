@@ -234,3 +234,26 @@ export async function compareFolder(path, destination, { excludePatterns = [], e
   if (!isDesktop) throw desktopOnly();
   return invoke('compare_folder', { path, destination, excludePatterns, excludeFolders, recursive });
 }
+
+/** Download files/folders (paths ending "/") into destDir; onProgress({total, done, ...}). */
+export function downloadCloud(opId, bucket, paths, destDir, onProgress) {
+  if (!isDesktop) return Promise.reject(desktopOnly());
+  return withOpProgress(opId, onProgress, () => invoke('download_cloud', { opId, bucket, paths, destDir }));
+}
+
+/** Upload individual local files into gs://bucket/prefix/. */
+export function uploadLocalFiles(opId, bucket, prefix, files, onProgress) {
+  if (!isDesktop) return Promise.reject(desktopOnly());
+  return withOpProgress(opId, onProgress, () => invoke('upload_local_files', { opId, bucket, prefix, files }));
+}
+
+/** Speed limit (Mbit/s, 0 = none) for downloads and file uploads run by the app. */
+export async function setTransferLimit(maxMbps) {
+  if (isDesktop) await invoke('set_transfer_limit', { maxMbps: Number(maxMbps) || 0 });
+}
+
+/** [[path, isFolder], ...] for dropped paths. */
+export async function classifyPaths(paths) {
+  if (!isDesktop) return paths.map((p) => [p, true]);
+  return invoke('classify_paths', { paths });
+}

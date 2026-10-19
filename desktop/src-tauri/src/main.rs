@@ -20,7 +20,9 @@ use jetstream_transfer::audit::{self, AuditProgress, AuditReport};
 use jetstream_transfer::auth::TokenProvider;
 use jetstream_transfer::browse::{self, FolderTotals, Listing};
 use jetstream_transfer::compare::{self, CompareReport};
+use jetstream_transfer::localops;
 use jetstream_transfer::manifest::{default_data_dir, Manifest};
+use jetstream_transfer::throttle::Throttle;
 use jetstream_transfer::fileops::{self, BucketAccess, DeletedPage, Item, OpProgress, OpResult, Plan, PlanSummary, Undo};
 use jetstream_transfer::gcs::GcsClient;
 use jetstream_transfer::scan::{self, ScanOptions, ScanProgress, ScanReport};
@@ -156,6 +158,8 @@ struct Core {
     running: Mutex<HashMap<String, Arc<OpProgress>>>,
     /// How to undo finished operations (with the bucket's soft-delete setting).
     undos: Mutex<HashMap<String, (Undo, bool)>>,
+    /// Speed limit for downloads and file uploads run in the app.
+    throttle: Arc<Throttle>,
 }
 
 impl Core {
@@ -368,14 +372,19 @@ async fn plan_cloud_op(core: tauri::State<'_, Core>, op_id: String, request: OpR
 #[derive(Clone, Serialize)]
 struct OpTick {
     op_id: String,
+    total: u64,
     done: u64,
     skipped: u64,
     failed: u64,
     bytes: u64,
 }
 
-async fn run_with_progress(app: &AppHandle, core: &Core, op_id: &str, plan: &Plan, soft_delete: bool) -> Result<OpResult, String> {
-    let client = core.client()?;
+/// Run an operation with progress ticks ("cloud-op-progress") and cancellation by `op_id`.
+async fn track<F, Fut>(app: &AppHandle, core: &Core, op_id: &str, work: F) -> Result<OpResult, String>
+where
+    F: FnOnce(Arc<OpProgress>) -> Fut,
+    Fut: std::future::Future<Output = Result<OpResult, String>>,
+{
     let progress = Arc::new(OpProgress::default());
     core.running.lock().unwrap().insert(op_id.to_string(), progress.clone());
     let finished = Arc::new(AtomicBool::new(false));
@@ -386,6 +395,7 @@ async fn run_with_progress(app: &AppHandle, core: &Core, op_id: &str, plan: &Pla
                 "cloud-op-progress",
                 OpTick {
                     op_id: tick_id.clone(),
+                    total: tick_progress.total.load(Ordering::Relaxed),
                     done: tick_progress.done.load(Ordering::Relaxed),
                     skipped: tick_progress.skipped.load(Ordering::Relaxed),
                     failed: tick_progress.failed.load(Ordering::Relaxed),
@@ -395,13 +405,73 @@ async fn run_with_progress(app: &AppHandle, core: &Core, op_id: &str, plan: &Pla
             std::thread::sleep(Duration::from_millis(250));
         }
     });
-    let result = fileops::run(&client, plan, soft_delete, &progress).await;
+    let result = work(progress).await;
     finished.store(true, Ordering::Relaxed);
     core.running.lock().unwrap().remove(op_id);
+    result
+}
+
+async fn run_with_progress(app: &AppHandle, core: &Core, op_id: &str, plan: &Plan, soft_delete: bool) -> Result<OpResult, String> {
+    let client = core.client()?;
+    let result = track(app, core, op_id, |progress| async move { Ok(fileops::run(&client, plan, soft_delete, &progress).await) }).await?;
     if let Some(undo) = &result.undo {
         core.undos.lock().unwrap().insert(op_id.to_string(), (undo.clone(), soft_delete));
     }
     Ok(result)
+}
+
+/// Download files and folders into a folder on this computer (checked; never replaces files).
+#[tauri::command]
+async fn download_cloud(
+    app: AppHandle,
+    core: tauri::State<'_, Core>,
+    op_id: String,
+    bucket: String,
+    paths: Vec<String>,
+    dest_dir: String,
+) -> Result<OpResult, String> {
+    let client = core.client()?;
+    let throttle = core.throttle.clone();
+    track(&app, &core, &op_id, |progress| async move {
+        localops::download(&client, bucket.trim(), &items(&paths), std::path::Path::new(&dest_dir), &throttle, &progress)
+            .await
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+/// Upload individual files into gs://bucket/prefix/ (existing objects are left alone).
+#[tauri::command]
+async fn upload_local_files(
+    app: AppHandle,
+    core: tauri::State<'_, Core>,
+    op_id: String,
+    bucket: String,
+    prefix: String,
+    files: Vec<String>,
+) -> Result<OpResult, String> {
+    let client = core.client()?;
+    let throttle = core.throttle.clone();
+    let files: Vec<std::path::PathBuf> = files.into_iter().map(std::path::PathBuf::from).collect();
+    track(&app, &core, &op_id, |progress| async move {
+        localops::upload_files(&client, &files, bucket.trim(), &prefix, &throttle, &progress).await.map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+/// Speed limit for transfers run by the app itself (downloads, file uploads), in Mbit/s.
+#[tauri::command]
+fn set_transfer_limit(core: tauri::State<'_, Core>, max_mbps: f64) {
+    core.throttle.set_rate(jetstream_transfer::throttle::mbps_to_bytes(max_mbps));
+}
+
+/// Which dropped paths are folders (uploaded as sync jobs) and which are files.
+#[tauri::command]
+fn classify_paths(paths: Vec<String>) -> Vec<(String, bool)> {
+    paths.into_iter().map(|p| {
+        let is_dir = std::path::Path::new(&p).is_dir();
+        (p, is_dir)
+    }).collect()
 }
 
 /// Run a planned operation; emits "cloud-op-progress".
@@ -639,7 +709,11 @@ fn main() {
             restore_objects,
             list_deleted,
             new_folder,
-            compare_folder
+            compare_folder,
+            download_cloud,
+            upload_local_files,
+            set_transfer_limit,
+            classify_paths
         ])
         .setup(|app| {
             build_tray(app.handle())?;

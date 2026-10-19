@@ -2,7 +2,7 @@
 
 import { api, eventsUrl, setApiBase } from './api.js';
 import { jobDestination, normalizeDestination, basename } from './format.js';
-import { ensureNotificationPermission, getServerStatus, notify, onServerStatus } from './platform.js';
+import { ensureNotificationPermission, getServerStatus, notify, onServerStatus, setTransferLimit } from './platform.js';
 
 const PREFS_KEY = 'jetstreamDesktopPrefs';
 const DEFAULT_PREFS = { theme: 'system', notifications: true, default_upload_tool: 'gcloud', recent_buckets: [], recent_scans: [] };
@@ -45,6 +45,10 @@ class AppState {
   scanRequest = $state(null);
   /** Add/edit folder dialog: { preset, previousName } or null. */
   folderDialog = $state(null);
+  /** Upload speed limit (Mbit/s, 0 = none), shared with the server. */
+  transfer = $state({ max_mbps: 0 });
+  /** Paths dropped on the Cloud storage view, waiting to be uploaded there. */
+  cloudDrop = $state(null);
   /** Synced folder shown on the Compare screen. */
   compareTarget = $state(null);
   /** Last place browsed in Cloud storage, kept while switching views. */
@@ -77,8 +81,26 @@ class AppState {
   }
 
   async refreshAll() {
-    await Promise.allSettled([this.refreshJobs(), this.refreshPresets(), this.refreshAuth(), this.refreshTools(), this.#loadVersion()]);
+    await Promise.allSettled([
+      this.refreshJobs(),
+      this.refreshPresets(),
+      this.refreshAuth(),
+      this.refreshTools(),
+      this.#loadVersion(),
+      this.#loadTransfer(),
+    ]);
     this.loaded = true;
+  }
+
+  async #loadTransfer() {
+    this.transfer = await api.transferSettings();
+    await setTransferLimit(this.transfer.max_mbps);
+  }
+
+  async saveTransfer(changes) {
+    this.transfer = await api.saveTransferSettings({ ...this.transfer, ...changes });
+    await setTransferLimit(this.transfer.max_mbps);
+    return this.transfer;
   }
 
   async #loadVersion() {

@@ -18,6 +18,8 @@ use jetstream_transfer::gcs::GcsClient;
 use jetstream_transfer::manifest::{default_data_dir, Manifest};
 use jetstream_transfer::sync::{parse_destination, sync, Emit, SyncOptions};
 use jetstream_transfer::fileops::{self, Item, OpProgress, Plan};
+use jetstream_transfer::localops;
+use jetstream_transfer::throttle::{mbps_to_bytes, Throttle};
 use jetstream_transfer::{audit, browse, scan};
 
 #[derive(Parser)]
@@ -56,6 +58,13 @@ enum Command {
         /// Skip relative paths matching this regex (repeatable), e.g. '.*\.tmp$'.
         #[arg(long = "exclude")]
         excludes: Vec<String>,
+        /// Bandwidth limit in megabits per second (0 = no limit).
+        #[arg(long, default_value_t = 0.0)]
+        max_mbps: f64,
+        /// Read control commands from stdin, one JSON object per line:
+        /// {"cmd":"pause"}, {"cmd":"resume"}, {"cmd":"limit","mbps":20}.
+        #[arg(long)]
+        control_stdin: bool,
         /// Files larger than this many MiB use resumable uploads.
         #[arg(long, default_value_t = 8)]
         resumable_threshold_mib: u64,
@@ -110,6 +119,25 @@ enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+    /// Download objects or folders (ending in "/") into a local folder, checked by checksum.
+    /// Existing local files are never replaced.
+    Download {
+        #[arg(required = true, num_args = 1..)]
+        sources: Vec<String>,
+        #[arg(long)]
+        to: PathBuf,
+        #[arg(long, default_value_t = 0.0)]
+        max_mbps: f64,
+    },
+    /// Upload individual files into gs://bucket/folder/ (existing objects are left alone).
+    Upload {
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
+        #[arg(long)]
+        to: String,
+        #[arg(long, default_value_t = 0.0)]
+        max_mbps: f64,
+    },
     /// Bucket settings (soft delete, hierarchical namespace, Autoclass) and your permissions.
     Bucket { bucket: String },
     /// Copy objects or folders (gs://b/folder/ ends with "/") into a folder, server-side.
@@ -161,6 +189,24 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         objects: Vec<String>,
     },
+}
+
+/// Pause, resume and bandwidth changes from the controlling process (the JetStream server).
+/// A plain thread, so a blocked read never keeps the process from exiting.
+fn read_controls(throttle: Arc<Throttle>) {
+    use std::io::BufRead;
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            let Ok(command) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            match command["cmd"].as_str() {
+                Some("pause") => throttle.set_paused(true),
+                Some("resume") => throttle.set_paused(false),
+                Some("limit") => throttle.set_rate(mbps_to_bytes(command["mbps"].as_f64().unwrap_or(0.0))),
+                _ => {}
+            }
+        }
+    });
 }
 
 /// "gs://bucket/a/b/" -> ("bucket", "a/b/"), keeping a trailing "/" (a folder).
@@ -245,6 +291,19 @@ async fn run() -> Result<i32> {
             let report = jetstream_transfer::compare::compare(&cloud_client()?, &folder, &destination, &regexes, !no_recursive, manifest.as_ref())
                 .await?;
             return print_json(&report);
+        }
+        Command::Download { sources, to, max_mbps } => {
+            let (bucket, items) = split_sources(&sources)?;
+            let result = localops::download(&cloud_client()?, &bucket, &items, &to, &Throttle::from_mbps(max_mbps), &OpProgress::default()).await?;
+            print_json(&result)?;
+            return Ok(if result.failed > 0 { 2 } else { 0 });
+        }
+        Command::Upload { files, to, max_mbps } => {
+            let (bucket, prefix) = split_gs(&to)?;
+            let result =
+                localops::upload_files(&cloud_client()?, &files, &bucket, &prefix, &Throttle::from_mbps(max_mbps), &OpProgress::default()).await?;
+            print_json(&result)?;
+            return Ok(if result.failed > 0 { 2 } else { 0 });
         }
         Command::Bucket { bucket } => {
             let bucket = bucket.trim_start_matches("gs://").trim_end_matches('/');
@@ -335,6 +394,8 @@ async fn run() -> Result<i32> {
         no_recursive,
         verify,
         excludes,
+        max_mbps,
+        control_stdin,
         resumable_threshold_mib,
         chunk_mib,
         manifest,
@@ -356,6 +417,10 @@ async fn run() -> Result<i32> {
         .iter()
         .map(|pattern| Regex::new(pattern).with_context(|| format!("invalid --exclude regex: {pattern}")))
         .collect::<Result<_>>()?;
+    opts.throttle = Arc::new(Throttle::from_mbps(max_mbps));
+    if control_stdin {
+        read_controls(opts.throttle.clone());
+    }
     if std::env::var_os("JETSTREAM_TRANSFER_FAST_RETRY").is_some() {
         opts.retry_base = Duration::from_millis(50);
     }

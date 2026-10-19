@@ -2,6 +2,8 @@
   import X from '@lucide/svelte/icons/x';
   import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   import Square from '@lucide/svelte/icons/square';
+  import Pause from '@lucide/svelte/icons/pause';
+  import Play from '@lucide/svelte/icons/play';
   import CloudUpload from '@lucide/svelte/icons/cloud-upload';
   import Copy from '@lucide/svelte/icons/copy';
   import FileText from '@lucide/svelte/icons/file-text';
@@ -89,11 +91,20 @@
   <div class="body">
     {#if job.status === 'running'}
       <div class="progress">
-        <div class="pct">{Math.round(job.progress_percent || 0)}%</div>
+        <div class="pct-row">
+          <div class="pct">{Math.round(job.progress_percent || 0)}%{#if activity?.paused}<span class="paused">Paused</span>{/if}</div>
+          {#if job.upload_tool === 'jetstream' && !job.dry_run}
+            {#if activity?.paused}
+              <button class="btn sm" disabled={busy} onclick={() => act(async () => { await api.resumeJob(job.job_id); activity = { ...activity, paused: false }; })}><Play size={14} /> Resume</button>
+            {:else}
+              <button class="btn sm" disabled={busy} title="Stop sending for now; nothing is lost" onclick={() => act(async () => { await api.pauseJob(job.job_id); activity = { ...(activity || {}), paused: true, in_flight: activity?.in_flight || [], recent: activity?.recent || [] }; })}><Pause size={14} /> Pause</button>
+            {/if}
+          {/if}
+        </div>
         <ProgressBar value={job.progress_percent || 0} />
         <div class="muted">
           {bytes(job.bytes_uploaded)} of {bytes(job.total_size_bytes)} · {count(job.files_uploaded)} of {count(job.total_files)} files
-          {#if speed > 0}· {bytes(speed)}/s{/if}
+          {#if speed > 0 && !activity?.paused}· {bytes(speed)}/s{/if}
         </div>
       </div>
     {/if}
@@ -231,6 +242,19 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  .pct-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .paused {
+    margin-left: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--warning);
+    vertical-align: middle;
   }
   .pct {
     font-size: 28px;

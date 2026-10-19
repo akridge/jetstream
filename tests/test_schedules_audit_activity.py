@@ -275,3 +275,54 @@ def test_server_output_survives_a_non_utf8_pipe():
     result = subprocess.run([sys.executable, "-c", "import sys; " + code], capture_output=True, env=env)
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert "🚀 NOAA JetStream" in result.stdout.decode("utf-8")
+
+
+# ----- speed limit and pause ------------------------------------------------------------
+
+def test_transfer_settings_round_trip(tmp_path, monkeypatch):
+    from jetstream import transfer_settings
+
+    monkeypatch.setenv("JETSTREAM_DATA_DIR", str(tmp_path))
+    assert transfer_settings.load() == {"max_mbps": 0.0}
+    assert transfer_settings.save({"max_mbps": 25, "unknown": 1}) == {"max_mbps": 25.0}
+    assert transfer_settings.load() == {"max_mbps": 25.0}
+    (tmp_path / "transfer-settings.json").write_text("not json")
+    assert transfer_settings.load() == {"max_mbps": 0.0}
+
+
+def test_engine_jobs_can_be_paused_resumed_and_limited(tmp_path, monkeypatch):
+    import io
+
+    monkeypatch.setenv("JETSTREAM_DATA_DIR", str(tmp_path))
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = io.StringIO()
+
+    service = services.UploadService()
+    process = FakeProcess()
+    service.active_uploads["job-e"] = process
+    service.engine_jobs.add("job-e")
+    service.active_uploads["job-g"] = FakeProcess()  # a gcloud job: no control channel
+    activity = services.start_job_activity("job-e", "jetstream")
+
+    assert service.pause_upload("job-e") and activity.paused
+    assert not service.pause_upload("job-g")
+    assert service.resume_upload("job-e") and not activity.paused
+    assert service.apply_speed_limit(40) == 1
+    sent = [line for line in process.stdin.getvalue().splitlines()]
+    assert sent == ['{"cmd": "pause"}', '{"cmd": "resume"}', '{"cmd": "limit", "mbps": 40}']
+
+    # The engine's progress events report whether it's paused.
+    state = services.EngineRunState()
+    state.activity = activity
+    state.handle('{"event":"progress","files_done":1,"files_total":2,"bytes_done":5,"bytes_total":9,"paused":true}', None)
+    assert services.job_activity("job-e")["paused"] is True
+
+
+def test_pause_endpoint_refuses_jobs_it_cannot_pause(db_env):
+    app = FastAPI()
+    app.include_router(uploads.router, prefix="/api/uploads")
+    with TestClient(app) as client:
+        response = client.post("/api/uploads/not-running/pause")
+    assert response.status_code == 409 and "JetStream engine" in response.json()["detail"]

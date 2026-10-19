@@ -61,6 +61,10 @@ pub enum OpKind {
     Move,
     Delete,
     Restore,
+    /// Cloud to this computer (`localops`).
+    Download,
+    /// Files from this computer (`localops`).
+    Upload,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +133,8 @@ pub struct Plan {
 
 #[derive(Default)]
 pub struct OpProgress {
+    /// Items the operation covers, once known.
+    pub total: AtomicU64,
     pub done: AtomicU64,
     pub skipped: AtomicU64,
     pub failed: AtomicU64,
@@ -519,7 +525,7 @@ pub fn validate_name(name: &str) -> Result<()> {
 
 /// Retry rate limits (429), server errors and network failures with backoff. Writing the
 /// same object name again within a second (an immediate undo) also hits 429 and is retried.
-async fn retry<T, F, Fut>(mut f: F) -> Result<T, GcsError>
+pub(crate) async fn retry<T, F, Fut>(mut f: F) -> Result<T, GcsError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, GcsError>>,
@@ -609,6 +615,7 @@ async fn run_task(client: &GcsClient, kind: OpKind, task: &Task, soft_delete: bo
                 _ => None,
             }))
         }
+        OpKind::Download | OpKind::Upload => Err("not a cloud-to-cloud operation".into()),
         OpKind::Restore => {
             let generation = task.generation.clone().ok_or("no generation")?;
             match retry(|| client.restore_object(&task.bucket, &task.name, &generation)).await {
@@ -637,6 +644,7 @@ async fn cleanup_folders(client: &GcsClient, bucket: &str, prefix: &str) -> Resu
 /// Run a plan. `soft_delete` (the bucket keeps deleted objects) makes deletes undoable.
 pub async fn run(client: &GcsClient, plan: &Plan, soft_delete: bool, progress: &OpProgress) -> OpResult {
     let started = Instant::now();
+    progress.total.store((plan.tasks.len() + plan.folder_renames.len()) as u64, Ordering::Relaxed);
     let failures = Mutex::new(Vec::new());
     let fail = |path: String, error: String| {
         progress.failed.fetch_add(1, Ordering::Relaxed);

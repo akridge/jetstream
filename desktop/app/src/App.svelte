@@ -28,6 +28,7 @@
         if (app.server.phase !== 'ready') return;
         if (app.folderDialog && dialogRef) dialogRef.setFolder(paths[0]);
         else if (app.view === 'insights') app.scanRequest = paths[0];
+        else if (app.view === 'cloud' && app.cloudLocation) app.cloudDrop = paths;
         else app.addFolder(paths[0]);
       },
       (hovering) => (dragging = hovering && app.server.phase === 'ready'),
@@ -70,7 +71,12 @@
       <FolderDialog bind:this={dialogRef} dialog={app.folderDialog} />
     {/key}
   {/if}
-  {#if dragging}<DropOverlay />{/if}
+  {#if dragging}
+    <DropOverlay
+      title={app.view === 'cloud' && app.cloudLocation ? 'Drop to upload here' : app.view === 'insights' ? 'Drop a folder to analyze it' : undefined}
+      text={app.view === 'cloud' && app.cloudLocation ? `Into gs://${app.cloudLocation.bucket}/${app.cloudLocation.prefix}` : app.view === 'insights' ? ' ' : undefined}
+    />
+  {/if}
   <OpsTray />
   <Toasts />
 {:else}

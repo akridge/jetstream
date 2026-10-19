@@ -7,6 +7,7 @@
   import Square from '@lucide/svelte/icons/square';
   import CloudUpload from '@lucide/svelte/icons/cloud-upload';
   import Clock from '@lucide/svelte/icons/clock';
+  import Pause from '@lucide/svelte/icons/pause';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import StatusIcon from './StatusIcon.svelte';
   import ProgressBar from './ProgressBar.svelte';
@@ -31,12 +32,17 @@
   );
 
   let nowFile = $state('');
+  let paused = $state(false);
   let runningId = $derived(current?.status === 'running' ? current.job_id : null);
   $effect(() => {
     const id = runningId;
     nowFile = '';
+    paused = false;
     if (!id) return;
-    return pollActivity(id, (a) => (nowFile = a.in_flight[0]?.path || a.recent[0]?.path || ''), 2500);
+    return pollActivity(id, (a) => {
+      nowFile = a.in_flight[0]?.path || a.recent[0]?.path || '';
+      paused = !!a.paused;
+    }, 2500);
   });
   let schedule = $derived(preset.options?.schedule);
   let scheduled = $derived(schedule && schedule.mode && schedule.mode !== 'off');
@@ -55,6 +61,15 @@
     const [bucket, ...rest] = normalizeDestination(preset.destination).split('/');
     app.cloudLocation = { bucket, prefix: rest.length ? `${rest.join('/')}/` : '' };
     app.view = 'cloud';
+  }
+
+  async function togglePause() {
+    try {
+      await (paused ? api.resumeJob(current.job_id) : api.pauseJob(current.job_id));
+      paused = !paused;
+    } catch (err) {
+      app.toast(err.message, 'error');
+    }
   }
 
   async function cancel() {
@@ -113,11 +128,11 @@
       {#if current.status === 'running'}
         <div class="row">
           <StatusIcon job={current} size={16} />
-          <strong>{current.dry_run ? 'Previewing' : 'Syncing'}… {Math.round(current.progress_percent || 0)}%</strong>
+          <strong>{paused ? 'Paused at' : current.dry_run ? 'Previewing…' : 'Syncing…'} {Math.round(current.progress_percent || 0)}%</strong>
           <span class="muted">
             {bytes(current.bytes_uploaded)} of {bytes(current.total_size_bytes)}
-            {#if speed > 0}· {bytes(speed)}/s{/if}
-            {#if remaining !== null}· {duration(remaining)} left{/if}
+            {#if speed > 0 && !paused}· {bytes(speed)}/s{/if}
+            {#if remaining !== null && !paused}· {duration(remaining)} left{/if}
           </span>
         </div>
         <ProgressBar value={current.progress_percent || 0} indeterminate={!current.total_size_bytes} />
@@ -169,6 +184,9 @@
 
   <footer>
     {#if current}
+      {#if current.status === 'running' && current.upload_tool === 'jetstream' && !current.dry_run}
+        <button class="btn sm" onclick={togglePause}>{#if paused}<Play size={14} /> Resume{:else}<Pause size={14} /> Pause{/if}</button>
+      {/if}
       <button class="btn sm" onclick={cancel}><Square size={14} /> Cancel</button>
       <button class="btn ghost sm" onclick={() => app.openJob(current.job_id)}>Details</button>
     {:else if previewReady}
