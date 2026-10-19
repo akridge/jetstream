@@ -8,8 +8,10 @@ let allJobsCache = [];
 document.addEventListener('DOMContentLoaded', function() {
     loadAllJobs();
     loadStats();
-    setInterval(loadAllJobs, getRefreshInterval());
-    setInterval(loadStats, getRefreshInterval());
+    startLiveRefresh(function() {
+        loadAllJobs();
+        loadStats();
+    });
 });
 
 // ===== LOAD STATS =====

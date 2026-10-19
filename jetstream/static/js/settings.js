@@ -111,6 +111,7 @@ function saveUIPreferences() {
         }
     };
     localStorage.setItem('uiPreferences', JSON.stringify(uiPrefs));
+    if (uiPrefs.notifications) requestNotificationPermission();
 
     // Apply theme immediately
     applyTheme(uiPrefs.theme);

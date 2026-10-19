@@ -11,12 +11,24 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('gcs-destination').addEventListener('input', updateGCSPreview);
     updateGCSPreview();
 
-    const interval = getRefreshInterval();
-    setInterval(function() {
+    // Refresh when jobs change (live updates), with polling as a fallback
+    startLiveRefresh(function() {
         loadStats();
         loadJobs();
-    }, interval);
+    });
+
+    document.getElementById('dry-run').addEventListener('change', updateSubmitLabel);
+    updateSubmitLabel();
+    loadPresets();
 });
+
+function submitLabel() {
+    return document.getElementById('dry-run').checked ? '🔍 Start Preview' : '🚀 Start Upload';
+}
+
+function updateSubmitLabel() {
+    document.getElementById('upload-submit').textContent = submitLabel();
+}
 
 // ===== UPLOAD FORM =====
 
@@ -79,7 +91,8 @@ document.getElementById('upload-form').addEventListener('submit', async function
         const result = await response.json();
 
         if (response.ok) {
-            showToast('Upload job created: ' + result.job_id, 'success');
+            requestNotificationPermission();
+            showToast((data.dry_run ? 'Preview started: ' : 'Upload started: ') + result.job_id, 'success');
             loadStats();
             loadJobs();
         } else {
@@ -88,7 +101,7 @@ document.getElementById('upload-form').addEventListener('submit', async function
     } catch (error) {
         showToast('Error: ' + error.message, 'error');
     } finally {
-        setButtonLoading(submitBtn, false, '🚀 Start Upload');
+        setButtonLoading(submitBtn, false, submitLabel());
     }
 });
 
@@ -283,4 +296,121 @@ function updateGCSPreview() {
 function toggleAutoRetryOptions() {
     const el = document.getElementById('auto-retry-options');
     el.style.display = document.getElementById('auto-retry').checked ? 'block' : 'none';
+}
+
+// ===== SAVED PRESETS =====
+
+let savedPresets = [];
+
+function collectPresetOptions() {
+    return {
+        recursive: document.getElementById('recursive').checked,
+        split_by_folder: document.getElementById('split-by-folder').checked,
+        dry_run: document.getElementById('dry-run').checked,
+        upload_tool: document.getElementById('upload-tool').value,
+        exclude_folders: document.getElementById('exclude-folders').value,
+        exclude_patterns: document.getElementById('exclude-patterns').value,
+        no_clobber: document.getElementById('no-clobber').checked,
+        auto_retry: document.getElementById('auto-retry').checked,
+        auto_retry_delay_minutes: document.getElementById('auto-retry-delay').value,
+        max_auto_retries: document.getElementById('max-auto-retries').value
+    };
+}
+
+function applyPresetOptions(options) {
+    const setChecked = (id, value) => { if (value !== undefined) document.getElementById(id).checked = !!value; };
+    const setValue = (id, value) => { if (value !== undefined && value !== null) document.getElementById(id).value = value; };
+    setChecked('recursive', options.recursive);
+    setChecked('split-by-folder', options.split_by_folder);
+    setChecked('dry-run', options.dry_run);
+    setValue('upload-tool', options.upload_tool);
+    setValue('exclude-folders', options.exclude_folders);
+    setValue('exclude-patterns', options.exclude_patterns);
+    setChecked('no-clobber', options.no_clobber);
+    setChecked('auto-retry', options.auto_retry);
+    setValue('auto-retry-delay', options.auto_retry_delay_minutes);
+    setValue('max-auto-retries', options.max_auto_retries);
+    toggleAutoRetryOptions();
+    updateSubmitLabel();
+}
+
+async function loadPresets(selectId) {
+    try {
+        const response = await fetch('/api/presets/');
+        if (!response.ok) return;
+        savedPresets = await response.json();
+    } catch (e) {
+        return;
+    }
+    const select = document.getElementById('preset-select');
+    select.innerHTML = '<option value="">— Choose a saved folder + destination —</option>' +
+        savedPresets.map(p => '<option value="' + escapeHtml(p.preset_id) + '">' + escapeHtml(p.name) + '</option>').join('');
+    if (selectId) select.value = selectId;
+    document.getElementById('preset-delete').disabled = !select.value;
+}
+
+function applySelectedPreset() {
+    const select = document.getElementById('preset-select');
+    document.getElementById('preset-delete').disabled = !select.value;
+    const preset = savedPresets.find(p => p.preset_id === select.value);
+    if (!preset) return;
+    document.getElementById('source-path').value = preset.source_path;
+    document.getElementById('gcs-destination').value = preset.destination;
+    updateGCSPreview();
+    applyPresetOptions(preset.options || {});
+    showToast('Loaded preset: ' + preset.name, 'info');
+}
+
+async function saveCurrentAsPreset() {
+    const sourcePath = document.getElementById('source-path').value.trim();
+    const destination = document.getElementById('gcs-destination').value.trim();
+    if (!sourcePath || !destination) {
+        showToast('Fill in the folder and destination first', 'warning');
+        return;
+    }
+    const select = document.getElementById('preset-select');
+    const current = savedPresets.find(p => p.preset_id === select.value);
+    const suggested = current ? current.name : (sourcePath.split(/[\\/]/).filter(Boolean).pop() || 'My preset');
+    const name = prompt('Name this preset:', suggested);
+    if (!name || !name.trim()) return;
+
+    try {
+        const response = await fetch('/api/presets/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: name.trim(),
+                source_path: sourcePath,
+                destination: destination,
+                options: collectPresetOptions()
+            })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            showToast('Could not save preset: ' + (result.detail || 'Unknown error'), 'error');
+            return;
+        }
+        await loadPresets(result.preset_id);
+        showToast('Saved preset: ' + result.name, 'success');
+    } catch (error) {
+        showToast('Could not save preset: ' + error.message, 'error');
+    }
+}
+
+async function deleteSelectedPreset() {
+    const select = document.getElementById('preset-select');
+    const preset = savedPresets.find(p => p.preset_id === select.value);
+    if (!preset) return;
+    if (!confirm('Delete the preset "' + preset.name + '"?')) return;
+    try {
+        const response = await fetch('/api/presets/' + encodeURIComponent(preset.preset_id), { method: 'DELETE' });
+        if (!response.ok) {
+            showToast('Could not delete preset', 'error');
+            return;
+        }
+        await loadPresets();
+        showToast('Deleted preset: ' + preset.name, 'success');
+    } catch (error) {
+        showToast('Could not delete preset: ' + error.message, 'error');
+    }
 }

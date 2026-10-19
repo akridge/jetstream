@@ -1457,3 +1457,83 @@ body.dark-mode .thumbnail-item {
     border-color: #374151;
 }
 
+
+/* ===== Google Cloud sign-in badge ===== */
+.auth-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid #e2e8f0;
+    background: #f8fafc;
+    color: #334155;
+    font-size: 0.85em;
+    max-width: 420px;
+}
+.auth-badge .auth-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #94a3b8;
+    flex-shrink: 0;
+}
+.auth-badge-ok .auth-dot { background: #16a34a; }
+.auth-badge-warn { border-color: #fcd34d; background: #fffbeb; color: #92400e; }
+.auth-badge-warn .auth-dot { background: #f59e0b; }
+.auth-badge-pending .auth-dot { background: #3b82f6; }
+.auth-badge .auth-action {
+    border: none;
+    background: none;
+    padding: 0;
+    color: var(--primary);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: underline;
+}
+body.dark-mode .auth-badge { background: #0f1419; border-color: #2d3748; color: #e2e8f0; }
+body.dark-mode .auth-badge-warn { background: #3b2f0b; border-color: #92400e; color: #fde68a; }
+
+/* ===== Quick sync form ===== */
+.preset-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+    padding: 10px 12px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+}
+.preset-row label { margin: 0; font-weight: 600; color: #475569; }
+.preset-row select {
+    flex: 1;
+    min-width: 160px;
+    padding: 6px 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+}
+.path-input-row { display: flex; gap: 8px; }
+.path-input-row input { flex: 1; min-width: 0; }
+.drop-hint { color: #64748b; display: block; margin-top: 4px; }
+.drop-target-active {
+    outline: 3px dashed var(--primary);
+    outline-offset: -6px;
+}
+.checkbox-group.dry-run-callout {
+    flex-wrap: wrap;
+    margin: 12px 0;
+    padding: 10px 12px;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 6px;
+}
+.dry-run-callout label { font-weight: 600; }
+.dry-run-callout small { color: #475569; flex-basis: 100%; margin: 0 0 0 24px; }
+body.dark-mode .preset-row,
+body.dark-mode .dry-run-callout { background: #0f1419; border-color: #2d3748; }
+body.dark-mode .preset-row label,
+body.dark-mode .dry-run-callout small { color: #cbd5e0; }

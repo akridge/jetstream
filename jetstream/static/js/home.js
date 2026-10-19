@@ -5,7 +5,7 @@
 
 document.addEventListener('DOMContentLoaded', function() {
     loadStats();
-    setInterval(loadStats, getRefreshInterval());
+    startLiveRefresh(loadStats);
 });
 
 function loadStats() {

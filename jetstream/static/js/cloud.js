@@ -15,8 +15,8 @@ document.addEventListener('DOMContentLoaded', function() {
     setCloudOperationMode('sync');
     loadCloudTransfers();
 
-    // Poll for job updates
-    setInterval(loadCloudTransfers, 3000);
+    // Refresh when jobs change (live updates), with polling as a fallback
+    startLiveRefresh(loadCloudTransfers);
 });
 
 // ===== GCS PATH HELPER =====

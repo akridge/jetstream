@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from .database import SessionLocal, UploadJob
+from .events import notify_job
 import logging
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ class UploadScheduler:
                     job.status = "queued"
                     queue_manager.add_to_queue(job.job_id)
                     db.commit()
+                    notify_job(job.job_id)
                     logger.info(f"Scheduled job {job.job_id} moved to queue")
                     
                 except Exception as e:
@@ -209,6 +211,7 @@ class UploadScheduler:
             job.upload_output = output
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
+            notify_job(job_id)
             
             logger.info(f"Scheduled job {job_id} completed with status: {job.status}")
             
@@ -220,6 +223,7 @@ class UploadScheduler:
             job.error_message = str(e)
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
+            notify_job(job_id)
         finally:
             if not owned_elsewhere:
                 queue_manager.complete_job(job_id)

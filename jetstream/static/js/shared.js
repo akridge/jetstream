@@ -637,3 +637,232 @@ async function downloadJobOutput(jobId) {
         showToast('Error downloading output: ' + error.message, 'error');
     }
 }
+
+// ===== LIVE JOB UPDATES (Server-Sent Events) =====
+
+/**
+ * One EventSource per page on /api/system/events. Fires window events:
+ *   'jetstream:job'          detail = job summary (or {job_id, removed: true})
+ *   'jetstream:job-finished' detail = {job_id, name, status, destination, ...}
+ *   'jetstream:live-change'  detail = {live: bool}
+ * Pages keep their own loaders; startLiveRefresh() wires them to these events.
+ */
+var JetStreamEvents = (function() {
+    var source = null;
+    var live = false;
+    var retryMs = 2000;
+
+    function dispatch(name, detail) {
+        window.dispatchEvent(new CustomEvent(name, { detail: detail }));
+    }
+
+    function setLive(value) {
+        if (live !== value) {
+            live = value;
+            dispatch('jetstream:live-change', { live: value });
+        }
+    }
+
+    function connect() {
+        if (!window.EventSource || source) return;
+        source = new EventSource('/api/system/events');
+        source.addEventListener('hello', function() {
+            retryMs = 2000;
+            setLive(true);
+        });
+        source.addEventListener('job', function(e) {
+            dispatch('jetstream:job', JSON.parse(e.data));
+        });
+        source.addEventListener('job_removed', function(e) {
+            var data = JSON.parse(e.data);
+            data.removed = true;
+            dispatch('jetstream:job', data);
+        });
+        source.addEventListener('job_finished', function(e) {
+            var data = JSON.parse(e.data);
+            dispatch('jetstream:job-finished', data);
+            notifyJobFinished(data);
+        });
+        source.onerror = function() {
+            setLive(false);
+            // The browser retries on its own unless the stream was closed for good.
+            if (source && source.readyState === EventSource.CLOSED) {
+                source = null;
+                setTimeout(connect, retryMs);
+                retryMs = Math.min(retryMs * 2, 60000);
+            }
+        };
+    }
+
+    return {
+        start: connect,
+        isLive: function() { return live; }
+    };
+})();
+
+document.addEventListener('DOMContentLoaded', JetStreamEvents.start);
+
+/**
+ * Refresh a page's data when jobs change, polling only as a fallback.
+ * While the live stream is connected the poll slows to 30s.
+ */
+function startLiveRefresh(refreshFn) {
+    var pollTimer = null;
+    var debounceTimer = null;
+
+    function schedulePoll() {
+        clearTimeout(pollTimer);
+        var delay = JetStreamEvents.isLive() ? 30000 : getRefreshInterval();
+        pollTimer = setTimeout(function() {
+            refreshFn();
+            schedulePoll();
+        }, delay);
+    }
+
+    window.addEventListener('jetstream:job', function() {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(refreshFn, 400);
+    });
+    window.addEventListener('jetstream:live-change', schedulePoll);
+    schedulePoll();
+}
+
+// ===== JOB NOTIFICATIONS =====
+
+function _tauriNotification() {
+    return window.__TAURI__ && window.__TAURI__.notification ? window.__TAURI__.notification : null;
+}
+
+/** Ask for notification permission (call from a user action, e.g. creating a job). */
+function requestNotificationPermission() {
+    if (!getUIPreferences().notifications) return;
+    var tauri = _tauriNotification();
+    if (tauri) {
+        tauri.isPermissionGranted().then(function(granted) {
+            if (!granted) tauri.requestPermission();
+        }).catch(function() { /* ignore */ });
+        return;
+    }
+    if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+    }
+}
+
+function _alreadyNotified(key) {
+    // Several open tabs receive the same event; only the first one notifies.
+    try {
+        var seen = JSON.parse(localStorage.getItem('jsNotifiedJobs') || '[]');
+        if (seen.indexOf(key) !== -1) return true;
+        seen.push(key);
+        localStorage.setItem('jsNotifiedJobs', JSON.stringify(seen.slice(-50)));
+    } catch (e) { /* storage unavailable: notify anyway */ }
+    return false;
+}
+
+function notifyJobFinished(job) {
+    if (!getUIPreferences().notifications) return;
+    if (_alreadyNotified(job.job_id + ':' + (job.completed_at || ''))) return;
+
+    var kind = job.job_type === 'cloud_move' ? 'Move' : (job.job_type === 'cloud_sync' ? 'Cloud sync' : 'Upload');
+    if (job.dry_run) kind = 'Preview (dry run)';
+    var title;
+    if (job.status === 'completed') title = '✅ ' + kind + ' finished';
+    else if (job.status === 'failed') title = '❌ ' + kind + ' failed';
+    else title = '⛔ ' + kind + ' cancelled';
+    var body = (job.name || job.job_id) + '\n' + (job.destination || '');
+
+    showToast(title + ': ' + (job.name || job.job_id), job.status === 'completed' ? 'success' : (job.status === 'failed' ? 'error' : 'warning'), 6000);
+
+    var tauri = _tauriNotification();
+    if (tauri) {
+        tauri.sendNotification({ title: title, body: body });
+        return;
+    }
+    if ('Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') {
+        try {
+            new Notification(title, { body: body, icon: '/static/icon.png', tag: job.job_id });
+        } catch (e) { /* some browsers only allow notifications from a service worker */ }
+    }
+}
+
+// ===== GOOGLE CLOUD SIGN-IN BADGE =====
+
+function _ensureAuthBadge() {
+    var badge = document.getElementById('auth-badge');
+    if (badge) return badge;
+    var header = document.querySelector('.header-inner');
+    if (!header) return null;
+    badge = document.createElement('div');
+    badge.id = 'auth-badge';
+    badge.className = 'auth-badge';
+    header.appendChild(badge);
+    return badge;
+}
+
+async function loadAuthBadge(refresh) {
+    var badge = _ensureAuthBadge();
+    if (!badge) return;
+    try {
+        var response = await fetch('/api/system/auth-status' + (refresh ? '?refresh=true' : ''));
+        if (!response.ok) return;
+        renderAuthBadge(badge, await response.json());
+    } catch (e) { /* badge is optional */ }
+}
+
+function renderAuthBadge(badge, status) {
+    var html;
+    if (!status.gcloud_installed && !status.adc_available) {
+        badge.className = 'auth-badge auth-badge-warn';
+        html = '<span class="auth-dot"></span><span>Google Cloud SDK not found</span>' +
+            '<a class="auth-action" href="https://cloud.google.com/sdk/docs/install" target="_blank" rel="noopener">Install it</a>';
+    } else if (status.login_in_progress) {
+        badge.className = 'auth-badge auth-badge-pending';
+        html = '<span class="auth-dot"></span><span>Finish signing in in your browser…</span>' +
+            '<button type="button" class="auth-action" onclick="loadAuthBadge(true)">Check again</button>';
+    } else if (status.gcloud_account || status.adc_available) {
+        var who = status.gcloud_account || status.service_account || 'application credentials';
+        var partial = status.gcloud_installed && (!status.gcloud_account || !status.adc_available);
+        badge.className = 'auth-badge ' + (partial ? 'auth-badge-warn' : 'auth-badge-ok');
+        html = '<span class="auth-dot"></span><span title="' + escapeHtml(partial
+                ? 'Uploads use the gcloud account; bucket browsing and audits use application-default credentials. Sign in again to set both.'
+                : 'Signed in to Google Cloud') + '">' + escapeHtml(who) + (partial ? ' (partly signed in)' : '') + '</span>';
+        if (partial) {
+            html += '<button type="button" class="auth-action" onclick="startGoogleSignIn()">Fix sign-in</button>';
+        }
+    } else {
+        badge.className = 'auth-badge auth-badge-warn';
+        html = '<span class="auth-dot"></span><span>Not signed in to Google Cloud</span>' +
+            '<button type="button" class="auth-action" onclick="startGoogleSignIn()">Sign in</button>';
+    }
+    badge.innerHTML = html;
+}
+
+async function startGoogleSignIn() {
+    try {
+        var response = await fetch('/api/system/auth-login', { method: 'POST' });
+        var data = await response.json();
+        if (!response.ok) {
+            showToast(data.detail || 'Could not start sign-in', 'error', 8000);
+            return;
+        }
+        showToast('A browser window will open — sign in with your Google account, then come back here.', 'info', 8000);
+        loadAuthBadge(true);
+        // Re-check until the login process finishes (up to ~5 minutes).
+        var checks = 0;
+        var timer = setInterval(async function() {
+            checks++;
+            try {
+                var statusResponse = await fetch('/api/system/auth-status?refresh=true');
+                var status = await statusResponse.json();
+                renderAuthBadge(_ensureAuthBadge(), status);
+                if (!status.login_in_progress || checks > 60) clearInterval(timer);
+            } catch (e) {
+                clearInterval(timer);
+            }
+        }, 5000);
+    } catch (error) {
+        showToast('Could not start sign-in: ' + error.message, 'error');
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() { loadAuthBadge(false); });

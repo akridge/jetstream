@@ -763,32 +763,5 @@ class JetStreamController:
 
     def check_gcs_auth(self) -> Dict[str, Any]:
         """Return a dict describing the current GCS auth state."""
-        result: Dict[str, Any] = {
-            "adc_available": False,
-            "gcloud_account": None,
-            "service_account": None,
-            "error": None,
-        }
-        try:
-            import google.auth
-            creds, project = google.auth.default()
-            result["adc_available"] = True
-            result["project"] = project
-            if hasattr(creds, "service_account_email"):
-                result["service_account"] = creds.service_account_email
-        except Exception as e:
-            result["error"] = str(e)
-
-        try:
-            import subprocess
-            out = subprocess.check_output(
-                ["gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"],
-                timeout=5,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-            result["gcloud_account"] = out.strip() or None
-        except Exception:
-            pass
-
-        return result
+        from ..services import check_gcloud_auth
+        return check_gcloud_auth(force=True)

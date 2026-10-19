@@ -54,11 +54,23 @@
         
         <div class="main-content">
             <div class="panel">
-                <h2>Create Upload Job</h2>
+                <h2>Sync a Folder to the Cloud</h2>
                 <form class="upload-form" id="upload-form">
+                    <div class="preset-row">
+                        <label for="preset-select">Saved presets</label>
+                        <select id="preset-select" onchange="applySelectedPreset()">
+                            <option value="">— Choose a saved folder + destination —</option>
+                        </select>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="saveCurrentAsPreset()">💾 Save as preset</button>
+                        <button type="button" class="btn btn-secondary btn-sm" id="preset-delete" onclick="deleteSelectedPreset()" disabled>Delete</button>
+                    </div>
+
                     <div class="form-group">
-                        <label for="source-path">Source Path</label>
-                        <input type="text" id="source-path" placeholder="C:\path\to\folder" required>
+                        <label for="source-path">Folder on this computer</label>
+                        <div class="path-input-row">
+                            <input type="text" id="source-path" placeholder="C:\path\to\folder" required>
+                        </div>
+                        <small class="drop-hint" id="source-path-hint">Paste the full folder path (for example D:\Survey\2026).</small>
                     </div>
                     
                     <div class="form-group">
@@ -82,43 +94,45 @@
                         </div>
                     </div>
                     
-                    <div class="checkbox-group">
-                        <input type="checkbox" id="recursive" checked>
-                        <label for="recursive">Recursive (include subfolders)</label>
-                    </div>
-                    
-                    <div class="checkbox-group">
-                        <input type="checkbox" id="split-by-folder">
-                        <label for="split-by-folder">Split by subfolder (separate jobs)</label>
-                    </div>
-                    
-                    <div class="checkbox-group">
-                        <input type="checkbox" id="dry-run">
-                        <label for="dry-run">Dry Run (preview only)</label>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="upload-tool">Upload Tool</label>
-                        <select id="upload-tool" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px;">
-                            <option value="gcloud" selected>gcloud storage (recommended, faster)</option>
-                            <option value="gsutil">gsutil (legacy)</option>
-                        </select>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="schedule-time">Schedule Upload (optional)</label>
-                        <input type="datetime-local" id="schedule-time">
-                        <small style="color: #64748b; display: block; margin-top: 4px;">Leave empty to start immediately</small>
+                    <div class="checkbox-group dry-run-callout">
+                        <input type="checkbox" id="dry-run" checked>
+                        <label for="dry-run">Preview first (dry run)</label>
+                        <small>Lists what would be uploaded without copying anything. Open the finished job and choose “Run Actual Upload” to send the files.</small>
                     </div>
                     
                     <!-- Advanced Options Toggle -->
                     <div style="margin: 20px 0; padding: 15px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">
                         <div style="display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="toggleAdvancedOptions()">
-                            <h3 style="margin: 0; font-size: 1em; color: #475569;">⚙️ Advanced Filtering Options</h3>
+                            <h3 style="margin: 0; font-size: 1em; color: #475569;">⚙️ Advanced options <span style="font-weight: normal; color: #64748b;">— subfolders, schedule, filters, retries</span></h3>
                             <span id="advanced-toggle" style="color: #64748b;">▼</span>
                         </div>
                         
                         <div id="advanced-options" style="display: none; margin-top: 15px;">
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="recursive" checked>
+                                <label for="recursive">Recursive (include subfolders)</label>
+                            </div>
+                            
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="split-by-folder">
+                                <label for="split-by-folder">Split by subfolder (separate jobs)</label>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="upload-tool">Upload Tool</label>
+                                <select id="upload-tool" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px;">
+                                    <option value="gcloud" selected>gcloud storage (recommended, faster)</option>
+                                    <option value="gsutil">gsutil (legacy)</option>
+                                </select>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="schedule-time">Schedule Upload (optional)</label>
+                                <input type="datetime-local" id="schedule-time">
+                                <small style="color: #64748b; display: block; margin-top: 4px;">Leave empty to start immediately</small>
+                            </div>
+
+                            <h4 style="font-size: 0.9em; color: #475569; margin: 20px 0 10px 0; border-top: 1px solid #e2e8f0; padding-top: 15px;">🔎 Filtering</h4>
                             <div class="form-group">
                                 <label for="exclude-folders">Exclude Folders</label>
                                 <input type="text" id="exclude-folders" placeholder="_archive, _YEAR, MISC, DARK, Products">
@@ -235,7 +249,7 @@
                     </div>
                     
                     <button type="button" class="btn btn-secondary" onclick="analyzeFolder()">📊 Analyze Folder</button>
-                    <button type="submit" class="btn btn-primary">🚀 Start Upload</button>
+                    <button type="submit" class="btn btn-primary" id="upload-submit">🔍 Start Preview</button>
                 </form>
                 
                 <div id="analysis-result" style="margin-top: 20px; display: none;">
@@ -258,5 +272,6 @@
     
     <script src="/static/js/shared.js"></script>
     <script src="/static/js/uploads.js"></script>
+    <script src="/static/js/desktop.js"></script>
 </body>
 </html>

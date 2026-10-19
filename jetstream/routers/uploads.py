@@ -12,6 +12,7 @@ from ..database import get_db, UploadJob
 from ..models import (
     UploadRequest, UploadResponse, JobStatusResponse, JobStatus
 )
+from ..events import notify_job
 from ..services import (
     FileFilter, FolderAnalyzer, upload_service, queue_manager, generate_friendly_job_name,
     make_progress_callback, claim_job_for_run
@@ -42,6 +43,7 @@ async def process_upload_job(job_id: str, db_path: str):
             job.status = "queued"
             queue_manager.add_to_queue(job_id)
             db.commit()
+            notify_job(job_id)
             return
         
         # Start job (atomic claim so the scheduler can't start it too)
@@ -97,6 +99,7 @@ async def process_upload_job(job_id: str, db_path: str):
         job.upload_output = output
         job.completed_at = datetime.now(timezone.utc)
         db.commit()
+        notify_job(job_id)
         
         # Complete job in queue
         queue_manager.complete_job(job_id)
@@ -115,6 +118,7 @@ async def process_upload_job(job_id: str, db_path: str):
             job.error_message = str(e)
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
+            notify_job(job_id)
         queue_manager.complete_job(job_id)
         # Ensure the next waiting job is not left stuck when this one fails
         next_job_id = queue_manager.get_next_job()
@@ -199,6 +203,7 @@ async def create_upload(
             db.add(job)
             db.commit()
             db.refresh(job)
+            notify_job(job_id)
             
             # Check if job is scheduled for later
             if request.scheduled_for and request.scheduled_for > datetime.now(timezone.utc):
@@ -265,6 +270,7 @@ async def create_upload(
         db.add(job)
         db.commit()
         db.refresh(job)
+        notify_job(job_id)
         
         # Check if job is scheduled for later
         if request.scheduled_for and request.scheduled_for > datetime.now(timezone.utc):
@@ -371,6 +377,7 @@ async def delete_upload(job_id: str, db: Session = Depends(get_db)):
     # Delete the job from database
     db.delete(job)
     db.commit()
+    notify_job(job_id)
     
     return {"message": "Job deleted successfully", "job_id": job_id}
 
@@ -394,6 +401,7 @@ async def cancel_upload(job_id: str, db: Session = Depends(get_db)):
     job.status = "cancelled"
     job.completed_at = datetime.now(timezone.utc)
     db.commit()
+    notify_job(job_id)
     
     # Remove from queue
     queue_manager.complete_job(job_id)
@@ -431,6 +439,7 @@ async def retry_upload(
         job.dry_run = False
     
     db.commit()
+    notify_job(job_id)
     
     # Add to background tasks
     background_tasks.add_task(process_upload_job, job_id, "")

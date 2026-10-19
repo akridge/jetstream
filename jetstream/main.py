@@ -34,6 +34,8 @@ import time
 import logging
 
 from .routers import uploads, stats, queue, folders, analytics, settings as settings_router, local_audit
+from .routers import system as system_router, presets as presets_router
+from .events import broker
 from .database import init_db, close_db
 from .config import settings
 from .scheduler import scheduler
@@ -104,6 +106,8 @@ async def lifespan(app: FastAPI):
         
         logger.info("=" * 70)
         
+        broker.bind_loop()
+
         logger.info("[1/3] Initializing database...")
         init_db()
         logger.info("[OK] Database initialized")
@@ -215,6 +219,8 @@ app.include_router(queue.router, prefix="/api/queue", tags=["Queue"])
 app.include_router(folders.router, prefix="/api/folders", tags=["Folders"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"])
 app.include_router(local_audit.router, prefix="/api/local-audit", tags=["Local Audit"])
+app.include_router(system_router.router, prefix="/api/system", tags=["System"])
+app.include_router(presets_router.router, prefix="/api/presets", tags=["Presets"])
 
 # Include cloud analyzer only if it loaded successfully
 if CLOUD_ANALYZER_AVAILABLE:

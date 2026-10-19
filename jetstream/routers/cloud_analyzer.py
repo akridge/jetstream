@@ -13,6 +13,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, defer
 
 from ..database import UploadJob, get_db
+from ..events import notify_job
 from ..services import redact_sensitive_text, cap_output, OutputCapture, ConsoleEcho
 
 # Lazy import for Google Cloud Storage to avoid startup crashes
@@ -319,6 +320,7 @@ def update_cloud_operation_job(
         if status in ("completed", "failed", "cancelled"):
             job.completed_at = datetime.now(timezone.utc)
         db.commit()
+        notify_job(job_id)
     finally:
         db.close()
 
@@ -503,6 +505,7 @@ async def start_cloud_transfer(
     )
     db.add(job)
     db.commit()
+    notify_job(job_id)
     
     # Initialize job status
     cloud_transfer_jobs[job_id] = {
@@ -582,6 +585,7 @@ async def start_cloud_move(
     )
     db.add(job)
     db.commit()
+    notify_job(job_id)
 
     cloud_transfer_jobs[job_id] = {
         "status": "running",

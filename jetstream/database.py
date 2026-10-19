@@ -419,6 +419,32 @@ class DatasetCatalog(Base):
         return data
 
 
+class SyncPreset(Base):
+    """Saved "Quick sync" settings: a folder, a destination and upload options."""
+    __tablename__ = "sync_presets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    preset_id = Column(String, unique=True, index=True)
+    name = Column(String, nullable=False, unique=True)
+    source_path = Column(String, nullable=False)
+    destination = Column(String, nullable=False)  # bucket/path as typed in the form
+    options = Column(JSON, nullable=True)  # advanced upload form values
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        """Convert to dictionary."""
+        return {
+            "preset_id": self.preset_id,
+            "name": self.name,
+            "source_path": self.source_path,
+            "destination": self.destination,
+            "options": self.options or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 def _run_migrations():
     """Run database migrations for schema changes."""
     if SessionLocal is None or engine is None:

@@ -13,9 +13,11 @@ from collections import defaultdict, deque
 import asyncio
 import time
 import logging
+import shutil
 
 from .config import settings
 from .database import UploadJob, FolderStats, get_db
+from .events import notify_job
 from .models import JobStatus
 
 logger = logging.getLogger(__name__)
@@ -911,6 +913,7 @@ def make_progress_callback(job_id: str, db=None) -> Callable:
                     values, synchronize_session=False
                 )
                 session.commit()
+                notify_job(job_id)
         except Exception:
             try:
                 session.rollback()
@@ -937,6 +940,8 @@ def claim_job_for_run(db, job_id: str) -> bool:
         synchronize_session=False,
     )
     db.commit()
+    if claimed == 1:
+        notify_job(job_id)
     return claimed == 1
 
 
@@ -1280,6 +1285,71 @@ class QueueManager:
             'max_concurrent': self.max_concurrent,
             'paused': self.paused,
         }
+
+_AUTH_CACHE_SECONDS = 30.0
+_auth_cache: Dict = {"at": 0.0, "value": None}
+_auth_lock = threading.Lock()
+
+
+def find_gcloud() -> Optional[str]:
+    """Full path to the gcloud CLI (gcloud.cmd on Windows), or None if not installed."""
+    return shutil.which("gcloud")
+
+
+def check_gcloud_auth(force: bool = False) -> Dict:
+    """Describe Google Cloud sign-in state for the UI and TUI.
+
+    Uploads run through the gcloud CLI account; bucket browsing and audits use
+    Application Default Credentials (ADC). ``gcloud auth login --update-adc`` sets both.
+    Results are cached briefly because ``google.auth.default`` and ``gcloud`` are slow.
+    """
+    with _auth_lock:
+        cached = _auth_cache["value"]
+        if not force and cached is not None and time.time() - _auth_cache["at"] < _AUTH_CACHE_SECONDS:
+            return dict(cached)
+
+    gcloud_path = find_gcloud()
+    result: Dict = {
+        "gcloud_installed": gcloud_path is not None,
+        "gcloud_account": None,
+        "adc_available": False,
+        "project": None,
+        "service_account": None,
+        "error": None,
+    }
+    try:
+        import google.auth
+        creds, project = google.auth.default()
+        result["adc_available"] = True
+        result["project"] = project
+        if hasattr(creds, "service_account_email"):
+            result["service_account"] = creds.service_account_email
+    except Exception as e:
+        result["error"] = redact_sensitive_text(str(e))
+
+    if gcloud_path:
+        try:
+            out = subprocess.check_output(
+                [gcloud_path, "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"],
+                timeout=15,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            result["gcloud_account"] = out.strip().splitlines()[0] if out.strip() else None
+        except Exception:
+            pass
+
+    result["signed_in"] = bool(result["gcloud_account"] or result["adc_available"])
+    with _auth_lock:
+        _auth_cache["value"] = dict(result)
+        _auth_cache["at"] = time.time()
+    return result
+
+
+def clear_auth_cache() -> None:
+    with _auth_lock:
+        _auth_cache["value"] = None
+
 
 # Global instances
 upload_service = UploadService()
