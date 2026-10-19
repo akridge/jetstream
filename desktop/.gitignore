@@ -14,3 +14,4 @@ dist/
 !src-tauri/capabilities/*.json
 
 transfer/target/
+dist/

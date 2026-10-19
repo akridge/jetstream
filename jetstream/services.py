@@ -1417,7 +1417,12 @@ class UploadService:
         finally:
             self.active_uploads.pop(job_id, None)
 
-        output = cap_output(redact_sensitive_text(state.summary_text(returncode) + "\n\n" + capture.summary()))
+        # Raw JSON events stay in the log file; the job output is the readable summary.
+        stderr_tail = capture.stderr_text()
+        output = state.summary_text(returncode)
+        if stderr_tail:
+            output += "\n\nEngine messages:\n" + stderr_tail
+        output = cap_output(redact_sensitive_text(output))
         if log_file is not None:
             try:
                 log_file.write("\n" + "=" * 80 + "\n" + state.summary_text(returncode) + "\n")

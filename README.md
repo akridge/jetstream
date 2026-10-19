@@ -105,11 +105,12 @@ Once the dashboard is open:
 
 ## Desktop App (preview)
 
-A native desktop version of JetStream is in development in [`desktop/`](./desktop/README.md). It's one installer with no Python or terminal needed, and it adds:
+A native desktop version of JetStream is in development in [`desktop/`](./desktop/README.md). It's one installer with no Python or terminal needed, and it has its own interface:
 
-- a folder picker and drag-and-drop for folders
-- notifications when jobs finish
-- a tray icon that keeps uploads running after you close the window
+- **Synced folders:** add a folder by dropping it on the window, preview, then sync only what's new
+- **Activity:** live job progress
+- **Built-in upload engine:** re-syncs unchanged folders almost instantly and resumes large files
+- **Notifications and tray icon:** you're told when jobs finish, and closing the window keeps uploads running
 
 It uses the same job history as the `pip` version. Installers are built by the **Build desktop app** GitHub workflow.
 

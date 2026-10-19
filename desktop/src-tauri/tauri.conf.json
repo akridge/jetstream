@@ -4,18 +4,21 @@
   "version": "0.1.29",
   "identifier": "gov.noaa.jetstream",
   "build": {
-    "frontendDist": "../ui"
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev:ui",
+    "beforeBuildCommand": "npm run build:ui"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
-        "title": "NOAA JetStream",
-        "width": 1400,
-        "height": 950,
-        "minWidth": 900,
-        "minHeight": 600,
+        "title": "JetStream",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 960,
+        "minHeight": 620,
         "dragDropEnabled": true
       }
     ],
@@ -29,7 +32,10 @@
     "category": "Utility",
     "shortDescription": "Upload and manage data in Google Cloud Storage",
     "longDescription": "NOAA JetStream manages uploads from local folders to Google Cloud Storage, cloud-to-cloud sync and moves, and bucket audits.",
-    "externalBin": ["binaries/jetstream-server", "binaries/jetstream-transfer"],
+    "externalBin": [
+      "binaries/jetstream-server",
+      "binaries/jetstream-transfer"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

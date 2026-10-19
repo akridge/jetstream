@@ -1,6 +1,9 @@
-// JetStream desktop shell: starts the bundled JetStream server (a PyInstaller
-// sidecar) on a private localhost port and shows its web UI in a native window,
-// with a tray icon so uploads keep running when the window is closed.
+// JetStream desktop shell.
+//
+// Starts the bundled JetStream server (a PyInstaller sidecar) on a private localhost
+// port and reports its status to the desktop UI (Svelte, in ../app), which then talks
+// to the server's HTTP API. The original web pages stay available in a separate
+// "classic" window. A tray icon keeps uploads running when the window is closed.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -11,9 +14,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, RunEvent, Url, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
@@ -21,12 +25,42 @@ use tauri_plugin_shell::ShellExt;
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(120);
 const LOG_LINES: usize = 200;
 
-#[derive(Default)]
+/// Origins the desktop UI is served from (they differ by platform).
+const APP_ORIGINS: &str = "tauri://localhost,http://tauri.localhost,https://tauri.localhost,http://localhost:5173";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Phase {
+    Starting,
+    Ready,
+    Failed,
+}
+
+#[derive(Clone, Serialize)]
+struct ServerStatus {
+    phase: Phase,
+    port: Option<u16>,
+    message: Option<String>,
+}
+
 struct Server {
     child: Mutex<Option<CommandChild>>,
     log: Mutex<VecDeque<String>>,
+    status: Mutex<ServerStatus>,
     exited: AtomicBool,
     tray_hint_shown: AtomicBool,
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self {
+            child: Mutex::new(None),
+            log: Mutex::new(VecDeque::new()),
+            status: Mutex::new(ServerStatus { phase: Phase::Starting, port: None, message: None }),
+            exited: AtomicBool::new(false),
+            tray_hint_shown: AtomicBool::new(false),
+        }
+    }
 }
 
 impl Server {
@@ -47,6 +81,55 @@ impl Server {
             let _ = child.kill();
         }
     }
+
+    fn port(&self) -> Option<u16> {
+        self.status.lock().unwrap().port
+    }
+}
+
+fn set_status(app: &AppHandle, phase: Phase, message: Option<String>) {
+    let server = app.state::<Server>();
+    let status = {
+        let mut status = server.status.lock().unwrap();
+        status.phase = phase;
+        status.message = message;
+        status.clone()
+    };
+    let _ = app.emit("server-status", status);
+}
+
+/// Current server status, polled by the UI on load (events cover later changes).
+#[tauri::command]
+fn server_status(app: AppHandle) -> ServerStatus {
+    app.state::<Server>().status.lock().unwrap().clone()
+}
+
+/// Last lines of server output, shown when startup fails.
+#[tauri::command]
+fn server_log(app: AppHandle) -> String {
+    app.state::<Server>().log_text()
+}
+
+/// Open one of the original web pages (e.g. "static/cloud.html") in the classic window.
+#[tauri::command]
+fn open_classic(app: AppHandle, path: String) -> Result<(), String> {
+    let port = app.state::<Server>().port().ok_or("JetStream is still starting")?;
+    let path = path.trim_start_matches('/');
+    let url = Url::parse(&format!("http://127.0.0.1:{port}/{path}")).map_err(|e| e.to_string())?;
+    if let Some(window) = app.get_webview_window("classic") {
+        window.navigate(url).map_err(|e| e.to_string())?;
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(&app, "classic", WebviewUrl::External(url))
+        .title("JetStream — Classic pages")
+        .inner_size(1300.0, 900.0)
+        .min_inner_size(900.0, 600.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn free_port() -> std::io::Result<u16> {
@@ -78,33 +161,25 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
-fn show_startup_error(app: &AppHandle, message: &str) {
-    let server = app.state::<Server>();
-    let log = server.log_text();
-    if let Some(window) = app.get_webview_window("main") {
-        let script = format!(
-            "window.showStartupError && window.showStartupError({}, {});",
-            serde_json::to_string(message).unwrap(),
-            serde_json::to_string(&log).unwrap()
-        );
-        let _ = window.eval(&script);
-    }
-    show_main_window(app);
-}
-
 fn start_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let port = free_port()?;
+    let cors = format!("{APP_ORIGINS},http://127.0.0.1:{port}");
     let (mut events, child) = app
         .shell()
         .sidecar("jetstream-server")?
         .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--no-browser"])
         .env("AUTO_OPEN_BROWSER", "false")
+        .env("CORS_ALLOW_ORIGINS", cors)
         .env("JETSTREAM_DESKTOP_PARENT_PID", std::process::id().to_string())
         .env("PYTHONUNBUFFERED", "1")
         .spawn()?;
-    *app.state::<Server>().child.lock().unwrap() = Some(child);
+    {
+        let server = app.state::<Server>();
+        *server.child.lock().unwrap() = Some(child);
+        server.status.lock().unwrap().port = Some(port);
+    }
 
-    // Keep the tail of the server output for the startup error page.
+    // Keep the tail of the server output for the startup error screen.
     let log_app = app.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
@@ -117,34 +192,32 @@ fn start_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 CommandEvent::Terminated(payload) => {
                     server.push_log(format!("server exited (code {:?})", payload.code));
                     server.exited.store(true, Ordering::SeqCst);
+                    if matches!(server.status.lock().unwrap().phase, Phase::Ready) {
+                        set_status(&log_app, Phase::Failed, Some("The JetStream server stopped unexpectedly.".into()));
+                    }
                 }
                 _ => {}
             }
         }
     });
 
-    // Wait for the server, then point the window at it.
     let wait_app = app.clone();
     std::thread::spawn(move || {
         let started = Instant::now();
         loop {
             if server_ready(port) {
-                let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-                if let Some(window) = wait_app.get_webview_window("main") {
-                    let _ = window.navigate(url);
-                }
+                set_status(&wait_app, Phase::Ready, None);
                 return;
             }
-            let server = wait_app.state::<Server>();
-            if server.exited.load(Ordering::SeqCst) {
-                show_startup_error(&wait_app, "The JetStream server stopped while starting.");
+            if wait_app.state::<Server>().exited.load(Ordering::SeqCst) {
+                set_status(&wait_app, Phase::Failed, Some("The JetStream server stopped while starting.".into()));
                 return;
             }
             if started.elapsed() > SERVER_START_TIMEOUT {
-                show_startup_error(&wait_app, "The JetStream server did not respond within two minutes.");
+                set_status(&wait_app, Phase::Failed, Some("The JetStream server did not respond within two minutes.".into()));
                 return;
             }
-            std::thread::sleep(Duration::from_millis(400));
+            std::thread::sleep(Duration::from_millis(300));
         }
     });
     Ok(())
@@ -165,12 +238,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
                 show_main_window(tray.app_handle());
             }
         });
@@ -184,35 +252,29 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 fn main() {
     let app = tauri::Builder::default()
         // Must be registered first: a second launch focuses the running app.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main_window(app);
-        }))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main_window(app)))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(Server::default())
+        .invoke_handler(tauri::generate_handler![server_status, server_log, open_classic])
         .setup(|app| {
             build_tray(app.handle())?;
             if let Err(err) = start_server(app.handle()) {
-                let handle = app.handle().clone();
-                handle.state::<Server>().push_log(format!("Could not launch server: {err}"));
-                // Give the loading page a moment to register its error hook.
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(800));
-                    show_startup_error(&handle, "The bundled JetStream server could not be launched.");
-                });
+                app.state::<Server>().push_log(format!("Could not launch server: {err}"));
+                set_status(app.handle(), Phase::Failed, Some("The bundled JetStream server could not be launched.".into()));
             }
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window keeps JetStream running in the tray so uploads continue.
+            // Closing the main window keeps JetStream running in the tray so uploads continue.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
                     let _ = window.hide();
                     let app = window.app_handle();
-                    let server = app.state::<Server>();
-                    if !server.tray_hint_shown.swap(true, Ordering::SeqCst) {
+                    if !app.state::<Server>().tray_hint_shown.swap(true, Ordering::SeqCst) {
                         let _ = app
                             .notification()
                             .builder()

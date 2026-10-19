@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "classic",
+  "description": "The original JetStream web pages (served by the local server) in the classic window: folder picker, notifications and drag-and-drop.",
+  "windows": [
+    "classic"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "notification:default"
+  ]
+}
