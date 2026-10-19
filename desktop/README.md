@@ -219,7 +219,7 @@ python scripts/build_desktop.py --package-only   # adds the portable zip; copies
 
 - **Icons:** regenerate them from `jetstream/static/icon.png` with `npm run icons`.
 - **CI:** the **Build desktop app** GitHub workflow (`.github/workflows/desktop.yml`) builds for Windows, macOS and Linux:
-  - It runs on any push that changes `desktop/`, `jetstream/` or `requirements.txt`, when started from the Actions tab, or when a `desktop-v*` tag is pushed.
+  - It runs on any push that changes `desktop/`, `jetstream/` or `requirements.txt` (README-only changes are skipped), when started from the Actions tab, or when a `desktop-v*` tag is pushed.
   - Each run uploads a `jetstream-desktop-<os>` artifact with the installers and the portable zip. Download it from the run's summary page.
   - A tag such as `desktop-v0.1.29` also creates a draft release with the installers and portable zips attached.
   - The **Run workflow** button only appears once the workflow file is on the default branch.
