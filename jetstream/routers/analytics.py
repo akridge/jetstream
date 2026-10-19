@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only, defer
 from sqlalchemy import func, case
 from typing import Dict, List
 from datetime import datetime, timezone, timedelta
@@ -72,7 +72,9 @@ async def get_success_rate(db: Session = Depends(get_db)):
 @router.get("/performance-metrics")
 async def get_performance_metrics(db: Session = Depends(get_db)):
     """Get performance metrics for uploads."""
-    completed_jobs = db.query(UploadJob).filter(
+    completed_jobs = db.query(UploadJob).options(
+        load_only(UploadJob.started_at, UploadJob.completed_at, UploadJob.bytes_uploaded)
+    ).filter(
         UploadJob.status == 'completed',
         UploadJob.started_at.isnot(None),
         UploadJob.completed_at.isnot(None)
@@ -160,7 +162,7 @@ async def get_top_destinations(limit: int = 10, db: Session = Depends(get_db)):
 @router.get("/export-csv")
 async def export_jobs_csv(db: Session = Depends(get_db)):
     """Export all upload jobs as a CSV file (Issue #3)."""
-    jobs = db.query(UploadJob).order_by(UploadJob.created_at.desc()).all()
+    jobs = db.query(UploadJob).options(defer(UploadJob.upload_output)).order_by(UploadJob.created_at.desc()).all()
 
     output = io.StringIO()
     writer = csv.writer(output)

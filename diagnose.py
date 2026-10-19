@@ -130,9 +130,11 @@ def check_database():
         print("✓ Database initialized successfully")
         
         # Check if file was created
-        if Path('jetstream.db').exists():
-            size = Path('jetstream.db').stat().st_size
-            print(f"✓ Database file created: jetstream.db ({size} bytes)")
+        from jetstream.database import engine
+        db_file = engine.url.database if engine is not None else None
+        if db_file and Path(db_file).exists():
+            size = Path(db_file).stat().st_size
+            print(f"✓ Database file created: {db_file} ({size} bytes)")
         
         return True
     except Exception as e:

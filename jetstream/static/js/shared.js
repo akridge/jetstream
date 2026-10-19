@@ -615,17 +615,16 @@ function closeJobModal() {
 
 async function downloadJobOutput(jobId) {
     try {
-        var response = await fetch('/api/uploads/' + jobId);
-        var job = await response.json();
-        if (!response.ok || !job.upload_output) {
+        // Full log file (the job details only carry the last part of the output)
+        var response = await fetch('/api/uploads/' + jobId + '/log');
+        if (!response.ok) {
             showToast('No output available for this job', 'warning');
             return;
         }
-        var sourcePath = job.source_path || 'job';
-        var timestamp = new Date(job.created_at).toISOString().replace(/:/g, '-').split('.')[0];
-        var pathName = sourcePath.split(/[/\\]/).pop() || 'job';
-        var filename = pathName + '_' + jobId.substring(0, 8) + '_' + timestamp + '.txt';
-        var blob = new Blob([job.upload_output], { type: 'text/plain' });
+        var blob = await response.blob();
+        var disposition = response.headers.get('Content-Disposition') || '';
+        var match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+        var filename = match ? decodeURIComponent(match[1]) : ('job_' + jobId.substring(0, 8) + '.log');
         var url = window.URL.createObjectURL(blob);
         var a = document.createElement('a');
         a.href = url;

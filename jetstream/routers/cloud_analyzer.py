@@ -9,10 +9,11 @@ import subprocess
 import threading
 import uuid
 import shutil
-from sqlalchemy.orm import Session
+from sqlalchemy import or_
+from sqlalchemy.orm import Session, defer
 
 from ..database import UploadJob, get_db
-from ..services import redact_sensitive_text
+from ..services import redact_sensitive_text, cap_output, OutputCapture, ConsoleEcho
 
 # Lazy import for Google Cloud Storage to avoid startup crashes
 # Will be imported only when actually needed
@@ -302,7 +303,7 @@ def update_cloud_operation_job(
         if status is not None:
             job.status = status
         if output is not None:
-            job.upload_output = output
+            job.upload_output = cap_output(output)
         if error is not None:
             job.error_message = error
         if phase is not None:
@@ -327,8 +328,20 @@ def is_cloud_operation_job(job: UploadJob) -> bool:
     return filters.get("job_type") in {"cloud_sync", "cloud_move"} or filters.get("transfer_direction") == "cloud_to_cloud"
 
 
-def cloud_operation_job_to_transfer(job: UploadJob) -> dict:
+MAX_LISTED_TRANSFERS = 200
+
+
+def cloud_operation_filter():
+    """SQL equivalent of is_cloud_operation_job, so list queries don't scan every job in Python."""
+    return or_(
+        UploadJob.filters["job_type"].as_string().in_(["cloud_sync", "cloud_move"]),
+        UploadJob.filters["transfer_direction"].as_string() == "cloud_to_cloud",
+    )
+
+
+def cloud_operation_job_to_transfer(job: UploadJob, include_output: bool = True) -> dict:
     filters = job.filters or {}
+    summary = job.to_summary_dict()
     destination = f"gs://{job.destination_bucket}"
     if job.destination_path:
         destination += f"/{job.destination_path}"
@@ -342,9 +355,9 @@ def cloud_operation_job_to_transfer(job: UploadJob) -> dict:
         "recursive": job.recursive,
         "no_clobber": job.no_clobber or False,
         "command": filters.get("display_command"),
-        "output": job.upload_output or "",
-        "created_at": job.to_dict().get("created_at"),
-        "completed_at": job.to_dict().get("completed_at"),
+        "output": (job.upload_output or "") if include_output else "",
+        "created_at": summary["created_at"],
+        "completed_at": summary["completed_at"],
         "error": job.error_message,
         "operation": filters.get("operation", "move" if filters.get("job_type") == "cloud_move" else "sync"),
         "source_kind": filters.get("source_kind"),
@@ -736,17 +749,18 @@ async def run_cloud_transfer(job_id: str, cmd: list):
                 text=True
             )
 
-            stdout_lines = []
-            stderr_lines = []
+            # Keep only a bounded tail; sync output is one line per object.
+            capture = OutputCapture()
+            echo = ConsoleEcho()
 
             def _read_stdout():
                 for line in process.stdout:
-                    stdout_lines.append(line)
+                    capture.add(line, "stdout")
 
             def _read_stderr():
                 for line in process.stderr:
-                    stderr_lines.append(line)
-                    print(redact_sensitive_text(line.rstrip()))
+                    capture.add(line, "stderr")
+                    echo(line)
 
             t1 = threading.Thread(target=_read_stdout, daemon=True)
             t2 = threading.Thread(target=_read_stderr, daemon=True)
@@ -756,7 +770,7 @@ async def run_cloud_transfer(job_id: str, cmd: list):
             t2.join()
             process.wait()
 
-            return process.returncode, "".join(stdout_lines), "".join(stderr_lines)
+            return process.returncode, capture.stdout_text(), capture.stderr_text()
 
         returncode, stdout, stderr = await asyncio.to_thread(run_sync)
 
@@ -765,7 +779,7 @@ async def run_cloud_transfer(job_id: str, cmd: list):
             output += f"STDOUT:\n{stdout}\n\n"
         if stderr:
             output += f"STDERR:\n{stderr}"
-        output = redact_sensitive_text(output)
+        output = cap_output(redact_sensitive_text(output))
 
         if returncode == 0:
             cloud_transfer_jobs[job_id]["status"] = "completed"
@@ -819,17 +833,27 @@ async def get_transfer_status(job_id: str, db: Session = Depends(get_db)):
 @router.get("/transfers")
 async def list_transfers(db: Session = Depends(get_db)):
     """List recent cloud transfer jobs."""
-    persisted_jobs = db.query(UploadJob).order_by(UploadJob.created_at.desc()).all()
+    # Output is only shown in the detail view (/transfer/{job_id}); keep the list light.
+    persisted_jobs = (
+        db.query(UploadJob)
+        .options(defer(UploadJob.upload_output))
+        .filter(cloud_operation_filter())
+        .filter((UploadJob.cleared == False) | (UploadJob.cleared == None))
+        .order_by(UploadJob.created_at.desc())
+        .limit(MAX_LISTED_TRANSFERS)
+        .all()
+    )
     jobs = []
     seen_job_ids = set()
 
     for persisted_job in persisted_jobs:
-        if persisted_job.cleared or not is_cloud_operation_job(persisted_job):
+        if not is_cloud_operation_job(persisted_job):
             continue
-        transfer = cloud_operation_job_to_transfer(persisted_job)
+        transfer = cloud_operation_job_to_transfer(persisted_job, include_output=False)
         if persisted_job.job_id in cloud_transfer_jobs:
             transfer.update(cloud_transfer_jobs[persisted_job.job_id])
             transfer["job_id"] = persisted_job.job_id
+            transfer["output"] = ""
         jobs.append(transfer)
         seen_job_ids.add(persisted_job.job_id)
 
@@ -838,6 +862,7 @@ async def list_transfers(db: Session = Depends(get_db)):
             continue
         job = job_data.copy()
         job["job_id"] = job_id
+        job["output"] = ""
         jobs.append(job)
 
     return jobs
@@ -847,9 +872,10 @@ async def list_transfers(db: Session = Depends(get_db)):
 async def clear_completed_transfers(db: Session = Depends(get_db)):
     """Clear completed cloud transfer jobs from the recent transfers list."""
     cleared = 0
-    jobs = db.query(UploadJob).filter(
+    jobs = db.query(UploadJob).options(defer(UploadJob.upload_output)).filter(
         UploadJob.status.in_(["completed", "failed", "cancelled"]),
-        (UploadJob.cleared == False) | (UploadJob.cleared == None)
+        (UploadJob.cleared == False) | (UploadJob.cleared == None),
+        cloud_operation_filter(),
     ).all()
 
     for job in jobs:

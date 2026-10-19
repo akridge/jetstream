@@ -9,7 +9,7 @@ import random
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Callable
 from datetime import datetime, timezone
-from collections import defaultdict
+from collections import defaultdict, deque
 import asyncio
 import time
 import logging
@@ -41,6 +41,88 @@ def redact_sensitive_text(value: object) -> str:
         else:
             text = pattern.sub(r"\1=[REDACTED]", text)
     return text
+
+
+# Job output kept in the database is capped; the full output lives in the job's log file.
+OUTPUT_TAIL_LINES = 200
+OUTPUT_MAX_CHARS = 64 * 1024
+
+
+def cap_output(text: Optional[str], max_chars: int = OUTPUT_MAX_CHARS) -> Optional[str]:
+    """Keep only the end of a long output string so database rows stay small."""
+    if text is None or len(text) <= max_chars:
+        return text
+    return f"[... earlier output truncated; see the job log file for full output ...]\n{text[-max_chars:]}"
+
+
+class OutputCapture:
+    """Stream subprocess output to an optional log file while keeping a bounded tail in memory.
+
+    gcloud/gsutil rsync print one line per file, so holding the full output in memory
+    (and storing it in SQLite) grows without bound on large jobs.
+    """
+
+    def __init__(self, log_file=None, max_lines: int = OUTPUT_TAIL_LINES):
+        self.log_file = log_file
+        self.stdout = deque(maxlen=max_lines)
+        self.stderr = deque(maxlen=max_lines)
+        self.stdout_total = 0
+        self.stderr_total = 0
+        self._lock = threading.Lock()
+
+    def add(self, line: str, stream: str = "stdout") -> None:
+        with self._lock:
+            if stream == "stderr":
+                self.stderr.append(line)
+                self.stderr_total += 1
+            else:
+                self.stdout.append(line)
+                self.stdout_total += 1
+            if self.log_file is not None:
+                try:
+                    self.log_file.write(redact_sensitive_text(line))
+                except Exception:
+                    self.log_file = None
+
+    @staticmethod
+    def _section(lines: deque, total: int) -> str:
+        if not lines:
+            return ""
+        text = "".join(lines)
+        if total > len(lines):
+            text = f"[... {total - len(lines)} earlier line(s) omitted; see log file ...]\n{text}"
+        return text
+
+    def stdout_text(self) -> str:
+        return self._section(self.stdout, self.stdout_total)
+
+    def stderr_text(self) -> str:
+        return self._section(self.stderr, self.stderr_total)
+
+    def summary(self) -> str:
+        """Redacted, size-capped STDOUT/STDERR summary suitable for the database."""
+        stdout = self.stdout_text()
+        stderr = self.stderr_text()
+        return cap_output(redact_sensitive_text(
+            f"STDOUT:\n{stdout if stdout else 'No output'}\n\nSTDERR:\n{stderr if stderr else 'No errors'}"
+        ))
+
+
+_ERROR_LINE_RE = re.compile(r"(?i)error|exception|denied|failed")
+
+
+class ConsoleEcho:
+    """Rate-limited console echo: error lines always print, other lines at most once per interval."""
+
+    def __init__(self, interval_seconds: float = 1.0):
+        self.interval = interval_seconds
+        self._last = 0.0
+
+    def __call__(self, line: str) -> None:
+        now = time.time()
+        if _ERROR_LINE_RE.search(line) or now - self._last >= self.interval:
+            self._last = now
+            print(redact_sensitive_text(line.rstrip()))
 
 # Random word lists for friendly names
 ADJECTIVES = [
@@ -798,8 +880,13 @@ def _parse_progress(line: str, callback: Callable) -> None:
     if mf:
         callback(files_uploaded=int(mf.group(1)))
 
-def make_progress_callback(job_id: str, db) -> Callable:
-    """Return a throttled progress callback that updates the job in the database."""
+def make_progress_callback(job_id: str, db=None) -> Callable:
+    """Return a throttled progress callback that updates the job in the database.
+
+    Runs on the subprocess reader thread, so each write uses its own short-lived
+    session instead of sharing the job runner's session across threads. ``db`` is
+    accepted for backward compatibility and only used if no session factory exists.
+    """
     last_write = [0.0]
 
     def callback(bytes_uploaded=None, total_bytes=None, files_uploaded=None):
@@ -807,22 +894,50 @@ def make_progress_callback(job_id: str, db) -> Callable:
         if now - last_write[0] < 2.0:
             return
         last_write[0] = now
+        from . import database
+        session = database.SessionLocal() if database.SessionLocal is not None else db
+        if session is None:
+            return
         try:
-            from .database import UploadJob
-            j = db.query(UploadJob).filter(UploadJob.job_id == job_id).first()
-            if not j:
-                return
+            values = {}
             if bytes_uploaded is not None:
-                j.bytes_uploaded = bytes_uploaded
+                values[UploadJob.bytes_uploaded] = bytes_uploaded
             if total_bytes and total_bytes > 0:
-                j.total_size_bytes = total_bytes
+                values[UploadJob.total_size_bytes] = total_bytes
             if files_uploaded is not None:
-                j.files_uploaded = files_uploaded
-            db.commit()
+                values[UploadJob.files_uploaded] = files_uploaded
+            if values:
+                session.query(UploadJob).filter(UploadJob.job_id == job_id).update(
+                    values, synchronize_session=False
+                )
+                session.commit()
         except Exception:
-            pass
+            try:
+                session.rollback()
+            except Exception:
+                pass
+        finally:
+            if session is not db:
+                session.close()
 
     return callback
+
+
+def claim_job_for_run(db, job_id: str) -> bool:
+    """Atomically move a pending/queued job to running.
+
+    Both the upload router and the scheduler can try to start the same queued
+    job; only the caller whose UPDATE matches the row gets to run it.
+    """
+    claimed = db.query(UploadJob).filter(
+        UploadJob.job_id == job_id,
+        UploadJob.status.in_(["pending", "queued"]),
+    ).update(
+        {UploadJob.status: "running", UploadJob.started_at: datetime.now(timezone.utc)},
+        synchronize_session=False,
+    )
+    db.commit()
+    return claimed == 1
 
 
 class UploadService:
@@ -950,15 +1065,55 @@ class UploadService:
         display_shell_cmd = redact_sensitive_text(shell_cmd)
         print(f"🚀 Executing: {display_shell_cmd}")
         
+        def write_log_header(f, title: str):
+            f.write("="*80 + "\n")
+            f.write(f"{title}\n")
+            f.write("="*80 + "\n\n")
+            friendly_name = os.path.basename(log_path).replace('.log', '')
+            f.write(f"Job Name:        {friendly_name}\n")
+            f.write(f"Job ID:          {job_id}\n")
+            f.write(f"Timestamp:       {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"\n")
+            f.write(f"Source Path:     {source_path}\n")
+            f.write(f"Destination:     {gcs_path}\n")
+            f.write(f"Dry Run:         {dry_run}\n")
+            f.write(f"Recursive:       {recursive}\n")
+            f.write(f"\n")
+            f.write(f"Command:         {display_shell_cmd}\n")
+
+        def open_log():
+            """Open the job log for streaming; returns None if it cannot be written."""
+            if not log_path:
+                return None
+            try:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                f = open(log_path, 'w', encoding='utf-8')
+                write_log_header(f, "JETSTREAM UPLOAD JOB LOG")
+                f.write("\n" + "="*80 + "\n")
+                f.write("COMMAND OUTPUT\n")
+                f.write("="*80 + "\n\n")
+                f.flush()
+                return f
+            except Exception as log_error:
+                print(f"⚠ Warning: Could not open log file: {log_error}")
+                return None
+
+        log_file = None
         try:
             # Windows doesn't support asyncio subprocess properly, so we use thread pool
             import subprocess
-            
+
+            log_file = open_log()
+            capture = OutputCapture(log_file=log_file)
+            echo = ConsoleEcho()
+
             def run_subprocess():
-                """Run subprocess synchronously in thread, capturing output in real-time.
+                """Run subprocess synchronously in thread, streaming output in real-time.
 
                 Uses two threads to read stdout and stderr concurrently to prevent
                 OS pipe buffer deadlocks when both streams produce large output.
+                Output goes to the log file as it arrives; only a bounded tail is
+                kept in memory.
                 """
                 process = subprocess.Popen(
                     shell_cmd,
@@ -971,17 +1126,14 @@ class UploadService:
                 )
                 self.active_uploads[job_id] = process
 
-                stdout_lines = []
-                stderr_lines = []
-
                 def _read_stdout():
                     for line in process.stdout:
-                        stdout_lines.append(line)
+                        capture.add(line, "stdout")
 
                 def _read_stderr():
                     for line in process.stderr:
-                        stderr_lines.append(line)
-                        print(redact_sensitive_text(line.rstrip()))
+                        capture.add(line, "stderr")
+                        echo(line)
                         if progress_callback:
                             _parse_progress(line, progress_callback)
 
@@ -993,91 +1145,55 @@ class UploadService:
                 t2.join()
                 process.wait()
 
-                return process.returncode, ''.join(stdout_lines), ''.join(stderr_lines)
-            
+                return process.returncode
+
             # Run in thread pool to avoid blocking
-            returncode, stdout, stderr = await asyncio.to_thread(run_subprocess)
-            
+            returncode = await asyncio.to_thread(run_subprocess)
+
             # Remove from active uploads
             if job_id in self.active_uploads:
                 del self.active_uploads[job_id]
-            
-            # Prepare output
-            output = redact_sensitive_text(
-                f"STDOUT:\n{stdout if stdout else 'No output'}\n\nSTDERR:\n{stderr if stderr else 'No errors'}"
-            )
-            
-            # Save log if path provided (ALWAYS save, even on failure)
-            if log_path:
+
+            # Bounded output summary for database storage
+            output = capture.summary()
+
+            if log_file is not None:
                 try:
-                    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-                    with open(log_path, 'w', encoding='utf-8') as f:
-                        # Enhanced header with full job context
-                        f.write("="*80 + "\n")
-                        f.write("JETSTREAM UPLOAD JOB LOG\n")
-                        f.write("="*80 + "\n\n")
-                        
-                        # Get friendly name from filename
-                        log_filename = os.path.basename(log_path)
-                        friendly_name = log_filename.replace('.log', '')
-                        
-                        f.write(f"Job Name:        {friendly_name}\n")
-                        f.write(f"Job ID:          {job_id}\n")
-                        f.write(f"Timestamp:       {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        f.write(f"\n")
-                        f.write(f"Source Path:     {source_path}\n")
-                        f.write(f"Destination:     {gcs_path}\n")
-                        f.write(f"Dry Run:         {dry_run}\n")
-                        f.write(f"Recursive:       {recursive}\n")
-                        f.write(f"\n")
-                        f.write(f"Command:         {display_shell_cmd}\n")
-                        f.write(f"Return Code:     {returncode}\n")
-                        f.write(f"Status:          {'SUCCESS' if returncode == 0 else 'FAILED'}\n")
-                        f.write("\n" + "="*80 + "\n")
-                        f.write("COMMAND OUTPUT\n")
-                        f.write("="*80 + "\n\n")
-                        f.write(output)
+                    log_file.write("\n" + "="*80 + "\n")
+                    log_file.write(f"Return Code:     {returncode}\n")
+                    log_file.write(f"Status:          {'SUCCESS' if returncode == 0 else 'FAILED'}\n")
+                    log_file.close()
+                    log_file = None
                     print(f"✓ Log saved to: {log_path}")
                 except Exception as log_error:
                     print(f"⚠ Warning: Could not save log file: {log_error}")
-            
+
             # Check for errors
             if returncode != 0:
-                error_msg = redact_sensitive_text(stderr if stderr else "Unknown error")
-                print(f"❌ Upload failed: {error_msg}")
+                error_msg = redact_sensitive_text(capture.stderr_text() or "Unknown error")
+                print(f"❌ Upload failed: {cap_output(error_msg, 2000)}")
                 return False, output
-            
+
             print(f"✓ Upload completed successfully")
             # Return success and output for database storage
             return True, output
-            
+
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
             print(f"❌ Upload exception: {str(e)}")
             print(f"Full traceback:\n{error_details}")
-            
-            # Save error to log file
-            output = redact_sensitive_text(f"Exception: {str(e)}\n\n{error_details}")
+
+            output = cap_output(redact_sensitive_text(f"Exception: {str(e)}\n\n{error_details}"))
             if log_path:
                 try:
+                    if log_file is not None:
+                        log_file.close()
+                        log_file = None
                     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-                    with open(log_path, 'w', encoding='utf-8') as f:
-                        # Enhanced header for exception logs
-                        f.write("="*80 + "\n")
-                        f.write("JETSTREAM UPLOAD JOB LOG - EXCEPTION\n")
-                        f.write("="*80 + "\n\n")
-                        
-                        log_filename = os.path.basename(log_path)
-                        friendly_name = log_filename.replace('.log', '')
-                        
-                        f.write(f"Job Name:        {friendly_name}\n")
-                        f.write(f"Job ID:          {job_id}\n")
-                        f.write(f"Timestamp:       {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        f.write(f"\n")
-                        f.write(f"Source Path:     {source_path}\n")
-                        f.write(f"Destination:     {gcs_path}\n")
-                        f.write(f"Command:         {redact_sensitive_text(shell_cmd)}\n")
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write("\n")
+                        write_log_header(f, "JETSTREAM UPLOAD JOB LOG - EXCEPTION")
                         f.write(f"Status:          EXCEPTION\n")
                         f.write("\n" + "="*80 + "\n")
                         f.write("ERROR DETAILS\n")
@@ -1086,11 +1202,17 @@ class UploadService:
                     print(f"✓ Error log saved to: {log_path}")
                 except Exception as log_error:
                     print(f"⚠ Warning: Could not save error log: {log_error}")
-            
+
             if job_id in self.active_uploads:
                 del self.active_uploads[job_id]
             return False, output
-    
+        finally:
+            if log_file is not None:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
+
     def cancel_upload(self, job_id: str) -> bool:
         """Cancel an active upload."""
         if job_id in self.active_uploads:

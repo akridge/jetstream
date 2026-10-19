@@ -1,7 +1,7 @@
 """Statistics and analytics endpoints."""
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 from sqlalchemy import func
 from datetime import datetime, timezone, timedelta
 
@@ -57,12 +57,12 @@ async def get_stats(db: Session = Depends(get_db)):
 @router.get("/recent")
 async def get_recent_activity(limit: int = 10, db: Session = Depends(get_db)):
     """Get recent upload activity."""
-    recent_jobs = db.query(UploadJob).order_by(
+    recent_jobs = db.query(UploadJob).options(defer(UploadJob.upload_output)).order_by(
         UploadJob.created_at.desc()
     ).limit(limit).all()
     
     return {
-        "recent_jobs": [job.to_dict() for job in recent_jobs]
+        "recent_jobs": [job.to_summary_dict() for job in recent_jobs]
     }
 
 @router.get("/summary")

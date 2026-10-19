@@ -1,8 +1,35 @@
 """Configuration settings for JetStream API."""
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
+from pathlib import Path
 from typing import Optional
 import os
+import sys
+
+LEGACY_DATABASE_FILENAME = "jetstream.db"
+
+
+def user_data_dir() -> Path:
+    """Per-user data directory, independent of the folder JetStream is started from."""
+    override = os.environ.get("JETSTREAM_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(Path.home(), "AppData", "Local")
+        return Path(base) / "JetStream"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "JetStream"
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(Path.home(), ".local", "share")
+    return Path(base) / "jetstream"
+
+
+def default_database_path() -> Path:
+    return user_data_dir() / LEGACY_DATABASE_FILENAME
+
+
+def default_database_url() -> str:
+    return f"sqlite:///{default_database_path().as_posix()}"
 
 class Settings(BaseSettings):
     """Application settings."""
@@ -16,8 +43,8 @@ class Settings(BaseSettings):
     # Set this to the URL users use to reach JetStream (e.g. http://myserver:8000).
     JETSTREAM_BASE_URL: str = "http://localhost:8000"
     
-    # Database
-    DATABASE_URL: str = "sqlite:///./jetstream.db"
+    # Database (defaults to the per-user data dir so history doesn't depend on the launch folder)
+    DATABASE_URL: str = Field(default_factory=default_database_url)
     
     # Google Cloud Storage
     GCS_PROJECT_ID: Optional[str] = None

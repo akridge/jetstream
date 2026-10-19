@@ -1,7 +1,8 @@
 """Upload endpoints for creating and managing upload jobs."""
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy.orm import Session
+from fastapi.responses import FileResponse, PlainTextResponse
+from sqlalchemy.orm import Session, defer
 from typing import List
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -13,23 +14,20 @@ from ..models import (
 )
 from ..services import (
     FileFilter, FolderAnalyzer, upload_service, queue_manager, generate_friendly_job_name,
-    make_progress_callback
+    make_progress_callback, claim_job_for_run
 )
 
 router = APIRouter()
 
 async def process_upload_job(job_id: str, db_path: str):
     """Background task to process upload job."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from ..config import settings
-    
-    # Create new session for background task
-    engine = create_engine(settings.DATABASE_URL, 
-                          connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {})
-    SessionLocal = sessionmaker(bind=engine)
-    db = SessionLocal()
-    
+    from .. import database
+
+    # Reuse the app's session factory; creating an engine per job leaked
+    # connection pools and skipped the SQLite connection settings.
+    db = database.SessionLocal()
+    job = None
+
     try:
         job = db.query(UploadJob).filter(UploadJob.job_id == job_id).first()
         if not job:
@@ -46,11 +44,11 @@ async def process_upload_job(job_id: str, db_path: str):
             db.commit()
             return
         
-        # Start job
-        job.status = "running"
-        job.started_at = datetime.now(timezone.utc)
+        # Start job (atomic claim so the scheduler can't start it too)
+        if not claim_job_for_run(db, job_id):
+            return
         queue_manager.start_job(job_id)
-        db.commit()
+        db.refresh(job)
         
         # Perform upload
         success, output = await upload_service.upload_to_gcs(
@@ -66,8 +64,11 @@ async def process_upload_job(job_id: str, db_path: str):
             exclude_patterns=job.filters.get('exclude_patterns') if job.filters else None,
             exclude_folders=job.filters.get('exclude_folders') if job.filters else None,
             no_clobber=getattr(job, 'no_clobber', False) or False,
-            progress_callback=make_progress_callback(job_id, db),
+            progress_callback=make_progress_callback(job_id),
         )
+
+        # Pick up progress written by the callback's own sessions
+        db.refresh(job)
 
         # Update job status
         if success:
@@ -299,6 +300,22 @@ async def get_upload_status(job_id: str, db: Session = Depends(get_db)):
     
     return JobStatusResponse(**job.to_dict())
 
+@router.get("/{job_id}/log")
+async def download_upload_log(job_id: str, db: Session = Depends(get_db)):
+    """Download the full job log file, falling back to the stored output tail."""
+    job = db.query(UploadJob).filter(UploadJob.job_id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    filename = f"{job.friendly_name or job_id}.log"
+    if job.log_path and os.path.isfile(job.log_path):
+        return FileResponse(job.log_path, media_type="text/plain", filename=filename)
+    if job.upload_output:
+        return PlainTextResponse(
+            job.upload_output,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    raise HTTPException(status_code=404, detail="No output available for this job")
+
 @router.get("/", response_model=List[JobStatusResponse])
 async def list_uploads(
     status: str = None,
@@ -316,9 +333,15 @@ async def list_uploads(
     if not include_cleared:
         query = query.filter((UploadJob.cleared == False) | (UploadJob.cleared == None))
     
-    jobs = query.order_by(UploadJob.created_at.desc()).limit(limit).all()
+    # Command output is only needed in the job detail view; skip loading it here.
+    jobs = (
+        query.options(defer(UploadJob.upload_output))
+        .order_by(UploadJob.created_at.desc())
+        .limit(limit)
+        .all()
+    )
     
-    return [JobStatusResponse(**job.to_dict()) for job in jobs]
+    return [JobStatusResponse(**job.to_summary_dict()) for job in jobs]
 
 @router.post("/clear-completed")
 async def clear_completed_jobs(db: Session = Depends(get_db)):

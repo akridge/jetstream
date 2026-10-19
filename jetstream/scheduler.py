@@ -118,26 +118,25 @@ class UploadScheduler:
                 if not next_job_id:
                     # Check database for any queued jobs not in memory queue
                     queued_job = db.query(UploadJob).filter(
-                        UploadJob.status == "queued"
-                    ).first()
+                        UploadJob.status == "queued",
+                        UploadJob.job_id.notin_(list(queue_manager.running_jobs)),
+                    ).order_by(UploadJob.created_at).first()
                     if queued_job:
                         next_job_id = queued_job.job_id
                     else:
                         break
                 
-                # Start this job
+                # Reserve the slot now so this loop can't pick the same job again
                 logger.info(f"Starting queued job: {next_job_id}")
+                queue_manager.start_job(next_job_id)
                 asyncio.create_task(self._run_scheduled_upload(next_job_id, upload_service, queue_manager))
-                
-                # Small delay to let the job register as running
-                await asyncio.sleep(0.5)
         finally:
             db.close()
             
     async def _run_scheduled_upload(self, job_id: str, upload_service, queue_manager):
         """Run a scheduled upload job."""
         from . import database
-        from .services import make_progress_callback
+        from .services import make_progress_callback, claim_job_for_run
         from datetime import timedelta
 
         if database.SessionLocal is None:
@@ -145,21 +144,23 @@ class UploadScheduler:
             return
 
         db: Session = database.SessionLocal()
+        job = None
+        owned_elsewhere = False
         try:
             job = db.query(UploadJob).filter(UploadJob.job_id == job_id).first()
             if not job:
                 logger.error(f"Job {job_id} not found")
                 return
 
-            # Fix #11: job may have been cancelled before scheduler picked it up
-            if job.status == "cancelled":
+            # Atomic claim: skips jobs that were cancelled (Fix #11) or that the
+            # upload router already started.
+            if not claim_job_for_run(db, job_id):
+                db.refresh(job)
+                # Another runner owns it; leave its running-slot reservation alone.
+                owned_elsewhere = job.status == "running"
                 return
-
-            # Update status to running
-            job.status = "running"
-            job.started_at = datetime.now(timezone.utc)
             queue_manager.start_job(job_id)
-            db.commit()
+            db.refresh(job)
 
             # Perform upload
             success, output = await upload_service.upload_to_gcs(
@@ -175,8 +176,11 @@ class UploadScheduler:
                 exclude_patterns=job.filters.get('exclude_patterns') if job.filters else None,
                 exclude_folders=job.filters.get('exclude_folders') if job.filters else None,
                 no_clobber=getattr(job, 'no_clobber', False) or False,
-                progress_callback=make_progress_callback(job_id, db),
+                progress_callback=make_progress_callback(job_id),
             )
+
+            # Pick up progress written by the callback's own sessions
+            db.refresh(job)
 
             # Update job status
             if success:
@@ -210,12 +214,15 @@ class UploadScheduler:
             
         except Exception as e:
             logger.error(f"Error running scheduled job {job_id}: {str(e)}")
+            if job is None:
+                return
             job.status = "failed"
             job.error_message = str(e)
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
         finally:
-            queue_manager.complete_job(job_id)
+            if not owned_elsewhere:
+                queue_manager.complete_job(job_id)
             db.close()
             
             # Trigger processing of next queued job

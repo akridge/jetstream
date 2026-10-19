@@ -1,6 +1,6 @@
 """Database models and initialization."""
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, JSON
+from sqlalchemy import create_engine, event, Column, Integer, String, Float, DateTime, Boolean, Text, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime, timezone
@@ -59,8 +59,12 @@ class UploadJob(Base):
     max_auto_retries = Column(Integer, default=3)
     next_retry_at = Column(DateTime, nullable=True)
     
-    def to_dict(self):
-        """Convert to dictionary."""
+    def to_dict(self, include_output: bool = True):
+        """Convert to dictionary.
+
+        List endpoints should pass ``include_output=False`` (or use ``to_summary_dict``)
+        so the command output is not loaded and serialized on every poll.
+        """
         filters = self.filters or {}
 
         def calculate_progress_percent():
@@ -111,7 +115,7 @@ class UploadJob(Base):
             "upload_tool": self.upload_tool or "gcloud",
             "error_message": self.error_message,
             "log_path": self.log_path,
-            "upload_output": self.upload_output,
+            "upload_output": self.upload_output if include_output else None,
             "filters": self.filters,
             "job_type": filters.get("job_type", "upload"),
             "transfer_direction": filters.get("transfer_direction", "local_to_cloud"),
@@ -125,6 +129,10 @@ class UploadJob(Base):
             "max_auto_retries": self.max_auto_retries or 3,
             "next_retry_at": format_dt(self.next_retry_at),
         }
+
+    def to_summary_dict(self):
+        """Lightweight dictionary for list views (no command output)."""
+        return self.to_dict(include_output=False)
     
     def _calculate_duration(self):
         """Calculate job duration in seconds."""
@@ -545,6 +553,18 @@ def _run_migrations():
             if cleared:
                 print(f"✓ Cleared {cleared} legacy custom command value(s) from database")
 
+        # Performance: indexes for the columns list/poll endpoints filter and sort on.
+        with engine.connect() as conn:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_upload_jobs_status ON upload_jobs (status)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_upload_jobs_created_at ON upload_jobs (created_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_upload_jobs_completed_at ON upload_jobs (completed_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_upload_jobs_cleared ON upload_jobs (cleared)"))
+            conn.commit()
+
+        # Performance: older versions stored the full rsync output (one line per
+        # file) in upload_output. Keep only the tail; full output is in log files.
+        _trim_large_job_output()
+
         if not migrations_run:
             print("✓ Database schema is up to date")
 
@@ -569,15 +589,83 @@ def _run_migrations():
     except Exception as e:
         print(f"⚠ Drive table migration warning: {e}")
 
+def _trim_large_job_output():
+    """Shrink oversized upload_output values left by older versions, then VACUUM once."""
+    from sqlalchemy import text
+    from .services import OUTPUT_MAX_CHARS
+
+    if engine.dialect.name != "sqlite":
+        return
+    note = "[... earlier output truncated; see the job log file for full output ...]\n"
+    with engine.connect() as conn:
+        result = conn.execute(
+            text(
+                "UPDATE upload_jobs SET upload_output = :note || substr(upload_output, -:keep) "
+                "WHERE length(upload_output) > :limit"
+            ),
+            {"note": note, "keep": OUTPUT_MAX_CHARS, "limit": OUTPUT_MAX_CHARS + len(note)},
+        )
+        conn.commit()
+    trimmed = getattr(result, "rowcount", 0) or 0
+    if trimmed:
+        print(f"⚙ Trimmed stored output for {trimmed} job(s); compacting database...")
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("VACUUM"))
+        print("✓ Database compacted")
+
+
+def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+    """WAL lets the UI read while uploads write progress; busy_timeout avoids 'database is locked'."""
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cursor.close()
+
+
+def create_db_engine(database_url: str = None):
+    """Create an engine with JetStream's connection settings."""
+    database_url = database_url or settings.DATABASE_URL
+    is_sqlite = database_url.startswith("sqlite")
+    new_engine = create_engine(
+        database_url,
+        connect_args={"check_same_thread": False} if is_sqlite else {}
+    )
+    if is_sqlite and ":memory:" not in database_url:
+        event.listen(new_engine, "connect", _set_sqlite_pragmas)
+    return new_engine
+
+
+def _prepare_default_database_location():
+    """Create the per-user data dir and adopt a legacy ./jetstream.db once.
+
+    Older versions stored the database in the current working directory, so the
+    job history depended on which folder JetStream was started from.
+    """
+    import os
+    import shutil
+    from .config import default_database_url, default_database_path, LEGACY_DATABASE_FILENAME
+
+    if settings.DATABASE_URL != default_database_url():
+        return
+    target = default_database_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    legacy = os.path.abspath(LEGACY_DATABASE_FILENAME)
+    if not target.exists() and os.path.isfile(legacy) and os.path.abspath(target) != legacy:
+        shutil.copy2(legacy, target)
+        print(f"✓ Copied existing database from {legacy} to {target}")
+
+
 def init_db():
     """Initialize database."""
     global engine, SessionLocal
-    
+
+    _prepare_default_database_location()
+
     # Create engine
-    engine = create_engine(
-        settings.DATABASE_URL,
-        connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
-    )
+    engine = create_db_engine()
     
     # Create tables
     Base.metadata.create_all(bind=engine)

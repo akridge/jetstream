@@ -138,7 +138,9 @@ class DashboardScreen(Screen):
 
     def on_job_table_widget_job_selected(self, message: JobTableWidget.JobSelected) -> None:
         self._selected_job = message.job_vm
-        self.query_one(JobDetailWidget).show_job(message.job_vm)
+        # List rows omit command output; load the full job for the detail panel.
+        detail = self.controller.get_job(message.job_vm.job_id) or message.job_vm
+        self.query_one(JobDetailWidget).show_job(detail)
 
     # ------------------------------------------------------------------
     # Actions

@@ -332,8 +332,10 @@ Shortcuts launch JetStream directly using the current Python environment and ope
 - Restart the application if needed
 
 **Database errors:**
+- The database lives in a per-user folder: `%LOCALAPPDATA%\JetStream\jetstream.db` on Windows, `~/Library/Application Support/JetStream/jetstream.db` on macOS, `~/.local/share/jetstream/jetstream.db` on Linux. The startup log prints the exact path.
+- Set `JETSTREAM_DATA_DIR` (folder) or `DATABASE_URL` (full URL) to use a different location
 - Delete `jetstream.db` to reset (loses history)
-- Check file permissions in application directory
+- Check file permissions on the database folder
 
 **API not responding:**
 - Check if port 8000 is already in use

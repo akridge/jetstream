@@ -141,7 +141,7 @@ def _fmt_ts(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def _job_to_vm(job) -> JobVM:
+def _job_to_vm(job, include_output: bool = True) -> JobVM:
     """Convert an SQLAlchemy UploadJob row to a JobVM."""
     dest = f"gs://{job.destination_bucket}"
     if job.destination_path:
@@ -178,7 +178,7 @@ def _job_to_vm(job) -> JobVM:
         completed_at=job.completed_at,
         scheduled_for=job.scheduled_for,
         duration_seconds=dur,
-        upload_output=job.upload_output,
+        upload_output=job.upload_output if include_output else None,
         log_path=job.log_path,
     )
 
@@ -239,14 +239,15 @@ class JetStreamController:
         status_filter: Optional[str] = None,
         limit: int = 200,
     ) -> List[JobVM]:
+        from sqlalchemy.orm import defer
         from ..database import SessionLocal, UploadJob
         db = SessionLocal()
         try:
-            q = db.query(UploadJob)
+            q = db.query(UploadJob).options(defer(UploadJob.upload_output))
             if status_filter and status_filter != "all":
                 q = q.filter(UploadJob.status == status_filter)
             jobs = q.order_by(UploadJob.created_at.desc()).limit(limit).all()
-            return [_job_to_vm(j) for j in jobs]
+            return [_job_to_vm(j, include_output=False) for j in jobs]
         finally:
             db.close()
 

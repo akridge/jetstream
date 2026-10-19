@@ -1,7 +1,7 @@
 """Queue management endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 import asyncio
 
 from ..database import get_db, UploadJob
@@ -17,24 +17,24 @@ async def get_queue_status():
 @router.get("/running")
 async def get_running_jobs(db: Session = Depends(get_db)):
     """Get all currently running jobs."""
-    running = db.query(UploadJob).filter(
+    running = db.query(UploadJob).options(defer(UploadJob.upload_output)).filter(
         UploadJob.status == "running"
     ).all()
     
     return {
-        "running_jobs": [job.to_dict() for job in running],
+        "running_jobs": [job.to_summary_dict() for job in running],
         "count": len(running)
     }
 
 @router.get("/queued")
 async def get_queued_jobs(db: Session = Depends(get_db)):
     """Get all queued jobs."""
-    queued = db.query(UploadJob).filter(
+    queued = db.query(UploadJob).options(defer(UploadJob.upload_output)).filter(
         UploadJob.status == "queued"
     ).order_by(UploadJob.created_at).all()
     
     return {
-        "queued_jobs": [job.to_dict() for job in queued],
+        "queued_jobs": [job.to_summary_dict() for job in queued],
         "count": len(queued)
     }
 
@@ -58,11 +58,11 @@ async def resume_queue():
 @router.get("/history")
 async def get_queue_history(limit: int = 50, db: Session = Depends(get_db)):
     """Get queue processing history."""
-    completed = db.query(UploadJob).filter(
+    completed = db.query(UploadJob).options(defer(UploadJob.upload_output)).filter(
         UploadJob.status.in_(["completed", "failed", "cancelled"])
     ).order_by(UploadJob.completed_at.desc()).limit(limit).all()
     
     return {
-        "history": [job.to_dict() for job in completed],
+        "history": [job.to_summary_dict() for job in completed],
         "count": len(completed)
     }

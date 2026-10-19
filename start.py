@@ -107,17 +107,19 @@ def main():
         logger.info(f"[OK] Database initialized")
         
         # Check if file was created
-        if os.path.exists('jetstream.db'):
-            size = os.path.getsize('jetstream.db')
-            logger.info(f"[OK] Database file exists: jetstream.db ({size} bytes)")
+        from jetstream.database import engine
+        db_file = engine.url.database if engine is not None else None
+        if db_file and os.path.exists(db_file):
+            size = os.path.getsize(db_file)
+            logger.info(f"[OK] Database file exists: {db_file} ({size} bytes)")
         else:
-            logger.warning(f"[WARN] Database file not found at: {os.path.abspath('jetstream.db')}")
+            logger.warning(f"[WARN] Database file not found at: {db_file}")
             
     except Exception as e:
         logger.error(f"[FAIL] Database initialization failed: {e}")
         traceback.print_exc()
         logger.error("\nDatabase Error Details:")
-        logger.error(f"  - Attempted location: {os.path.abspath('jetstream.db')}")
+        logger.error(f"  - Attempted location: {settings.DATABASE_URL}")
         logger.error(f"  - Current directory: {os.getcwd()}")
         logger.error(f"  - Write permissions: {os.access('.', os.W_OK)}")
         return 1

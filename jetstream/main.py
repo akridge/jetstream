@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI):
         logger.info(">> Starting NOAA JetStream...")
         logger.info(f"   Platform: {os.name} | Python: {os.sys.version.split()[0]}")
         logger.info(f"   Working Directory: {os.getcwd()}")
-        logger.info(f"   Database Path: {os.path.abspath('jetstream.db')}")
+        logger.info(f"   Database: {settings.DATABASE_URL}")
         
         logger.info("=" * 70)
         
