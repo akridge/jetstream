@@ -80,6 +80,12 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - **Upload by dropping** files or folders onto the window while a cloud folder is open (or right-click → **Upload a folder here…**). Folders upload as jobs you can follow in Activity; nothing in the cloud is overwritten.
   - **More actions:** total a folder's size, copy `gs://` paths (Ctrl+C), copy a public link, open in the Cloud Console, **Sync to…** another location (gcloud storage rsync).
   - **Synced folders:** inside a synced folder's cloud copy, a banner shows which folder on this computer it comes from.
+- **Verification receipts:** after each sync (on by default; per folder), JetStream checks every file against the cloud by checksum and saves a receipt for data management plans and archiving:
+  - a CSV (summary at the top, one row per file: path, status, size, crc32c, MD5, cloud version, time) and the same as JSON
+  - who checked it, when, and whether the folder is **complete** (every file verified) or which files are missing or different
+  - kept in the JetStream data folder (`receipts/<folder>/`; `JetStreamData` in portable mode), optionally with a copy next to the data in `_jetstream/receipts/`
+  - the folder card shows "Verified 1,234 files · Receipt"; the Compare screen lists past receipts and makes new ones
+  - only files JetStream hasn't read before are read, so repeat receipts are quick
 - **Compare with cloud:** for any synced folder, see exactly what is:
   - **in sync:** on both, same size, and confirmed by checksum when the JetStream engine uploaded it
   - **only on this computer:** uploads on the next sync

@@ -257,3 +257,17 @@ export async function classifyPaths(paths) {
   if (!isDesktop) return paths.map((p) => [p, true]);
   return invoke('classify_paths', { paths });
 }
+
+/** Check a synced folder file by file and save a receipt; resolves to its summary. */
+export function makeReceipt(opId, { folderName, path, destination, excludePatterns, excludeFolders, recursive, account, cloudCopy }, onProgress) {
+  if (!isDesktop) return Promise.reject(desktopOnly());
+  return withOpProgress(opId, onProgress, () =>
+    invoke('make_receipt', { opId, folderName, path, destination, excludePatterns, excludeFolders, recursive, account, cloudCopy }),
+  );
+}
+
+/** Saved receipts for a synced folder, newest first. */
+export async function listReceipts(folderName) {
+  if (!isDesktop) return [];
+  return invoke('list_receipts', { folderName });
+}

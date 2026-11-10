@@ -16,9 +16,10 @@ class CloudOps {
   /**
    * Start an operation. start(onProgress) must call the platform function that runs it.
    * verb is the past tense for the result ("Moved", "Deleted", ...). action: an extra toast
-   * button for the result (e.g. "Show folder") when there's no Undo.
+   * button for the result (e.g. "Show folder") when there's no Undo. report(result): show
+   * the outcome yourself instead of the standard toast.
    */
-  async start(opId, label, total, verb, start, { action = null } = {}) {
+  async start(opId, label, total, verb, start, { action = null, report = null } = {}) {
     const op = { id: opId, label, total, done: 0, skipped: 0, failed: 0, status: 'running', shown: false };
     this.list = [...this.list, op];
     const entry = () => this.list.find((o) => o.id === opId);
@@ -26,12 +27,13 @@ class CloudOps {
     try {
       const result = await start(({ total: known, ...tick }) => Object.assign(entry() || {}, tick, known ? { total: known } : {}));
       Object.assign(entry() || {}, {
-        done: result.done,
+        done: result.done ?? 0,
         skipped: result.skipped,
         failed: result.failed,
         status: result.cancelled ? 'cancelled' : result.failed ? 'failed' : 'done',
       });
-      this.#report(opId, label, verb, result, action);
+      if (report) report(result);
+      else this.#report(opId, label, verb, result, action);
       return result;
     } catch (err) {
       Object.assign(entry() || {}, { status: 'failed' });

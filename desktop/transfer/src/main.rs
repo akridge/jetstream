@@ -142,6 +142,22 @@ enum Command {
         #[arg(long, default_value_t = 0.0)]
         max_mbps: f64,
     },
+    /// Check a folder against its cloud copy file by file and write a receipt (CSV + JSON).
+    Receipt {
+        folder: PathBuf,
+        destination: String,
+        /// Folder to write the receipt files to.
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long = "exclude")]
+        excludes: Vec<String>,
+        #[arg(long = "exclude-folder")]
+        exclude_folders: Vec<String>,
+        #[arg(long)]
+        no_recursive: bool,
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
     /// Bucket settings (soft delete, hierarchical namespace, Autoclass) and your permissions.
     Bucket { bucket: String },
     /// Copy objects or folders (gs://b/folder/ ends with "/") into a folder, server-side.
@@ -314,6 +330,23 @@ async fn run() -> Result<i32> {
                 localops::upload_files(&cloud_client()?, &files, &bucket, &prefix, &Throttle::from_mbps(max_mbps), &OpProgress::default()).await?;
             print_json(&result)?;
             return Ok(if result.failed > 0 { 2 } else { 0 });
+        }
+        Command::Receipt { folder, destination, out, excludes, exclude_folders, no_recursive, manifest } => {
+            let regexes = jetstream_transfer::compare::exclude_regexes(&excludes, &exclude_folders)?;
+            let path = manifest.unwrap_or_else(|| default_data_dir().join("transfer-manifest.db"));
+            let manifest = Manifest::open(&path).ok();
+            let http = GcsClient::http_client();
+            let auth = Arc::new(TokenProvider::from_environment(http.clone())?);
+            let client = GcsClient::new(http, auth.clone());
+            let receipt = jetstream_transfer::receipt::make_receipt(
+                &client, &folder, &destination, &regexes, !no_recursive, manifest.as_ref(), auth.describe(), &OpProgress::default(),
+            )
+            .await?;
+            let (csv, json) = jetstream_transfer::receipt::write_receipt(&receipt, &out)?;
+            print_json(&serde_json::json!({
+                "result": receipt.result, "totals": receipt.totals, "csv": csv, "json": json,
+            }))?;
+            return Ok(if receipt.result == "complete" { 0 } else { 2 });
         }
         Command::Bucket { bucket } => {
             let bucket = bucket.trim_start_matches("gs://").trim_end_matches('/');

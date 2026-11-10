@@ -9,6 +9,8 @@
   import Clock from '@lucide/svelte/icons/clock';
   import Pause from '@lucide/svelte/icons/pause';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
+  import ShieldCheck from '@lucide/svelte/icons/shield-check';
+  import ShieldAlert from '@lucide/svelte/icons/shield-alert';
   import StatusIcon from './StatusIcon.svelte';
   import ProgressBar from './ProgressBar.svelte';
   import { app, ACTIVE, TERMINAL, collapseRuns } from '../lib/state.svelte.js';
@@ -66,6 +68,12 @@
     return `Reading files to check: ${count(c.hashed_files)} of ${count(c.files_total)}`;
   });
   let partName = (job) => (job.filters?.group_part ? `${job.filters.group_part}/` : 'files in the main folder');
+  // Latest verification receipt.
+  let receipt = $derived(app.receipts[preset.preset_id]);
+  $effect(() => {
+    void preset.preset_id;
+    if (isDesktop) app.loadReceipts(preset);
+  });
   let schedule = $derived(preset.options?.schedule);
   let scheduled = $derived(schedule && schedule.mode && schedule.mode !== 'off');
 
@@ -127,6 +135,7 @@
         <div class="menu card" role="menu">
           <button role="menuitem" onclick={() => app.editFolder(preset)}>Edit…</button>
           <button role="menuitem" onclick={() => app.compareFolder(preset)}>Compare with cloud</button>
+          <button role="menuitem" onclick={() => { menuOpen = false; app.createReceipt(preset); }}>Make a receipt now</button>
           <button role="menuitem" onclick={() => openCloud()}>Open in Cloud storage</button>
           {#if isDesktop}
             <button role="menuitem" onclick={() => revealPath(preset.source_path)}>Show folder</button>
@@ -202,6 +211,22 @@
       <div class="row muted">Not synced yet — preview first to see what will upload.</div>
     {/if}
   </div>
+
+  {#if receipt && !current}
+    <div class="receipt" class:bad={receipt.result !== 'complete'}>
+      {#if receipt.result === 'complete'}<ShieldCheck size={14} />{:else}<ShieldAlert size={14} />{/if}
+      <span>
+        {#if receipt.result === 'complete'}
+          Verified {count(receipt.totals?.verified)} files
+        {:else}
+          {@const n = (receipt.totals?.mismatch || 0) + (receipt.totals?.missing_in_cloud || 0) + (receipt.totals?.unreadable || 0) + (receipt.totals?.online_only || 0)}
+          {count(n)} {n === 1 ? 'file' : 'files'} not verified
+        {/if}
+        <span class="muted">· {relativeTime(receipt.finished_at)}</span>
+      </span>
+      <button class="link" onclick={() => revealPath(receipt.csv)}>Receipt</button>
+    </div>
+  {/if}
 
   {#if scheduled}
     <div class="schedule" title={schedule.preview ? 'Scheduled runs are previews only' : ''}>
@@ -342,6 +367,29 @@
   .now {
     color: var(--muted);
     font-size: 12px;
+  }
+  .receipt {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--success);
+    font-size: 13px;
+    margin-top: -4px;
+  }
+  .receipt span {
+    color: var(--text-2);
+  }
+  .receipt.bad {
+    color: var(--warning);
+  }
+  .receipt .link {
+    border: none;
+    background: none;
+    padding: 0;
+    color: var(--accent);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
   }
   .schedule {
     display: flex;

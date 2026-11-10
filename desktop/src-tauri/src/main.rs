@@ -21,6 +21,7 @@ use jetstream_transfer::auth::TokenProvider;
 use jetstream_transfer::browse::{self, FolderTotals, Listing};
 use jetstream_transfer::compare::{self, CompareReport};
 use jetstream_transfer::localops;
+use jetstream_transfer::receipt;
 use jetstream_transfer::manifest::{default_data_dir, Manifest};
 use jetstream_transfer::throttle::Throttle;
 use jetstream_transfer::fileops::{self, BucketAccess, DeletedPage, Item, OpProgress, OpResult, Plan, PlanSummary, Undo};
@@ -528,6 +529,118 @@ async fn new_folder(core: tauri::State<'_, Core>, bucket: String, parent: String
     fileops::new_folder(&client, &source, &parent, &name).await.map_err(|e| format!("{e:#}"))
 }
 
+fn data_dir() -> std::path::PathBuf {
+    portable_data_dir().unwrap_or_else(default_data_dir)
+}
+
+fn receipts_dir(folder_name: &str) -> std::path::PathBuf {
+    data_dir().join("receipts").join(receipt::slug(folder_name))
+}
+
+#[derive(Serialize)]
+struct ReceiptSummary {
+    result: String,
+    totals: serde_json::Value,
+    finished_at: String,
+    destination: String,
+    csv: String,
+    json: String,
+    /// The receipt's copy next to the data, when one was saved.
+    cloud_copy: Option<String>,
+}
+
+/// Check a synced folder file by file against the cloud and save a receipt (CSV + JSON) in the
+/// data folder, optionally with a copy at gs://destination/_jetstream/receipts/.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn make_receipt(
+    app: AppHandle,
+    core: tauri::State<'_, Core>,
+    op_id: String,
+    folder_name: String,
+    path: String,
+    destination: String,
+    exclude_patterns: Vec<String>,
+    exclude_folders: Vec<String>,
+    recursive: bool,
+    account: Option<String>,
+    cloud_copy: bool,
+) -> Result<ReceiptSummary, String> {
+    let client = core.client()?;
+    let excludes = compare::exclude_regexes(&exclude_patterns, &exclude_folders).map_err(|e| format!("{e:#}"))?;
+    let manifest = Manifest::open(&data_dir().join("transfer-manifest.db")).ok();
+    let mut made = None;
+    let target = destination.clone();
+    track(&app, &core, &op_id, |progress| {
+        let (client, made, destination) = (client.clone(), &mut made, target);
+        async move {
+            let receipt = receipt::make_receipt(
+                &client,
+                std::path::Path::new(&path),
+                &destination,
+                &excludes,
+                recursive,
+                manifest.as_ref(),
+                account.as_deref().unwrap_or("unknown"),
+                &progress,
+            )
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+            let result = OpResult { total: receipt.totals.local_files, done: receipt.totals.verified, ..Default::default() };
+            *made = Some(receipt);
+            Ok(result)
+        }
+    })
+    .await?;
+    let receipt = made.ok_or("no receipt")?;
+    let (csv, json) = receipt::write_receipt(&receipt, &receipts_dir(&folder_name)).map_err(|e| format!("{e:#}"))?;
+    let mut copy = None;
+    if cloud_copy {
+        let (bucket, prefix) = jetstream_transfer::sync::parse_destination(&destination).map_err(|e| format!("{e:#}"))?;
+        for file in [&json, &csv] {
+            let name = format!("{prefix}{}receipts/{}", receipt::JETSTREAM_PREFIX, file.file_name().unwrap().to_string_lossy());
+            let data = std::fs::read(file).map_err(|e| e.to_string())?;
+            let crc = crc32c::crc32c(&data);
+            client.upload_multipart(&bucket, &name, data, crc, true).await.map_err(|e| format!("saving the receipt in the cloud: {e}"))?;
+            copy.get_or_insert(format!("gs://{bucket}/{name}"));
+        }
+    }
+    Ok(ReceiptSummary {
+        result: receipt.result.to_string(),
+        totals: serde_json::to_value(&receipt.totals).unwrap_or_default(),
+        finished_at: receipt.finished_at,
+        destination: receipt.destination,
+        csv: csv.display().to_string(),
+        json: json.display().to_string(),
+        cloud_copy: copy,
+    })
+}
+
+/// A synced folder's saved receipts, newest first (summaries from each JSON file).
+#[tauri::command]
+fn list_receipts(folder_name: String) -> Vec<serde_json::Value> {
+    let dir = receipts_dir(&folder_name);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out: Vec<serde_json::Value> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| {
+            let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).ok()?).ok()?;
+            Some(serde_json::json!({
+                "result": value["result"],
+                "totals": value["totals"],
+                "finished_at": value["finished_at"],
+                "account": value["account"],
+                "json": p.display().to_string(),
+                "csv": p.with_extension("csv").display().to_string(),
+            }))
+        })
+        .collect();
+    out.sort_by(|a, b| b["finished_at"].as_str().cmp(&a["finished_at"].as_str()));
+    out
+}
+
 /// Compare a local folder with its cloud copy (read-only). Uses the upload manifest, when
 /// there is one, to confirm matching files by checksum.
 #[tauri::command]
@@ -713,7 +826,9 @@ fn main() {
             download_cloud,
             upload_local_files,
             set_transfer_limit,
-            classify_paths
+            classify_paths,
+            make_receipt,
+            list_receipts
         ])
         .setup(|app| {
             build_tray(app.handle())?;

@@ -641,3 +641,48 @@ mod resume_and_speed {
         std::fs::metadata(path).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as i64
     }
 }
+
+#[tokio::test]
+async fn receipt_verifies_every_file_and_learns_checksums() {
+    use jetstream_transfer::fileops::OpProgress;
+    use jetstream_transfer::receipt::{make_receipt, to_csv, write_receipt, FileStatus};
+    let Some(env) = Env::new().await else { return };
+    env.write("photos/a.jpg", &big(3000, 1));
+    env.write("photos/b.jpg", &big(4000, 2));
+    env.write("notes, final.txt", b"hello");
+    env.run(env.options()).await;
+
+    let receipt = make_receipt(&env.client, &env.src(), "gs://bucket/data", &[], true, Some(&env.manifest), "tester", &OpProgress::default())
+        .await
+        .unwrap();
+    assert_eq!(receipt.result, "complete");
+    assert_eq!((receipt.totals.verified, receipt.totals.files_read), (3, 0), "checksums come from the sync's manifest");
+    let a = receipt.files.iter().find(|f| f.path == "photos/a.jpg").unwrap();
+    assert_eq!(a.crc32c.as_deref(), Some(jetstream_transfer::gcs::crc32c_b64(crc32c::crc32c(&big(3000, 1))).as_str()));
+    assert!(a.generation.is_some());
+
+    // Change, delete and add things.
+    env.write("photos/a.jpg", &big(3001, 9)); // changed locally
+    env.delete("data/photos/b.jpg").await; // gone from the cloud
+    env.client.upload_multipart("bucket", "data/extra.csv", b"x".to_vec(), crc32c::crc32c(b"x"), false).await.unwrap();
+    env.client.upload_multipart("bucket", "data/_jetstream/receipts/old.json", b"{}".to_vec(), crc32c::crc32c(b"{}"), false).await.unwrap();
+    let receipt = make_receipt(&env.client, &env.src(), "gs://bucket/data", &[], true, Some(&env.manifest), "tester", &OpProgress::default())
+        .await
+        .unwrap();
+    let status = |p: &str| receipt.files.iter().find(|f| f.path == p).map(|f| f.status);
+    assert_eq!(receipt.result, "incomplete");
+    assert_eq!(status("photos/a.jpg"), Some(FileStatus::Mismatch));
+    assert_eq!(status("photos/b.jpg"), Some(FileStatus::MissingInCloud));
+    assert_eq!(status("extra.csv"), Some(FileStatus::CloudOnly));
+    assert_eq!(status("notes, final.txt"), Some(FileStatus::Verified));
+    assert!(status("_jetstream/receipts/old.json").is_none(), "receipts in the cloud aren't data");
+    assert_eq!(receipt.totals.files_read, 1, "only the changed file was read");
+
+    let csv = to_csv(&receipt);
+    assert!(csv.starts_with("# JetStream upload receipt: incomplete\n"));
+    assert!(csv.contains("\n\"notes, final.txt\",verified,5,"), "{csv}");
+    let (csv_path, json_path) = write_receipt(&receipt, &env.dir.path().join("receipts")).unwrap();
+    assert!(csv_path.exists() && json_path.exists());
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(json_path).unwrap()).unwrap();
+    assert_eq!(json["totals"]["mismatch"], 1);
+}

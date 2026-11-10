@@ -12,7 +12,8 @@
   import ShieldCheck from '@lucide/svelte/icons/shield-check';
   import { app, commaList, lines } from '../lib/state.svelte.js';
   import { bytes, count, dateTime, duration, normalizeDestination, relativeTime } from '../lib/format.js';
-  import { compareFolder, isDesktop, revealPath } from '../lib/platform.js';
+  import { compareFolder, isDesktop, listReceipts, revealPath } from '../lib/platform.js';
+  import FileCheck from '@lucide/svelte/icons/file-check';
 
   let preset = $derived(app.compareTarget);
   let report = $state(null);
@@ -57,6 +58,14 @@
       loading = false;
     }
   }
+
+  // Saved receipts for this folder (reloaded when a new one is made).
+  let receipts = $state([]);
+  $effect(() => {
+    void app.receiptsVersion;
+    if (preset) listReceipts(preset.name).then((list) => (receipts = list || [])).catch(() => (receipts = []));
+  });
+  const notVerified = (t) => (t?.mismatch || 0) + (t?.missing_in_cloud || 0) + (t?.unreadable || 0) + (t?.online_only || 0);
 
   // Compare when opened (and when a sync of this folder finishes).
   let lastRun = '';
@@ -121,10 +130,11 @@
             </span>
           </div>
         {:else}
+          {@const n = report.local_only.files + report.different.files}
           <Upload size={20} />
           <div>
             <strong>
-              {count(report.local_only.files + report.different.files)} files ({bytes(report.local_only.bytes + report.different.bytes)}) on this computer aren't in the cloud yet{report.different.files ? ' or have changed' : ''}.
+              {count(n)} {n === 1 ? 'file' : 'files'} ({bytes(report.local_only.bytes + report.different.bytes)}) on this computer {n === 1 ? "isn't" : "aren't"} in the cloud yet{report.different.files ? (n === 1 ? ' or has changed' : ' or have changed') : ''}.
             </strong>
             <span class="muted">Sync now uploads them. Compared {relativeTime(new Date(Date.now() - report.elapsed_seconds * 1000).toISOString())} in {duration(report.elapsed_seconds)}.</span>
           </div>
@@ -166,6 +176,25 @@
           </div>
           {#if report.excluded}<p class="caption">{count(report.excluded)} local {report.excluded === 1 ? 'file' : 'files'} skipped by this folder's filters {report.excluded === 1 ? "isn't" : "aren't"} counted.</p>{/if}
           {#if report.verified}<p class="caption"><ShieldCheck size={13} /> {count(report.verified)} matching files confirmed by checksum (uploaded by the JetStream engine); others matched by size.</p>{/if}
+
+          <div class="receipts">
+            <div class="list-head">
+              <h2>Receipts</h2>
+              <button class="btn sm" onclick={() => app.createReceipt(preset)}><FileCheck size={14} /> Make one now</button>
+            </div>
+            <p class="caption">Every file checked against the cloud by checksum, saved as CSV and JSON.</p>
+            {#each receipts.slice(0, 8) as r (r.json)}
+              <div class="receipt-row">
+                <span class:ok={r.result === 'complete'} class:bad={r.result !== 'complete'}>
+                  {r.result === 'complete' ? `${count(r.totals?.verified)} verified` : `${count(notVerified(r.totals))} not verified`}
+                </span>
+                <span class="muted" title={dateTime(r.finished_at)}>{relativeTime(r.finished_at)}</span>
+                <button class="btn ghost sm" title="Show the CSV" onclick={() => revealPath(r.csv)}><Folder size={13} /></button>
+              </div>
+            {:else}
+              <p class="muted">No receipts yet.</p>
+            {/each}
+          </div>
         </div>
 
         <div class="card panel list">
@@ -410,6 +439,27 @@
   }
   .hot {
     font-weight: 700;
+  }
+  .receipts {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .receipt-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 8px;
+    align-items: center;
+    padding: 4px 0;
+    font-size: 13px;
+  }
+  .receipt-row .ok {
+    color: var(--success);
+    font-weight: 600;
+  }
+  .receipt-row .bad {
+    color: var(--warning);
+    font-weight: 600;
   }
   .list-head {
     display: flex;

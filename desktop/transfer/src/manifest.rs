@@ -78,6 +78,9 @@ impl Manifest {
                  PRIMARY KEY (dest, rel_path)
              );",
         )?;
+        // by_time = 1: the checksum is the cloud's, recorded because size and file time matched
+        // (the local file wasn't read). Receipts read such files before calling them verified.
+        let _ = conn.execute("ALTER TABLE files ADD COLUMN by_time INTEGER NOT NULL DEFAULT 0", []);
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -151,10 +154,27 @@ impl Manifest {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'))
              ON CONFLICT(dest, rel_path) DO UPDATE SET
                  size = excluded.size, mtime_ns = excluded.mtime_ns, crc32c = excluded.crc32c,
-                 generation = COALESCE(excluded.generation, files.generation), synced_at = excluded.synced_at",
+                 generation = COALESCE(excluded.generation, files.generation), synced_at = excluded.synced_at,
+                 by_time = 0",
             params![dest, rel_path, file.size as i64, file.mtime_ns, file.crc32c as i64, generation],
         )?;
         Ok(())
+    }
+
+    /// Record a file recognised by size and file time, with the cloud object's checksum.
+    pub fn record_by_time(&self, dest: &str, rel_path: &str, file: &FileRecord, generation: Option<&str>) -> Result<()> {
+        self.record(dest, rel_path, file, generation)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE files SET by_time = 1 WHERE dest = ?1 AND rel_path = ?2", params![dest, rel_path])?;
+        Ok(())
+    }
+
+    /// Paths under `dest` whose recorded checksum came from the cloud, not from reading the file.
+    pub fn by_time_paths(&self, dest: &str) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT rel_path FROM files WHERE dest = ?1 AND by_time = 1")?;
+        let rows = stmt.query_map([dest], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn session(&self, dest: &str, rel_path: &str) -> Result<Option<SessionRecord>> {
@@ -237,6 +257,12 @@ mod tests {
         let photos = manifest.load_tree("gs://b/site/photos/").unwrap();
         assert_eq!(photos.keys().collect::<Vec<_>>(), ["a.jpg"], "photos-raw/ isn't inside photos/");
         assert_eq!(manifest.load_tree("gs://b/site/video/").unwrap()["v.mp4"].size, 3);
+
+        // Recognised by time: known, but its checksum is the cloud's.
+        manifest.record_by_time("gs://b/site/", "top.txt", &rec(2), None).unwrap();
+        assert!(manifest.by_time_paths("gs://b/site/").unwrap().contains("top.txt"));
+        manifest.record("gs://b/site/", "top.txt", &rec(2), None).unwrap();
+        assert!(manifest.by_time_paths("gs://b/site/").unwrap().is_empty(), "reading the file clears it");
 
         // The destination's own record wins.
         manifest.record("gs://b/site/photos/", "a.jpg", &rec(5), None).unwrap();

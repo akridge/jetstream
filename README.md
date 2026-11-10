@@ -114,6 +114,7 @@ A native desktop version of JetStream is in [`desktop/`](./desktop/README.md). I
   - checks before anything is removed
   - warnings about early-deletion fees
 - **Cloud cleanup:** find junk files in a bucket and move them to quarantine safely.
+- **Verification receipts:** after each sync, a CSV/JSON record that every file reached the cloud intact (checksums, who, when).
 - **Activity, Folder insights and Analytics:** live progress, what a folder holds, and job history charts.
 - **Built-in upload engine:** re-syncs unchanged folders almost instantly and resumes large files.
 - **Notifications and tray icon:** closing the window keeps uploads running.

@@ -20,6 +20,7 @@ The Rust core of JetStream, used by the desktop app (as a library) and as a CLI:
   - `mkdir gs://b/parent/ NAME`
   - Folders end with `/`.
 - **`download SRC... --to FOLDER`** and **`upload FILE... --to gs://b/folder/`:** copy between the cloud and this computer, checked by checksum, never replacing what's already there. `--max-mbps N` limits the speed.
+- **`receipt <folder> gs://bucket/folder/ --out DIR`:** check every file against the cloud by checksum and write a receipt (CSV + JSON): verified, mismatch, missing in the cloud, unreadable, or in the cloud only, with each object's crc32c, MD5 and generation. Exits 2 if the folder isn't complete. Objects under `_jetstream/` (receipt copies) aren't treated as data.
 - **`bucket gs://b`:** bucket settings (soft delete, hierarchical namespace, Autoclass) and your permissions.
 - **`deleted gs://b/folder/` and `restore gs://b NAME#GENERATION...`:** list and restore soft-deleted objects.
 

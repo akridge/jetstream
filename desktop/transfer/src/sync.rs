@@ -336,12 +336,12 @@ fn top_segment(rel: &str) -> &str {
     rel.split_once('/').map(|(first, _)| first).unwrap_or("")
 }
 
-const LIST_FIELDS: &str = "name,size,crc32c,generation,metadata";
+const LIST_FIELDS: &str = "name,size,crc32c,md5Hash,generation,updated,metadata";
 
 /// List objects under gs://bucket/prefix, keyed by name relative to the prefix. With `only`,
 /// just those top-level subfolders ("" = objects directly under the prefix). Subfolders are
 /// listed in parallel.
-async fn list_remote(
+pub(crate) async fn list_remote(
     client: &GcsClient,
     bucket: &str,
     prefix: &str,
@@ -530,7 +530,7 @@ pub async fn sync(
             Some((crc, generation)) if !opts.verify => {
                 if !opts.dry_run {
                     let record = FileRecord { size: file.size, mtime_ns: file.mtime_ns, crc32c: crc };
-                    let _ = manifest.record(&dest, &file.rel, &record, generation.as_deref());
+                    let _ = manifest.record_by_time(&dest, &file.rel, &record, generation.as_deref());
                 }
                 summary.already_in_cloud += 1;
                 summary.matched_by_time += 1;

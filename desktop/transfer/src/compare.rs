@@ -146,7 +146,7 @@ pub async fn compare(
             let Ok(info) = serde_json::from_value::<ObjectInfo>(raw) else { continue };
             let rel = info.name[prefix.len()..].to_string();
             // Folder placeholder objects aren't files; without recursion, only the top level counts.
-            if rel.is_empty() || rel.ends_with('/') || (!recursive && rel.contains('/')) {
+            if rel.is_empty() || rel.ends_with('/') || rel.starts_with(crate::receipt::JETSTREAM_PREFIX) || (!recursive && rel.contains('/')) {
                 continue;
             }
             cloud.insert(rel, info);

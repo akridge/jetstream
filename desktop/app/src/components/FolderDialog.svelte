@@ -203,6 +203,19 @@
           <input type="checkbox" bind:checked={form.options.no_clobber} />
           <span><strong>Never overwrite files already in the cloud</strong><small>Changed local files are skipped if a copy already exists.</small></span>
         </label>
+        <label class="toggle">
+          <input type="checkbox" checked={form.options.receipts !== false} onchange={(e) => (form.options.receipts = e.currentTarget.checked)} />
+          <span>
+            <strong>Make a verification receipt after each sync</strong>
+            <small>Checks every file against the cloud by checksum and saves a CSV and JSON record (who, when, each file's checksum) for data management and archiving.</small>
+          </span>
+        </label>
+        {#if form.options.receipts !== false}
+          <label class="toggle sub-toggle">
+            <input type="checkbox" bind:checked={form.options.receipt_cloud_copy} />
+            <span><strong>Also keep a copy in the cloud</strong><small>Saved next to the data, in <span class="mono">_jetstream/receipts/</span>.</small></span>
+          </label>
+        {/if}
       </div>
 
       <div class="field">
@@ -424,6 +437,9 @@
     width: 16px;
     height: 16px;
     accent-color: var(--accent);
+  }
+  .sub-toggle {
+    margin-left: 26px;
   }
   .toggle span {
     display: flex;

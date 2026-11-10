@@ -2,7 +2,8 @@
 
 import { api, eventsUrl, setApiBase } from './api.js';
 import { jobDestination, normalizeDestination, basename } from './format.js';
-import { ensureNotificationPermission, getServerStatus, notify, onServerStatus, setTransferLimit } from './platform.js';
+import { ensureNotificationPermission, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
+import { cloudOps } from './cloudops.svelte.js';
 
 const PREFS_KEY = 'jetstreamDesktopPrefs';
 const DEFAULT_PREFS = { theme: 'system', notifications: true, default_upload_tool: 'gcloud', recent_buckets: [], recent_scans: [] };
@@ -107,6 +108,9 @@ class AppState {
   transfer = $state({ max_mbps: 0, parallel_jobs: 1 });
   /** Paths dropped on the Cloud storage view, waiting to be uploaded there. */
   cloudDrop = $state(null);
+  /** Latest receipt per synced folder (preset_id -> summary), and a counter to reload lists. */
+  receipts = $state({});
+  receiptsVersion = $state(0);
   /** Synced folder shown on the Compare screen. */
   compareTarget = $state(null);
   /** Last place browsed in Cloud storage, kept while switching views. */
@@ -236,6 +240,53 @@ class AppState {
     return this.#speed.get(jobId)?.rate || 0;
   }
 
+  /** Check a synced folder against the cloud and save a receipt (shown in the operations tray). */
+  async createReceipt(preset, { auto = false } = {}) {
+    const o = preset.options || {};
+    const id = newOpId();
+    const summary = await cloudOps.start(id, `Verifying ${preset.name}`, 0, 'Verified', (onProgress) =>
+      makeReceipt(id, {
+        folderName: preset.name,
+        path: preset.source_path,
+        destination: `gs://${normalizeDestination(preset.destination)}/`,
+        excludePatterns: lines(o.exclude_patterns) || [],
+        excludeFolders: commaList(o.exclude_folders) || [],
+        recursive: o.recursive !== false,
+        account: this.auth?.gcloud_account || this.auth?.service_account || null,
+        cloudCopy: !!o.receipt_cloud_copy,
+      }, onProgress), {
+      report: (r) => {
+        const t = r.totals || {};
+        const problems = (t.mismatch || 0) + (t.missing_in_cloud || 0) + (t.unreadable || 0) + (t.online_only || 0);
+        const message = problems
+          ? `Receipt for ${preset.name}: ${problems.toLocaleString()} of ${(t.local_files || 0).toLocaleString()} files not verified`
+          : `Receipt for ${preset.name}: all ${(t.verified || 0).toLocaleString()} files verified`;
+        this.toast(message, problems ? 'error' : 'success', {
+          action: problems ? { label: 'Compare', run: () => this.compareFolder(preset) } : { label: 'Show', run: () => revealPath(r.csv) },
+          timeout: auto && !problems ? 6000 : 12000,
+        });
+      },
+    });
+    if (summary) {
+      this.receipts = { ...this.receipts, [preset.preset_id]: summary };
+      this.receiptsVersion++;
+    }
+    return summary;
+  }
+
+  async loadReceipts(preset) {
+    const list = (await listReceipts(preset.name).catch(() => [])) || [];
+    if (list[0]) this.receipts = { ...this.receipts, [preset.preset_id]: list[0] };
+    return list;
+  }
+
+  /** After a real sync of a synced folder completes, make its receipt (unless turned off). */
+  #autoReceipt(job) {
+    const preset = this.presetForJob(job);
+    if (!preset || job.dry_run || preset.options?.receipts === false) return;
+    this.createReceipt(preset, { auto: true });
+  }
+
   #jobFinished(info) {
     const kind = info.dry_run ? 'Preview' : info.job_type === 'cloud_sync' ? 'Cloud sync' : info.job_type === 'cloud_move' ? 'Move' : 'Sync';
     const job = this.jobs[info.job_id];
@@ -246,6 +297,7 @@ class AppState {
       if (siblings.some((j) => j.job_id !== info.job_id && ACTIVE.has(j.status))) return;
       if (this.#announcedGroups.has(groupId)) return;
       this.#announcedGroups.add(groupId);
+      if (info.status === 'completed' && !siblings.some((j) => j.job_id !== info.job_id && j.status !== 'completed')) this.#autoReceipt(job);
       const run = collapseRuns(siblings)[0];
       const folder = this.presetForJob(job)?.name || run.group.name;
       const failed = run.group.failed;
@@ -256,6 +308,7 @@ class AppState {
       if (this.prefs.notifications) notify(title, `${folder}\n${info.destination || ''}`);
       return;
     }
+    if (info.status === 'completed' && job && !job.filters?.job_type) this.#autoReceipt(job);
     const folder = this.presetForJob(job)?.name || info.name;
     const title =
       info.status === 'completed' ? `${kind} finished` : info.status === 'failed' ? `${kind} failed` : `${kind} cancelled`;
