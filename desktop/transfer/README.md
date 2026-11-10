@@ -144,6 +144,16 @@ How to read this:
 
   gcloud re-hashes every file and lists the bucket on every run, and that cost grows with folder size.
 
+### Stop/start and moving from gcloud (emulator, 5,000 × 20 KB files)
+
+| Scenario | Before | Now |
+|---|---|---|
+| First upload | 21.8 s | 21.1 s |
+| Re-sync with no manifest (new computer, or data first uploaded with gcloud) | 0.4 s, all 5,000 files read | 0.3 s, **no files read** (recognised by size and file time) |
+| Restart after a stop (the manifest knows 10% of files) | 33.3 s, **4,500 files uploaded again** | **0.3 s, nothing uploaded** |
+
+Reading files is cheap on a local SSD with 100 MB; on terabytes, or over a network share, not reading them is the difference between minutes and hours.
+
 ### Real bucket
 
 Run `bench/bench.sh gs://YOUR-TEST-BUCKET/jetstream-bench`. It compares both tools on:
