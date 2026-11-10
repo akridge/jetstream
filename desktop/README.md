@@ -51,6 +51,7 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   **Preview** shows what would upload. **Sync now** uploads only what's new.
 - **Add folders your way:** **Add folder** opens the native folder picker, or you can drag a folder from File Explorer onto the window. The dialog counts the folder's files, offers quick bucket choices, and lets you choose:
   - which upload tool to use: `gcloud storage rsync`, or the faster-to-re-sync **JetStream engine** (see [`transfer/README.md`](transfer/README.md))
+  - **Create a folder in the destination:** upload the folder itself rather than just its contents. `C:\folder1` to `gs://bucket/folder` then lands in `gs://bucket/folder/folder1/`. New folders remember your last choice.
   - whether to include subfolders
   - **Upload each subfolder as its own job:** for big folders. Each subfolder finishes on its own, a problem only redoes that subfolder, and files directly in the folder get a job too. The card shows "Folder 5 of 12", **Cancel all** stops the lot and **Retry failed folders** redoes only what failed. In Activity the subfolders sit under one row you can expand.
   - whether files already in the cloud may be overwritten

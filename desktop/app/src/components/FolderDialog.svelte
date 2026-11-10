@@ -20,6 +20,14 @@
   let stats = $state(null);
   let counting = $state(false);
   let nameTouched = $state(untrack(() => !!dialog.previousName));
+  // "Create a folder named after the source in the destination": the field holds the parent;
+  // the saved destination is parent + folder name, so everything else just uses it.
+  if (form.options.include_folder_name === undefined && !dialog.previousName) {
+    form.options.include_folder_name = !!app.prefs.include_folder_name;
+  }
+  if (form.options.include_folder_name && form.options.parent_destination !== undefined) {
+    form.destination = form.options.parent_destination;
+  }
   form.options.schedule ??= { mode: 'off' };
   const sched = form.options.schedule;
   sched.time ??= '18:00';
@@ -42,8 +50,13 @@
     'RAW photos': { patterns: ['*.CR2', '*.CR3', '*.NEF', '*.ARW', '*.DNG'] },
   };
 
-  let destination = $derived(normalizeDestination(form.destination));
-  let validDestination = $derived(/^[a-z0-9][a-z0-9._-]{1,220}(\/.*)?$/.test(destination));
+  // The source folder's own name ("" for a drive root such as C:\).
+  let folderName = $derived(basename((form.source_path || '').trim()).trim().replace(/^[A-Za-z]:$/, ''));
+  let parentDestination = $derived(normalizeDestination(form.destination));
+  let destination = $derived(
+    form.options.include_folder_name && folderName && parentDestination ? `${parentDestination}/${folderName}` : parentDestination,
+  );
+  let validDestination = $derived(/^[a-z0-9][a-z0-9._-]{1,220}(\/.*)?$/.test(parentDestination));
   let canSave = $derived(form.name.trim() && form.source_path.trim() && validDestination && !saving);
   let engineAvailable = $derived(app.toolAvailable('jetstream'));
 
@@ -94,8 +107,13 @@
         name: form.name.trim(),
         source_path: form.source_path.trim(),
         destination,
-        options: { ...form.options, recursive: form.options.recursive !== false },
+        options: {
+          ...form.options,
+          recursive: form.options.recursive !== false,
+          parent_destination: form.options.include_folder_name ? parentDestination : undefined,
+        },
       };
+      app.savePrefs({ include_folder_name: !!form.options.include_folder_name });
       const saved = await app.savePreset(preset, dialog.previousName);
       app.folderDialog = null;
       app.toast(`Saved ${saved.name}`, 'success', { timeout: 3000 });
@@ -153,6 +171,13 @@
             <button class="chip" onclick={() => (form.destination = `${bucket}/`)}>{bucket.replace('nmfs_odp_', '').toUpperCase()}</button>
           {/each}
         </div>
+        <div class="dest-option"><label class="toggle">
+          <input type="checkbox" bind:checked={form.options.include_folder_name} />
+          <span>
+            <strong>Create a{folderName ? ` “${folderName}”` : ''} folder in the destination</strong>
+            <small>Upload the folder itself, not just what's in it (like copying a folder into another one).</small>
+          </span>
+        </label></div>
         {#if form.destination && !validDestination}
           <span class="hint bad">Use the form bucket-name/optional/path.</span>
         {:else if destination}
@@ -437,6 +462,9 @@
     width: 16px;
     height: 16px;
     accent-color: var(--accent);
+  }
+  .dest-option {
+    margin-top: 4px;
   }
   .sub-toggle {
     margin-left: 26px;
