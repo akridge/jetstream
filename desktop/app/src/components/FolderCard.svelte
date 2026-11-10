@@ -11,39 +11,61 @@
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import StatusIcon from './StatusIcon.svelte';
   import ProgressBar from './ProgressBar.svelte';
-  import { app, ACTIVE, TERMINAL } from '../lib/state.svelte.js';
+  import { app, ACTIVE, TERMINAL, collapseRuns } from '../lib/state.svelte.js';
   import { api, pollActivity } from '../lib/api.js';
   import { bytes, count, duration, relativeTime, normalizeDestination, scheduleText, upcoming } from '../lib/format.js';
   import { isDesktop, revealPath } from '../lib/platform.js';
 
   let { preset } = $props();
 
-  let jobs = $derived(app.jobsForPreset(preset));
+  // A split upload (one job per subfolder) counts as one run.
+  let jobs = $derived(collapseRuns(app.jobsForPreset(preset)));
   let current = $derived(jobs.find((j) => ACTIVE.has(j.status)));
+  let group = $derived(current?.group || null);
+  /** The job actually running (for a split upload, the current subfolder's). */
+  let runningJob = $derived(group ? (group.current?.status === 'running' ? group.current : null) : current?.status === 'running' ? current : null);
   let lastFinished = $derived(jobs.find((j) => TERMINAL.has(j.status)));
   let lastReal = $derived(jobs.find((j) => TERMINAL.has(j.status) && !j.dry_run));
   let previewReady = $derived(
     lastFinished && lastFinished.dry_run && lastFinished.status === 'completed' && (!lastReal || lastReal.created_at < lastFinished.created_at),
   );
   let tool = $derived(preset.options?.upload_tool === 'jetstream' && app.toolAvailable('jetstream') ? 'JetStream engine' : 'gcloud');
-  let speed = $derived(current ? app.speedOf(current.job_id) : 0);
+  let speed = $derived(runningJob ? app.speedOf(runningJob.job_id) : 0);
   let remaining = $derived(
     current && speed > 0 ? Math.max(0, (current.total_size_bytes - current.bytes_uploaded) / speed) : null,
   );
 
   let nowFile = $state('');
   let paused = $state(false);
-  let runningId = $derived(current?.status === 'running' ? current.job_id : null);
+  let activity = $state(null);
+  let runningId = $derived(runningJob?.job_id || null);
   $effect(() => {
     const id = runningId;
     nowFile = '';
     paused = false;
+    activity = null;
     if (!id) return;
     return pollActivity(id, (a) => {
-      nowFile = a.in_flight[0]?.path || a.recent[0]?.path || '';
+      activity = a;
+      const stuck = a.in_flight.find((f) => f.retry);
+      nowFile = stuck ? `${stuck.path} — retrying (${stuck.retry.attempt}/${stuck.retry.max_attempts})` : a.in_flight[0]?.path || a.recent[0]?.path || '';
       paused = !!a.paused;
     }, 2500);
   });
+  /** What the engine is doing right now, in words. */
+  let phaseText = $derived.by(() => {
+    if (paused) return 'Paused at';
+    const phase = activity?.phase;
+    if (phase === 'scanning') return 'Looking through the folder…';
+    if (phase === 'listing') return `Checking what's in the cloud${activity.checking?.listed_objects ? ` (${count(activity.checking.listed_objects)} listed)` : ''}…`;
+    return current?.dry_run ? 'Previewing…' : 'Syncing…';
+  });
+  let checkingText = $derived.by(() => {
+    const c = activity?.checking;
+    if (!c || activity?.phase !== 'uploading' || !c.files_total || c.hashed_files >= c.files_total) return '';
+    return `Reading files to check: ${count(c.hashed_files)} of ${count(c.files_total)}`;
+  });
+  let partName = (job) => (job.filters?.group_part ? `${job.filters.group_part}/` : 'files in the main folder');
   let schedule = $derived(preset.options?.schedule);
   let scheduled = $derived(schedule && schedule.mode && schedule.mode !== 'off');
 
@@ -65,7 +87,7 @@
 
   async function togglePause() {
     try {
-      await (paused ? api.resumeJob(current.job_id) : api.pauseJob(current.job_id));
+      await (paused ? api.resumeJob(runningJob.job_id) : api.pauseJob(runningJob.job_id));
       paused = !paused;
     } catch (err) {
       app.toast(err.message, 'error');
@@ -73,6 +95,7 @@
   }
 
   async function cancel() {
+    if (group) return app.cancelGroup(group.id);
     try {
       await api.cancelJob(current.job_id);
     } catch (err) {
@@ -128,7 +151,7 @@
       {#if current.status === 'running'}
         <div class="row">
           <StatusIcon job={current} size={16} />
-          <strong>{paused ? 'Paused at' : current.dry_run ? 'Previewing…' : 'Syncing…'} {Math.round(current.progress_percent || 0)}%</strong>
+          <strong>{phaseText} {Math.round(current.progress_percent || 0)}%</strong>
           <span class="muted">
             {bytes(current.bytes_uploaded)} of {bytes(current.total_size_bytes)}
             {#if speed > 0 && !paused}· {bytes(speed)}/s{/if}
@@ -136,11 +159,17 @@
           </span>
         </div>
         <ProgressBar value={current.progress_percent || 0} indeterminate={!current.total_size_bytes} />
+        {#if group}
+          <div class="now">
+            Folder {group.done + group.failed + group.cancelled + 1} of {group.parts}{#if group.current}: <span class="mono">{partName(group.current)}</span>{/if}{#if group.failed} · <span class="danger">{group.failed} failed</span>{/if}
+          </div>
+        {/if}
+        {#if checkingText}<div class="now">{checkingText}</div>{/if}
         {#if nowFile}<div class="now mono truncate start" title={nowFile}><bdi>{nowFile}</bdi></div>{/if}
       {:else}
         <div class="row">
           <StatusIcon job={current} size={16} />
-          <strong>{current.status === 'scheduled' ? 'Scheduled' : 'Waiting to start…'}</strong>
+          <strong>{current.status === 'scheduled' ? 'Scheduled' : group ? `Waiting to start · ${group.parts} folders` : 'Waiting to start…'}</strong>
         </div>
         <ProgressBar indeterminate />
       {/if}
@@ -184,10 +213,10 @@
 
   <footer>
     {#if current}
-      {#if current.status === 'running' && current.upload_tool === 'jetstream' && !current.dry_run}
+      {#if runningJob && runningJob.upload_tool === 'jetstream' && !runningJob.dry_run}
         <button class="btn sm" onclick={togglePause}>{#if paused}<Play size={14} /> Resume{:else}<Pause size={14} /> Pause{/if}</button>
       {/if}
-      <button class="btn sm" onclick={cancel}><Square size={14} /> Cancel</button>
+      <button class="btn sm" onclick={cancel}><Square size={14} /> {group ? 'Cancel all' : 'Cancel'}</button>
       <button class="btn ghost sm" onclick={() => app.openJob(current.job_id)}>Details</button>
     {:else if previewReady}
       <button class="btn primary sm" disabled={busy} onclick={() => run(false)}><CloudUpload size={15} /> Upload now</button>
@@ -196,7 +225,9 @@
       <button class="btn primary sm" disabled={busy} onclick={() => run(false)}><Play size={14} /> Sync now</button>
       <button class="btn sm" disabled={busy} onclick={() => run(true)}><Eye size={15} /> Preview</button>
       <button class="btn ghost sm" title="What's on this computer vs in the cloud" onclick={() => app.compareFolder(preset)}><GitCompare size={14} /> Compare</button>
-      {#if lastFinished?.status === 'failed'}
+      {#if lastFinished?.status === 'failed' && lastFinished.group}
+        <button class="btn ghost sm" onclick={() => app.retryFailedInGroup(lastFinished.group.id)}>Retry failed folders</button>
+      {:else if lastFinished?.status === 'failed'}
         <button class="btn ghost sm" onclick={() => app.openJob(lastFinished.job_id)}>View error</button>
       {/if}
     {/if}

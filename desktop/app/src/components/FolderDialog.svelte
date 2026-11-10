@@ -193,6 +193,13 @@
           <span><strong>Include subfolders</strong></span>
         </label>
         <label class="toggle">
+          <input type="checkbox" bind:checked={form.options.split_by_folder} />
+          <span>
+            <strong>Upload each subfolder as its own job</strong>
+            <small>Good for big folders: each subfolder finishes on its own, a problem only redoes that subfolder, and progress shows "5 of 12 folders". Files directly in the folder get a job too.</small>
+          </span>
+        </label>
+        <label class="toggle">
           <input type="checkbox" bind:checked={form.options.no_clobber} />
           <span><strong>Never overwrite files already in the cloud</strong><small>Changed local files are skipped if a copy already exists.</small></span>
         </label>

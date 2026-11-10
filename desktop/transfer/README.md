@@ -66,7 +66,8 @@ target/release/jetstream-transfer sync D:\Survey\2026 gs://my-bucket/surveys/202
 | `--exclude REGEX` | Skip relative paths (`/` separators) matching the regex; repeatable |
 | `--concurrency N` | Files in flight (default 32). `--large-concurrency` (default 4) caps resumable uploads, each holding one chunk in memory |
 | `--max-mbps N` | Bandwidth limit in megabits per second (default: none) |
-| `--control-stdin` | Read `{"cmd":"pause"}`, `{"cmd":"resume"}` and `{"cmd":"limit","mbps":N}` lines from stdin while running (the JetStream server uses this for Pause and the speed limit) |
+| `--control-stdin` | Read `{"cmd":"pause"}`, `{"cmd":"resume"}`, `{"cmd":"limit","mbps":N}` and `{"cmd":"stop"}` lines from stdin while running (the JetStream server uses this for Pause, the speed limit and Cancel) |
+| `--no-auto-tune` | Keep `--concurrency` and `--chunk-mib` as given |
 | `--manifest PATH` | Default: `<JetStream data folder>/transfer-manifest.db` |
 
 **Sign-in,** in order of preference:
@@ -78,23 +79,36 @@ target/release/jetstream-transfer sync D:\Survey\2026 gs://my-bucket/surveys/202
 **Exit codes:** 0 = all synced, 2 = some files failed, 3 = cancelled (Ctrl+C), 1 = error.
 
 **Events** (stdout, one JSON object per line):
-- `start` and `plan`: counts of local, unchanged and to-check files.
+- `start`, then `phase` (`scanning`, `listing`, `uploading`).
+- `plan`: counts of local, unchanged and to-check files; first an `estimate` from the manifest, then refined after listing.
+- `tuned`: the concurrency and chunk size chosen.
+- `file_started` (files ≥ 4 MiB), `file_retrying` (with the attempt and reason, e.g. a stalled connection).
 - `file_uploaded`: includes `resumed_from` when a saved session was continued.
-- `file_would_upload`, `file_skipped` and `file_failed`.
-- `progress`: once a second.
-- `done`: a full summary.
+- `file_would_upload`, `file_skipped` (including online-only placeholders) and `file_failed`.
+- `progress`: once a second, with the phase, files read for checking, objects listed, and bytes including those still in flight.
+- `done`: a full summary (`matched_by_time`, `hashed_files`, `online_only`, …).
 
 ## How a sync works
 
-1. **Walk the folder,** reading only size and mtime.
-2. **Skip unchanged files.** If size and mtime match the manifest, the file is unchanged: it isn't read or hashed, and no request is sent.
-3. **Hash everything else (crc32c).** A file whose content matches the manifest (only touched or copied) isn't uploaded.
-4. **List the bucket only when needed.** On the **first** sync to a destination, or with `--verify`, the prefix is listed once. Files already in the bucket with the same size and crc32c are recorded instead of uploaded, so moving from `gcloud rsync` doesn't re-send data.
+1. **Walk the folder,** reading only size and modified time.
+   - **Online-only placeholders** (OneDrive "files on demand" on Windows) are skipped with an explanation. Reading one would make Windows download it first, which looks like a frozen upload.
+2. **Skip unchanged files.** If size and mtime match the manifest, the file is unchanged: it isn't read, and no request is sent.
+   - An **early estimate** of what's already synced is reported straight away, so progress starts from there, not from 0%.
+   - The manifest is shared between a folder synced whole and split by subfolder: records saved for `gs://b/site/` also count for `gs://b/site/photos/`, and the other way round.
+3. **List the bucket where it helps.** Whenever any file is unknown to the manifest (first sync, a sync that was stopped, files first uploaded with gcloud), the bucket is listed, but only the subfolders containing unknown files, and several at once. With `--verify`, the whole prefix is listed.
+   - An object with the same size and `goog-reserved-file-mtime` (the file time `gcloud storage rsync` records) counts as synced **without reading the local file**.
+   - The engine records that time on its own uploads too, so gcloud recognises them.
+4. **Hash the rest (crc32c)** on its own stage, which feeds the uploads.
+   - Small files are uploaded from the bytes already read for hashing.
+   - A file whose content matches the manifest (only touched or copied) isn't uploaded.
 5. **Upload in parallel.**
    - Files ≤ 8 MiB go in one multipart request.
    - Larger files use a resumable session whose URI is saved in the manifest. After a restart, the engine asks Cloud Storage how much it already has and sends only the rest.
-   - Failed chunks are retried with backoff from the server's confirmed offset.
+   - **Auto-tuning:** many small files raise concurrency to 64; files over 1 GiB / 8 GiB use 32 / 64 MiB chunks (`--no-auto-tune` keeps your settings).
+   - **No stuck uploads:** request bodies go out in 256 KiB pieces, and if none moves for 60 s (a dead connection) the request is abandoned and retried from the server's confirmed offset. TCP keepalive notices dead connections too. Each retry is reported (`file_retrying`).
+   - **Locked files** (open in another program) are tried once more at the end.
    - A completed object is only accepted if its size and crc32c match.
+6. **Stopping** (Ctrl+C, or `{"cmd":"stop"}` with `--control-stdin`) finishes or saves what's in flight, keeps the manifest and exits with code 3; the next run continues.
 
 ## Tests
 

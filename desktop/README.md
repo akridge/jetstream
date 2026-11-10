@@ -44,12 +44,15 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - when it last synced, and how much
   - live progress, speed and time left while it runs, and the file being uploaded
   - **Pause** and **Resume** for uploads using the JetStream engine (nothing is lost; gcloud uploads can only be cancelled)
+  - what the engine is doing before it uploads ("Checking what's already in the cloud", "Reading files to check: 1,204 of 8,330"), and files being retried
+  - progress that survives **Cancel** and **Sync now**: what's already in the cloud counts straight away instead of starting again from 0%
   - its schedule and next run, if it syncs automatically
 
   **Preview** shows what would upload. **Sync now** uploads only what's new.
 - **Add folders your way:** **Add folder** opens the native folder picker, or you can drag a folder from File Explorer onto the window. The dialog counts the folder's files, offers quick bucket choices, and lets you choose:
   - which upload tool to use: `gcloud storage rsync`, or the faster-to-re-sync **JetStream engine** (see [`transfer/README.md`](transfer/README.md))
   - whether to include subfolders
+  - **Upload each subfolder as its own job:** for big folders. Each subfolder finishes on its own, a problem only redoes that subfolder, and files directly in the folder get a job too. The card shows "Folder 5 of 12", **Cancel all** stops the lot and **Retry failed folders** redoes only what failed. In Activity the subfolders sit under one row you can expand.
   - whether files already in the cloud may be overwritten
   - which files to skip
   - **Sync automatically:** at a set time on chosen days, or every few hours, optionally as a preview only. Scheduled syncs run while JetStream is open (including from the tray). A sync is skipped if the previous one is still running, and a missing folder (e.g. an unplugged drive) shows up as a failed job you can see.
@@ -105,6 +108,7 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - Google Cloud sign-in status, with a **Sign in with Google** button
   - default upload tool
   - **speed limit** for uploads and downloads (e.g. 20 Mbit/s on a shared ship or field-station connection). It changes running engine uploads too.
+  - **uploads at once** (1–4), e.g. how many subfolders of a split upload run together
   - light, dark or system theme
   - notifications
 - **More tools:** cloud audit history, the catalog tool, Drive upload, and the original pages. These open in a separate window.
@@ -139,6 +143,14 @@ JetStream.app / JetStream.exe        Rust shell (src-tauri/src/main.rs)
 - **Data folder:** the server runs from the per-user JetStream data folder, which holds the database and the `logs/` folder. On Windows that is `%LOCALAPPDATA%\JetStream`.
 - **Shared history:** the pip-installed `jetstream` uses the same folder, so both share one job history.
 - **Shutdown:** the server exits when the desktop app exits. This includes when the app crashes or is killed.
+
+## If uploads seem stuck or slow
+
+- **OneDrive folders (e.g. Desktop or Documents):** online-only files aren't on the computer, so they're skipped with a note in the job output. Right-click the folder and choose **Always keep on this device**, then sync again.
+- **Files open in another program** are tried again at the end of the sync; close the program if they still fail.
+- **A dropped connection** is noticed within about a minute and the upload continues from where Google has it ("retrying" in the job details).
+- **A big folder:** turn on **Upload each subfolder as its own job**.
+- **Moving from gcloud to the JetStream engine:** the first engine sync recognises files gcloud uploaded by size and date, without reading them again.
 
 ## Run from source (development)
 

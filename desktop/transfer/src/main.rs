@@ -62,9 +62,13 @@ enum Command {
         #[arg(long, default_value_t = 0.0)]
         max_mbps: f64,
         /// Read control commands from stdin, one JSON object per line:
-        /// {"cmd":"pause"}, {"cmd":"resume"}, {"cmd":"limit","mbps":20}.
+        /// {"cmd":"pause"}, {"cmd":"resume"}, {"cmd":"limit","mbps":20}, {"cmd":"stop"}.
         #[arg(long)]
         control_stdin: bool,
+        /// Keep --concurrency and --chunk-mib as given (by default they rise for many small
+        /// files or very large ones).
+        #[arg(long)]
+        no_auto_tune: bool,
         /// Files larger than this many MiB use resumable uploads.
         #[arg(long, default_value_t = 8)]
         resumable_threshold_mib: u64,
@@ -191,9 +195,10 @@ enum Command {
     },
 }
 
-/// Pause, resume and bandwidth changes from the controlling process (the JetStream server).
+/// Pause, resume, bandwidth and stop from the controlling process (the JetStream server).
+/// "stop" finishes or saves what's in flight, writes the manifest and exits (code 3).
 /// A plain thread, so a blocked read never keeps the process from exiting.
-fn read_controls(throttle: Arc<Throttle>) {
+fn read_controls(throttle: Arc<Throttle>, cancel: Arc<AtomicBool>) {
     use std::io::BufRead;
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -203,6 +208,11 @@ fn read_controls(throttle: Arc<Throttle>) {
                 Some("pause") => throttle.set_paused(true),
                 Some("resume") => throttle.set_paused(false),
                 Some("limit") => throttle.set_rate(mbps_to_bytes(command["mbps"].as_f64().unwrap_or(0.0))),
+                Some("stop") => {
+                    cancel.store(true, Ordering::SeqCst);
+                    // A paused sync must notice the stop too.
+                    throttle.set_paused(false);
+                }
                 _ => {}
             }
         }
@@ -396,6 +406,7 @@ async fn run() -> Result<i32> {
         excludes,
         max_mbps,
         control_stdin,
+        no_auto_tune,
         resumable_threshold_mib,
         chunk_mib,
         manifest,
@@ -417,9 +428,11 @@ async fn run() -> Result<i32> {
         .iter()
         .map(|pattern| Regex::new(pattern).with_context(|| format!("invalid --exclude regex: {pattern}")))
         .collect::<Result<_>>()?;
+    opts.auto_tune = !no_auto_tune;
     opts.throttle = Arc::new(Throttle::from_mbps(max_mbps));
+    let cancel = Arc::new(AtomicBool::new(false));
     if control_stdin {
-        read_controls(opts.throttle.clone());
+        read_controls(opts.throttle.clone(), cancel.clone());
     }
     if std::env::var_os("JETSTREAM_TRANSFER_FAST_RETRY").is_some() {
         opts.retry_base = Duration::from_millis(50);
@@ -441,7 +454,6 @@ async fn run() -> Result<i32> {
     });
 
     // Ctrl+C / SIGTERM: stop starting new files; large uploads keep their session for next time.
-    let cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {

@@ -34,6 +34,16 @@
   };
 
   let activity = $state(null);
+  /** What the engine is doing, for the parts of a sync that aren't uploading yet. */
+  let phaseText = $derived.by(() => {
+    const c = activity?.checking || {};
+    if (activity?.phase === 'scanning') return 'Looking through the folder…';
+    if (activity?.phase === 'listing') return `Checking what's already in the cloud${c.listed_objects ? `: ${count(c.listed_objects)} objects listed` : ''}…`;
+    if (activity?.phase === 'uploading' && c.files_total && c.hashed_files < c.files_total) {
+      return `Reading files to check them: ${count(c.hashed_files)} of ${count(c.files_total)}`;
+    }
+    return '';
+  });
   let isRunning = $derived(job.status === 'running');
 
   // While running, poll which files are moving right now.
@@ -106,6 +116,7 @@
           {bytes(job.bytes_uploaded)} of {bytes(job.total_size_bytes)} · {count(job.files_uploaded)} of {count(job.total_files)} files
           {#if speed > 0 && !activity?.paused}· {bytes(speed)}/s{/if}
         </div>
+        {#if phaseText}<div class="phase">{phaseText}</div>{/if}
       </div>
     {/if}
 
@@ -115,7 +126,12 @@
           <div class="label">Uploading now</div>
           <ul>
             {#each activity.in_flight.slice(0, 6) as f (f.path)}
-              <li><span class="mono truncate start" title={f.path}><bdi>{f.path}</bdi></span><span class="muted">{f.bytes ? bytes(f.bytes) : ''}{f.seconds >= 5 ? ` · ${duration(f.seconds)}` : ''}</span></li>
+              <li class:retrying={f.retry}>
+                <span class="mono truncate start" title={f.retry ? `${f.path}: ${f.retry.error}` : f.path}><bdi>{f.path}</bdi></span>
+                <span class="muted">
+                  {#if f.retry}retrying {f.retry.attempt}/{f.retry.max_attempts}{#if /stalled/.test(f.retry.error)} · connection stalled{/if}{:else}{f.bytes ? bytes(f.bytes) : ''}{f.seconds >= 5 ? ` · ${duration(f.seconds)}` : ''}{/if}
+                </span>
+              </li>
             {/each}
           </ul>
         {/if}
@@ -285,6 +301,13 @@
   }
   .files li .muted {
     flex-shrink: 0;
+  }
+  .phase {
+    font-size: 12.5px;
+    color: var(--text-2);
+  }
+  .files li.retrying .muted {
+    color: var(--warning);
   }
   .files li.failed .mono,
   .files li.failed .muted {

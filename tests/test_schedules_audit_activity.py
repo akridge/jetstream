@@ -283,11 +283,12 @@ def test_transfer_settings_round_trip(tmp_path, monkeypatch):
     from jetstream import transfer_settings
 
     monkeypatch.setenv("JETSTREAM_DATA_DIR", str(tmp_path))
-    assert transfer_settings.load() == {"max_mbps": 0.0}
-    assert transfer_settings.save({"max_mbps": 25, "unknown": 1}) == {"max_mbps": 25.0}
-    assert transfer_settings.load() == {"max_mbps": 25.0}
+    assert transfer_settings.load() == {"max_mbps": 0.0, "parallel_jobs": 1}
+    assert transfer_settings.save({"max_mbps": 25, "unknown": 1}) == {"max_mbps": 25.0, "parallel_jobs": 1}
+    assert transfer_settings.save({"parallel_jobs": 9})["parallel_jobs"] == 4
+    assert transfer_settings.load() == {"max_mbps": 25.0, "parallel_jobs": 4}
     (tmp_path / "transfer-settings.json").write_text("not json")
-    assert transfer_settings.load() == {"max_mbps": 0.0}
+    assert transfer_settings.load() == {"max_mbps": 0.0, "parallel_jobs": 1}
 
 
 def test_engine_jobs_can_be_paused_resumed_and_limited(tmp_path, monkeypatch):
@@ -326,3 +327,105 @@ def test_pause_endpoint_refuses_jobs_it_cannot_pause(db_env):
     with TestClient(app) as client:
         response = client.post("/api/uploads/not-running/pause")
     assert response.status_code == 409 and "JetStream engine" in response.json()["detail"]
+
+
+# ----- split by subfolder ---------------------------------------------------------------
+
+def _tree(root):
+    for rel, size in [("top.txt", 5), ("photos/a.jpg", 10), ("photos/deep/b.jpg", 20), ("video/v.mp4", 30), ("empty/.keep_dir", 0)]:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * size)
+    (root / "empty" / ".keep_dir").unlink()  # an empty subfolder
+
+
+def test_split_upload_creates_a_job_per_subfolder_plus_root_files(db_env, monkeypatch):
+    from jetstream.routers import uploads as uploads_router
+
+    started = []
+    monkeypatch.setattr(uploads_router, "start_queued_jobs", lambda: started.append(True) or 0)
+    source = db_env / "site"
+    _tree(source)
+    app = FastAPI()
+    app.include_router(uploads.router, prefix="/api/uploads")
+    with TestClient(app) as client:
+        response = client.post("/api/uploads/", json={
+            "source_path": str(source), "gcs_destination": "bucket/backups/site", "split_by_folder": True,
+            "upload_tool": "jetstream",
+        })
+        assert response.status_code == 200, response.text
+        assert response.json()["job_id"].startswith("group:")
+        db = database.SessionLocal()
+        jobs = sorted(db.query(UploadJob).all(), key=lambda j: j.destination_path)
+        db.close()
+        parts = [(j.destination_path, j.recursive, j.total_files, j.filters["group_part"], j.status) for j in jobs]
+        assert parts == [
+            ("backups/site", False, 1, "", "queued"),  # files directly in the folder
+            ("backups/site/photos", True, 2, "photos", "queued"),
+            ("backups/site/video", True, 1, "video", "queued"),
+        ]
+        group = jobs[0].filters["group"]
+        assert group["source_path"] == str(source) and group["parts"] == 3 and group["destination"] == "bucket/backups/site"
+        assert all(j.filters["group"]["id"] == group["id"] for j in jobs)
+        assert started, "queued jobs are started right away"
+
+        # Cancel the whole group, then retry what didn't finish.
+        services.queue_manager.queue.clear()
+        cancelled = client.post(f"/api/uploads/groups/{group['id']}/cancel").json()
+        assert cancelled["cancelled"] == 3
+        retried = client.post(f"/api/uploads/groups/{group['id']}/retry-failed").json()
+        assert retried["retried"] == 3
+        assert len(services.queue_manager.queue) == 3
+        assert client.post("/api/uploads/groups/nope/cancel").status_code == 404
+
+        empty = db_env / "nothing"
+        (empty / "sub").mkdir(parents=True)
+        bad = client.post("/api/uploads/", json={"source_path": str(empty), "gcs_destination": "bucket/x", "split_by_folder": True})
+        assert bad.status_code == 400 and "Nothing to upload" in bad.json()["detail"]
+
+
+def test_scheduled_split_sync_queues_the_group_and_blocks_overlap(db_env):
+    source = db_env / "site"
+    _tree(source)
+    preset_id = make_preset(source, {"mode": "hourly", "every_hours": 1}, split_by_folder=True)
+    started = run_due_presets()
+    assert len(started) == 1
+    db = database.SessionLocal()
+    jobs = db.query(UploadJob).all()
+    db.close()
+    assert len(jobs) == 3 and all(j.filters["preset_id"] == preset_id for j in jobs)
+    assert all(j.filters["trigger"] == "schedule" for j in jobs)
+    assert len(services.queue_manager.queue) == 3
+
+    db = database.SessionLocal()
+    db.query(SyncPreset).filter(SyncPreset.preset_id == preset_id).update(
+        {"next_run_at": datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)}
+    )
+    db.commit()
+    db.close()
+    assert run_due_presets() == [], "a running split sync isn't started twice"
+
+
+def test_cancelled_jobs_stay_cancelled_and_engine_stop_is_graceful(db_env, monkeypatch):
+    import io
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.killed = False
+
+        def wait(self, timeout=None):
+            return 3  # exited on its own after "stop"
+
+        def kill(self):
+            self.killed = True
+
+    service = services.UploadService()
+    process = FakeProcess()
+    service.active_uploads["job-s"] = process
+    service.engine_jobs.add("job-s")
+    assert service.cancel_upload("job-s")
+    assert process.stdin.getvalue().strip() == '{"cmd": "stop"}'
+    import time
+    time.sleep(0.1)
+    assert not process.killed

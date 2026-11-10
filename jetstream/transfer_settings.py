@@ -6,7 +6,7 @@ from typing import Dict
 
 from .config import user_data_dir
 
-DEFAULTS: Dict = {"max_mbps": 0.0}
+DEFAULTS: Dict = {"max_mbps": 0.0, "parallel_jobs": 1}
 _lock = threading.Lock()
 
 
@@ -27,7 +27,16 @@ def load() -> Dict:
         merged["max_mbps"] = max(0.0, float(merged["max_mbps"]))
     except (TypeError, ValueError):
         merged["max_mbps"] = 0.0
+    merged["parallel_jobs"] = _clamp_jobs(merged.get("parallel_jobs"))
     return merged
+
+
+def _clamp_jobs(value) -> int:
+    """Uploads (folders) running at once: 1–4."""
+    try:
+        return min(4, max(1, int(value)))
+    except (TypeError, ValueError):
+        return 1
 
 
 def save(changes: Dict) -> Dict:
@@ -35,6 +44,7 @@ def save(changes: Dict) -> Dict:
         current = load()
         current.update({k: v for k, v in changes.items() if k in DEFAULTS})
         current["max_mbps"] = max(0.0, float(current["max_mbps"] or 0))
+        current["parallel_jobs"] = _clamp_jobs(current.get("parallel_jobs"))
         path = _path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")

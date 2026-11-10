@@ -20,6 +20,19 @@ from ..services import (
 
 router = APIRouter()
 
+
+def start_queued_jobs() -> int:
+    """Start queued jobs while there are free slots (the queue limit is "folders at once")."""
+    import asyncio
+
+    free = max(0, queue_manager.max_concurrent - len(queue_manager.running_jobs))
+    started = 0
+    for job_id in list(queue_manager.queue)[:free]:
+        asyncio.create_task(process_upload_job(job_id, ""))
+        started += 1
+    return started
+
+
 async def process_upload_job(job_id: str, db_path: str):
     """Background task to process upload job."""
     from .. import database
@@ -72,8 +85,10 @@ async def process_upload_job(job_id: str, db_path: str):
         # Pick up progress written by the callback's own sessions
         db.refresh(job)
 
-        # Update job status
-        if success:
+        # Update job status (a job cancelled while running stays cancelled: no auto-retry)
+        if job.status == "cancelled":
+            pass
+        elif success:
             job.status = "completed"
             job.files_uploaded = job.total_files
             job.bytes_uploaded = job.total_size_bytes
@@ -147,91 +162,35 @@ async def create_upload(
     )
     analyzer = FolderAnalyzer(file_filter)
     
-    try:
-        stats = analyzer.analyze(request.source_path, recursive=request.recursive)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    if not request.split_by_folder:
+        try:
+            stats = analyzer.analyze(request.source_path, recursive=request.recursive)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
     
-    created_jobs = []
-    
-    # Check if we should split by folder
-    if request.split_by_folder and stats['subfolder_count'] > 0:
-        # Create separate job for each subfolder
-        subfolders = analyzer.analyze_subfolders(request.source_path)
-        
-        for subfolder in subfolders:
-            job_id = str(uuid.uuid4())
-            friendly_name = generate_friendly_job_name(subfolder['path'])
-            
-            # Construct subfolder destination path
-            subfolder_dest_path = request.destination_path or ""
-            if subfolder_dest_path:
-                subfolder_dest_path = f"{subfolder_dest_path}/{subfolder['name']}"
-            else:
-                subfolder_dest_path = subfolder['name']
-            
-            # Create log path using friendly name
-            log_dir = os.path.join(os.getcwd(), "logs")
-            log_path = os.path.join(log_dir, f"{friendly_name}.log")
-            
-            # Create job in database
-            job = UploadJob(
-                job_id=job_id,
-                friendly_name=friendly_name,
-                status="pending",
-                source_path=subfolder['path'],
-                destination_bucket=request.destination_bucket,
-                destination_path=subfolder_dest_path,
-                total_files=subfolder['total_files'],
-                total_size_bytes=subfolder['total_size_bytes'],
-                dry_run=request.dry_run,
-                recursive=request.recursive,
-                threads=request.threads,
-                split_by_folder=False,
-                upload_tool=request.upload_tool,
-                scheduled_for=request.scheduled_for,
-                log_path=log_path,
-                filters={
-                    'exclude_patterns': request.exclude_patterns,
-                    'exclude_folders': request.exclude_folders
-                },
-                no_clobber=request.no_clobber,
-                auto_retry=request.auto_retry,
-                auto_retry_delay_minutes=request.auto_retry_delay_minutes,
-                max_auto_retries=request.max_auto_retries,
-            )
-            db.add(job)
-            db.commit()
-            db.refresh(job)
-            notify_job(job_id)
-            
-            # Check if job is scheduled for later
-            if request.scheduled_for and request.scheduled_for > datetime.now(timezone.utc):
-                # Set status to scheduled - will be picked up by scheduler
-                job.status = "scheduled"
-                db.commit()
-            else:
-                # Add to background tasks for immediate processing
-                background_tasks.add_task(process_upload_job, job_id, "")
-            
-            created_jobs.append(job)
-        
-        # Determine response status and message
-        if request.scheduled_for and request.scheduled_for > datetime.now(timezone.utc):
-            status = JobStatus.SCHEDULED
-            message = f"Created {len(created_jobs)} upload jobs (one per subfolder), scheduled for {request.scheduled_for.strftime('%Y-%m-%d %H:%M:%S')} UTC"
-        else:
-            status = JobStatus.PENDING
-            message = f"Created {len(created_jobs)} upload jobs (one per subfolder)"
-        
+    # One job per subfolder (plus one for files directly in the folder), grouped.
+    if request.split_by_folder:
+        from ..split import create_split_jobs
+
+        try:
+            jobs = create_split_jobs(db, request)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        scheduled = jobs[0].status == "scheduled"
+        if not scheduled:
+            for job in jobs:
+                queue_manager.add_to_queue(job.job_id)
+            start_queued_jobs()
+        group = jobs[0].filters["group"]
+        when = f", scheduled for {request.scheduled_for.strftime('%Y-%m-%d %H:%M:%S')} UTC" if scheduled else ""
         return UploadResponse(
-            job_id=f"split_{len(created_jobs)}_jobs",
-            status=status,
-            message=message,
+            job_id=f"group:{group['id']}",
+            status=JobStatus.SCHEDULED if scheduled else JobStatus.QUEUED,
+            message=f"Created {len(jobs)} upload jobs (one per subfolder){when}",
             source_path=request.source_path,
             destination=f"gs://{request.destination_bucket}/{request.destination_path or ''}"
         )
-    
+
     else:
         # Create single job
         job_id = str(uuid.uuid4())
@@ -425,6 +384,58 @@ async def cancel_upload(job_id: str, db: Session = Depends(get_db)):
     queue_manager.complete_job(job_id)
     
     return {"message": "Job cancelled successfully", "job_id": job_id}
+
+@router.post("/groups/{group_id}/cancel")
+async def cancel_group(group_id: str, db: Session = Depends(get_db)):
+    """Cancel every unfinished job of a split upload."""
+    from ..split import group_jobs
+
+    jobs = group_jobs(db, group_id)
+    if not jobs:
+        raise HTTPException(status_code=404, detail="Upload group not found")
+    cancelled = 0
+    for job in jobs:
+        if job.status in ("running", "queued", "pending", "scheduled"):
+            if job.status == "running":
+                upload_service.cancel_upload(job.job_id)
+            job.status = "cancelled"
+            job.completed_at = datetime.now(timezone.utc)
+            queue_manager.complete_job(job.job_id)
+            if job.job_id in queue_manager.queue:
+                queue_manager.queue.remove(job.job_id)
+            cancelled += 1
+    db.commit()
+    for job in jobs:
+        notify_job(job.job_id)
+    return {"group_id": group_id, "cancelled": cancelled}
+
+
+@router.post("/groups/{group_id}/retry-failed")
+async def retry_failed_in_group(group_id: str, db: Session = Depends(get_db)):
+    """Run the failed or cancelled subfolders of a split upload again."""
+    from ..split import group_jobs
+
+    jobs = group_jobs(db, group_id)
+    if not jobs:
+        raise HTTPException(status_code=404, detail="Upload group not found")
+    retried = []
+    for job in jobs:
+        if job.status in ("failed", "cancelled"):
+            job.status = "queued"
+            job.error_message = None
+            job.started_at = None
+            job.completed_at = None
+            job.files_uploaded = 0
+            job.bytes_uploaded = 0
+            job.upload_output = None
+            retried.append(job.job_id)
+    db.commit()
+    for job_id in retried:
+        queue_manager.add_to_queue(job_id)
+        notify_job(job_id)
+    start_queued_jobs()
+    return {"group_id": group_id, "retried": len(retried)}
+
 
 @router.post("/{job_id}/retry")
 async def retry_upload(

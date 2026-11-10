@@ -80,6 +80,8 @@ class TransferSettings(BaseModel):
     """Upload speed limit in megabits per second (0 = no limit). Applies to the JetStream
     engine and to transfers in the desktop app; gcloud uploads aren't limited."""
     max_mbps: float = 0.0
+    #: Uploads (e.g. subfolders of a split upload) running at once, 1–4.
+    parallel_jobs: Optional[int] = None
 
 
 @router.get("/transfer")
@@ -94,6 +96,14 @@ async def put_transfer_settings(body: TransferSettings) -> dict:
     from ..services import upload_service
     from ..transfer_settings import save
 
-    saved = save({"max_mbps": max(0.0, body.max_mbps)})
+    from ..services import queue_manager
+    from .uploads import start_queued_jobs
+
+    changes = {"max_mbps": max(0.0, body.max_mbps)}
+    if body.parallel_jobs is not None:
+        changes["parallel_jobs"] = body.parallel_jobs
+    saved = save(changes)
     saved["applied_to_running"] = upload_service.apply_speed_limit(saved["max_mbps"])
+    queue_manager.max_concurrent = saved["parallel_jobs"]
+    start_queued_jobs()
     return saved

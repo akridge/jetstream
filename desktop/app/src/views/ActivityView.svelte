@@ -3,7 +3,8 @@
   import Inbox from '@lucide/svelte/icons/inbox';
   import JobRow from '../components/JobRow.svelte';
   import JobDrawer from '../components/JobDrawer.svelte';
-  import { app, ACTIVE } from '../lib/state.svelte.js';
+  import { SvelteSet } from 'svelte/reactivity';
+  import { app, ACTIVE, collapseRuns } from '../lib/state.svelte.js';
 
   const FILTERS = [
     { id: 'all', label: 'All' },
@@ -31,6 +32,9 @@
       return true;
     }),
   );
+  // Split uploads show as one row that opens into their subfolders.
+  let runs = $derived(collapseRuns(filtered));
+  const expanded = new SvelteSet();
   let selected = $derived(app.selectedJobId ? app.jobs[app.selectedJobId] : null);
   let counts = $derived({
     active: app.jobList.filter((j) => ACTIVE.has(j.status)).length,
@@ -64,8 +68,23 @@
 
   <div class="split">
     <div class="list card">
-      {#each filtered as job (job.job_id)}
-        <JobRow {job} selected={app.selectedJobId === job.job_id} onselect={(id) => (app.selectedJobId = id)} />
+      {#each runs as job (job.group ? `group-${job.group.id}` : job.job_id)}
+        {#if job.group}
+          <JobRow
+            {job}
+            selected={!expanded.has(job.group.id) && job.group.jobs.some((j) => j.job_id === app.selectedJobId)}
+            onselect={(id) => (app.selectedJobId = id)}
+            expanded={expanded.has(job.group.id)}
+            ontoggle={() => (expanded.has(job.group.id) ? expanded.delete(job.group.id) : expanded.add(job.group.id))}
+          />
+          {#if expanded.has(job.group.id)}
+            {#each [...job.group.jobs].sort((a, b) => (a.filters.group_part || '').localeCompare(b.filters.group_part || '')) as part (part.job_id)}
+              <JobRow job={part} child selected={app.selectedJobId === part.job_id} onselect={(id) => (app.selectedJobId = id)} />
+            {/each}
+          {/if}
+        {:else}
+          <JobRow {job} selected={app.selectedJobId === job.job_id} onselect={(id) => (app.selectedJobId = id)} />
+        {/if}
       {:else}
         <div class="empty">
           <Inbox size={30} />

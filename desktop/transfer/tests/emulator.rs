@@ -523,3 +523,121 @@ async fn download_folder_and_files_then_upload_files_back() {
     let twice = localops::upload_files(&env.client, &files, "bucket", "incoming/", &Throttle::default(), &OpProgress::default()).await.unwrap();
     assert_eq!((twice.done, twice.skipped), (0, 2));
 }
+
+// ----- progress across stop/start, and speed -------------------------------------------
+
+mod resume_and_speed {
+    use super::*;
+    use jetstream_transfer::gcs::UploadExtras;
+
+    fn manifest_at(env: &Env, name: &str) -> Arc<Manifest> {
+        Arc::new(Manifest::open(&env.dir.path().join(name)).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_restart_with_a_partial_manifest_uploads_nothing_twice_and_reads_nothing() {
+        let Some(env) = Env::new().await else { return };
+        for i in 0..6 {
+            env.write(&format!("photos/{i}.jpg"), &big(3000 + i, i as u8));
+        }
+        env.write("top.txt", b"hello");
+        let (first, _) = env.run(env.options()).await;
+        assert_eq!(first.uploaded, 7);
+
+        // A stopped sync: the manifest knows only one file (e.g. the engine was killed).
+        let partial = manifest_at(&env, "partial.db");
+        partial.record("gs://bucket/data/", "top.txt", &FileRecord { size: 5, mtime_ns: mtime_ns(&env.src().join("top.txt")), crc32c: crc32c::crc32c(b"hello") }, None).unwrap();
+        let (again, events) = env.run_with_manifest(env.options(), partial).await;
+        assert_eq!((again.uploaded, again.unchanged), (0, 1), "{again:?}");
+        assert_eq!((again.already_in_cloud, again.matched_by_time, again.hashed_files), (6, 6, 0), "recognised by size + time");
+        assert!(again.listed_objects.is_some());
+        let phases: Vec<&str> = events.iter().filter_map(|e| match e { Event::Phase { phase } => Some(*phase), _ => None }).collect();
+        assert_eq!(phases, ["scanning", "listing", "uploading"]);
+        let plans: Vec<(bool, u64)> = events
+            .iter()
+            .filter_map(|e| match e { Event::Plan { estimate, unchanged, .. } => Some((*estimate, *unchanged)), _ => None })
+            .collect();
+        assert_eq!(plans, [(true, 1), (false, 7)], "early estimate, then refined after listing");
+    }
+
+    #[tokio::test]
+    async fn gcloud_file_times_avoid_reading_files_and_old_uploads_are_hashed() {
+        let Some(env) = Env::new().await else { return };
+        env.write("a/with_time.bin", &big(5000, 1));
+        env.write("a/no_time.bin", &big(6000, 2));
+        // Uploaded earlier by another tool: one with gcloud's file-time metadata, one without.
+        let with = big(5000, 1);
+        let extras = UploadExtras { mtime_secs: Some(mtime_ns(&env.src().join("a/with_time.bin")) / 1_000_000_000), live: None };
+        env.client.upload_multipart_with("bucket", "data/a/with_time.bin", with.clone(), crc32c::crc32c(&with), false, &extras).await.unwrap();
+        let without = big(6000, 2);
+        env.client.upload_multipart("bucket", "data/a/no_time.bin", without.clone(), crc32c::crc32c(&without), false).await.unwrap();
+
+        let (summary, _) = env.run(env.options()).await;
+        assert_eq!((summary.uploaded, summary.already_in_cloud, summary.matched_by_time), (0, 2, 1));
+        assert_eq!(summary.hashed_files, 1, "only the object without a file time is read");
+
+        // The engine records file times too, so gcloud (and a fresh manifest) recognise its uploads.
+        env.write("b/new.bin", &big(700, 3));
+        env.run(env.options()).await;
+        let raw = env.client.get_object_raw("bucket", "data/b/new.bin").await.unwrap().unwrap();
+        assert_eq!(
+            raw["metadata"]["goog-reserved-file-mtime"].as_str().unwrap(),
+            (mtime_ns(&env.src().join("b/new.bin")) / 1_000_000_000).to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subfolder_sync_reuses_what_the_whole_folder_sync_recorded() {
+        let Some(env) = Env::new().await else { return };
+        env.write("photos/a.jpg", &big(100, 1));
+        env.write("photos/b.jpg", &big(200, 2));
+        env.write("video/v.mp4", &big(300, 3));
+        env.run(env.options()).await;
+
+        let mut sub = SyncOptions::new(env.src().join("photos"), "gs://bucket/data/photos").unwrap();
+        sub.retry_base = Duration::from_millis(20);
+        let (summary, _) = env.run(sub).await;
+        assert_eq!((summary.unchanged, summary.uploaded, summary.listed_objects), (2, 0, None), "no listing, no reading");
+    }
+
+    #[tokio::test]
+    async fn stopping_keeps_what_finished_and_the_next_run_continues() {
+        let Some(env) = Env::new().await else { return };
+        for i in 0..5 {
+            env.write(&format!("f{i}.bin"), &big(1000, i as u8));
+        }
+        let mut opts = env.options();
+        opts.concurrency = 1;
+        opts.hash_concurrency = 1;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = cancel.clone();
+        let seen = Arc::new(Mutex::new(0));
+        let counter = seen.clone();
+        let summary = sync(
+            env.client.clone(),
+            env.manifest.clone(),
+            opts,
+            "test",
+            Arc::new(move |e| {
+                if matches!(e, Event::FileUploaded { .. }) {
+                    *counter.lock().unwrap() += 1;
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst); // "stop" after the first file
+                }
+            }),
+            cancel,
+        )
+        .await
+        .unwrap();
+        assert!(summary.cancelled);
+        let first = summary.uploaded;
+        assert!((1..5).contains(&first), "{first}");
+        assert_eq!(env.manifest.count("gs://bucket/data/").unwrap(), first);
+
+        let (rest, _) = env.run(env.options()).await;
+        assert_eq!((rest.unchanged, rest.uploaded), (first, 5 - first));
+    }
+
+    fn mtime_ns(path: &Path) -> i64 {
+        std::fs::metadata(path).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as i64
+    }
+}

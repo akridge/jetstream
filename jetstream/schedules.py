@@ -115,6 +115,15 @@ def create_preset_job(db, preset: SyncPreset, dry_run: bool) -> UploadJob:
         notify_job(job_id)
         return job
 
+    if options.get("split_by_folder"):
+        from .split import create_split_jobs
+
+        request.split_by_folder = True
+        jobs = create_split_jobs(db, request, extra_filters=filters, name_prefix="scheduled-")
+        for job in jobs:
+            queue_manager.add_to_queue(job.job_id)
+        return jobs[0]
+
     stats = FolderAnalyzer(
         FileFilter(include_patterns=None, exclude_patterns=request.exclude_patterns, exclude_folders=request.exclude_folders)
     ).analyze(request.source_path, recursive=request.recursive)
@@ -151,7 +160,15 @@ def _has_active_job(db, preset: SyncPreset) -> bool:
         UploadJob.destination_bucket == bucket,
         UploadJob.status.in_(ACTIVE_STATUSES),
     ).all()
-    return any((j.destination_path or "").strip("/") == path.strip("/") for j in jobs)
+    if any((j.destination_path or "").strip("/") == path.strip("/") for j in jobs):
+        return True
+    # A split upload of this folder: its jobs have the subfolders as their source.
+    from sqlalchemy import func
+
+    return db.query(UploadJob).filter(
+        func.json_extract(UploadJob.filters, "$.group.source_path") == preset.source_path,
+        UploadJob.status.in_(ACTIVE_STATUSES),
+    ).first() is not None
 
 
 def run_due_presets(now: Optional[datetime] = None) -> List[str]:

@@ -4,8 +4,10 @@
 //! Written against the documented REST API (rather than a higher-level SDK) so that a
 //! resumable session URI can be saved and continued after the app restarts.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use base64::engine::general_purpose::STANDARD as B64;
@@ -30,6 +32,16 @@ pub fn encode(component: &str) -> String {
 /// crc32c in the form Cloud Storage uses: base64 of the big-endian 4 bytes.
 pub fn crc32c_b64(crc: u32) -> String {
     B64.encode(crc.to_be_bytes())
+}
+
+/// Upload metadata: name, checksum (verified by Cloud Storage) and, when known, the source
+/// file's modified time the way `gcloud storage rsync` records it.
+fn object_metadata(name: &str, crc: u32, mtime_secs: Option<i64>) -> serde_json::Value {
+    let mut metadata = serde_json::json!({ "name": name, "crc32c": crc32c_b64(crc) });
+    if let Some(mtime) = mtime_secs {
+        metadata["metadata"] = serde_json::json!({ FILE_MTIME_KEY: mtime.to_string() });
+    }
+    metadata
 }
 
 pub fn parse_crc32c_b64(value: &str) -> Option<u32> {
@@ -92,7 +104,45 @@ pub struct ObjectInfo {
     pub event_based_hold: Option<bool>,
     #[serde(default, rename(deserialize = "kmsKeyName"))]
     pub kms_key_name: Option<String>,
+    #[serde(default, rename(deserialize = "md5Hash"), skip_serializing_if = "Option::is_none")]
+    pub md5_hash: Option<String>,
+    /// Custom metadata; `goog-reserved-file-mtime` holds the source file's modified time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
 }
+
+/// Custom metadata key `gcloud storage rsync` uses for a file's modified time (seconds).
+pub const FILE_MTIME_KEY: &str = "goog-reserved-file-mtime";
+
+impl ObjectInfo {
+    /// The source file's modified time (seconds since the epoch), if the uploader recorded it.
+    pub fn file_mtime(&self) -> Option<i64> {
+        self.metadata.as_ref()?.get(FILE_MTIME_KEY)?.trim().parse().ok()
+    }
+}
+
+/// Options for an upload request.
+#[derive(Default, Clone)]
+pub struct UploadExtras {
+    /// Source file modified time (seconds), stored as `goog-reserved-file-mtime`.
+    pub mtime_secs: Option<i64>,
+    /// Incremented as body bytes are handed to the network, for live progress. Bytes counted
+    /// for a request that then fails are subtracted again.
+    pub live: Option<Arc<AtomicU64>>,
+}
+
+/// No body bytes moving for this long means the connection has stalled: the request is
+/// abandoned and retried (resumable uploads continue from what the server kept).
+pub fn stall_timeout() -> Duration {
+    std::env::var("JETSTREAM_TRANSFER_STALL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(60))
+}
+
+/// Body pieces handed to the network at a time; each one counts as progress.
+const BODY_PIECE: usize = 256 * 1024;
 
 /// The bucket settings that decide how the file manager behaves.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -178,6 +228,9 @@ impl GcsClient {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(20))
             .read_timeout(Duration::from_secs(120))
+            // Notice dead connections (NAT timeouts, dropped Wi-Fi) instead of waiting forever.
+            .tcp_keepalive(Duration::from_secs(30))
+            .pool_idle_timeout(Duration::from_secs(60))
             .pool_max_idle_per_host(128)
             .user_agent(concat!("jetstream-transfer/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -205,6 +258,58 @@ impl GcsClient {
             return Err(GcsError::Retryable("access token rejected (401); refreshing".into()));
         }
         Ok(response)
+    }
+
+    /// Send `builder` with `data` as the body, piece by piece. Gives up with a retryable error if
+    /// no piece moves for `stall_timeout()` while the body is going out.
+    async fn send_body(&self, builder: reqwest::RequestBuilder, data: Vec<u8>, live: Option<&Arc<AtomicU64>>) -> Result<Response, GcsError> {
+        let total = data.len();
+        let bytes = bytes::Bytes::from(data);
+        let sent = Arc::new(AtomicU64::new(0));
+        let finished = Arc::new(AtomicBool::new(total == 0));
+        let started = Instant::now();
+        let last_move_ms = Arc::new(AtomicU64::new(0));
+        let pieces: Vec<bytes::Bytes> = (0..total).step_by(BODY_PIECE).map(|at| bytes.slice(at..(at + BODY_PIECE).min(total))).collect();
+        let (s, f, l, live_counter) = (sent.clone(), finished.clone(), last_move_ms.clone(), live.cloned());
+        let body = futures::StreamExt::map(futures::stream::iter(pieces), move |piece| {
+            let n = piece.len() as u64;
+            let done = s.fetch_add(n, Ordering::Relaxed) + n;
+            if let Some(c) = &live_counter {
+                c.fetch_add(n, Ordering::Relaxed);
+            }
+            l.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+            if done as usize >= total {
+                f.store(true, Ordering::Relaxed);
+            }
+            Ok::<_, std::io::Error>(piece)
+        });
+        let request = builder.header(CONTENT_LENGTH, total.to_string()).body(reqwest::Body::wrap_stream(body));
+
+        let stall = stall_timeout();
+        let watchdog = async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if finished.load(Ordering::Relaxed) {
+                    // The response is covered by the client's read timeout.
+                    std::future::pending::<()>().await;
+                }
+                let idle = started.elapsed().saturating_sub(Duration::from_millis(last_move_ms.load(Ordering::Relaxed)));
+                if idle >= stall {
+                    return;
+                }
+            }
+        };
+        let result = tokio::select! {
+            result = self.send(request) => result,
+            _ = watchdog => Err(GcsError::Retryable(format!(
+                "upload stalled (nothing sent for {}s); retrying", stall.as_secs()
+            ))),
+        };
+        // Only finished requests keep their bytes in the live count; the caller adds them for real.
+        if let Some(live) = live {
+            live.fetch_sub(sent.load(Ordering::Relaxed).min(live.load(Ordering::Relaxed)), Ordering::Relaxed);
+        }
+        result
     }
 
     async fn error_for(response: Response) -> GcsError {
@@ -242,8 +347,20 @@ impl GcsClient {
         crc: u32,
         no_clobber: bool,
     ) -> Result<ObjectInfo, GcsError> {
+        self.upload_multipart_with(bucket, name, data, crc, no_clobber, &UploadExtras::default()).await
+    }
+
+    pub async fn upload_multipart_with(
+        &self,
+        bucket: &str,
+        name: &str,
+        data: Vec<u8>,
+        crc: u32,
+        no_clobber: bool,
+        extras: &UploadExtras,
+    ) -> Result<ObjectInfo, GcsError> {
         let boundary = format!("jetstream-{:016x}", rand::random::<u64>());
-        let metadata = serde_json::json!({ "name": name, "crc32c": crc32c_b64(crc) });
+        let metadata = object_metadata(name, crc, extras.mtime_secs);
         let mut body = Vec::with_capacity(data.len() + 512);
         body.extend_from_slice(
             format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n")
@@ -256,14 +373,8 @@ impl GcsClient {
         if no_clobber {
             url.push_str("&ifGenerationMatch=0");
         }
-        let response = self
-            .send(
-                self.http
-                    .post(url)
-                    .header(CONTENT_TYPE, format!("multipart/related; boundary={boundary}"))
-                    .body(body),
-            )
-            .await?;
+        let request = self.http.post(url).header(CONTENT_TYPE, format!("multipart/related; boundary={boundary}"));
+        let response = self.send_body(request, body, extras.live.as_ref()).await?;
         if !response.status().is_success() {
             return Err(Self::error_for(response).await);
         }
@@ -281,6 +392,18 @@ impl GcsClient {
         crc: u32,
         no_clobber: bool,
     ) -> Result<String, GcsError> {
+        self.start_resumable_with(bucket, name, size, crc, no_clobber, None).await
+    }
+
+    pub async fn start_resumable_with(
+        &self,
+        bucket: &str,
+        name: &str,
+        size: u64,
+        crc: u32,
+        no_clobber: bool,
+        mtime_secs: Option<i64>,
+    ) -> Result<String, GcsError> {
         let mut url = format!(
             "{}/upload/storage/v1/b/{}/o?uploadType=resumable&name={}",
             self.base,
@@ -290,11 +413,12 @@ impl GcsClient {
         if no_clobber {
             url.push_str("&ifGenerationMatch=0");
         }
-        let metadata = serde_json::json!({ "name": name, "crc32c": crc32c_b64(crc) });
+        let metadata = object_metadata(name, crc, mtime_secs);
         let response = self
             .send(
                 self.http
                     .post(url)
+                    .timeout(Duration::from_secs(120))
                     .header(CONTENT_TYPE, "application/json; charset=UTF-8")
                     .header("X-Upload-Content-Type", "application/octet-stream")
                     .header("X-Upload-Content-Length", size.to_string())
@@ -349,6 +473,7 @@ impl GcsClient {
             .send(
                 self.http
                     .put(session)
+                    .timeout(Duration::from_secs(120))
                     .header(CONTENT_RANGE, format!("bytes */{size}"))
                     .header(CONTENT_LENGTH, "0"),
             )
@@ -365,15 +490,21 @@ impl GcsClient {
         size: u64,
         crc: u32,
     ) -> Result<ResumableStatus, GcsError> {
+        self.put_chunk_with(session, offset, data, size, crc, None).await
+    }
+
+    pub async fn put_chunk_with(
+        &self,
+        session: &str,
+        offset: u64,
+        data: Vec<u8>,
+        size: u64,
+        crc: u32,
+        live: Option<&Arc<AtomicU64>>,
+    ) -> Result<ResumableStatus, GcsError> {
         let end = offset + data.len() as u64 - 1;
-        let response = self
-            .send(
-                self.http
-                    .put(session)
-                    .header(CONTENT_RANGE, format!("bytes {offset}-{end}/{size}"))
-                    .body(data),
-            )
-            .await?;
+        let request = self.http.put(session).header(CONTENT_RANGE, format!("bytes {offset}-{end}/{size}"));
+        let response = self.send_body(request, data, live).await?;
         Self::resumable_response(response, size, crc).await
     }
 
@@ -466,6 +597,42 @@ impl GcsClient {
         }
         let page: RawPage = response.json().await?;
         Ok((page.items, page.next_page_token.filter(|t| !t.is_empty())))
+    }
+
+    /// One page of one folder level (delimiter "/"): objects as raw JSON with `item_fields`,
+    /// subfolder prefixes, and the next page token.
+    pub async fn list_level(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        page_token: Option<&str>,
+        item_fields: &str,
+    ) -> Result<(Vec<serde_json::Value>, Vec<String>, Option<String>)> {
+        let mut url = format!(
+            "{}/storage/v1/b/{}/o?prefix={}&delimiter=%2F&maxResults=1000&fields={}",
+            self.base,
+            encode(bucket),
+            encode(prefix),
+            encode(&format!("items({item_fields}),prefixes,nextPageToken"))
+        );
+        if let Some(token) = page_token {
+            url.push_str(&format!("&pageToken={}", encode(token)));
+        }
+        let response = self.send(self.http.get(url)).await.map_err(|e| anyhow!("{e}"))?;
+        if !response.status().is_success() {
+            return Err(anyhow!("listing gs://{bucket}/{prefix} failed: {}", Self::error_for(response).await));
+        }
+        #[derive(Deserialize)]
+        struct LevelPage {
+            #[serde(default)]
+            items: Vec<serde_json::Value>,
+            #[serde(default)]
+            prefixes: Vec<String>,
+            #[serde(rename = "nextPageToken")]
+            next_page_token: Option<String>,
+        }
+        let page: LevelPage = response.json().await?;
+        Ok((page.items, page.prefixes, page.next_page_token.filter(|t| !t.is_empty())))
     }
 
     /// Metadata for one object, or `None` if it doesn't exist.
@@ -735,7 +902,7 @@ impl GcsClient {
         let mut page_token: Option<String> = None;
         loop {
             let mut url = format!(
-                "{}/storage/v1/b/{}/o?prefix={}&maxResults=1000&fields=items(name,size,crc32c,generation),nextPageToken",
+                "{}/storage/v1/b/{}/o?prefix={}&maxResults=1000&fields=items(name,size,crc32c,generation,metadata),nextPageToken",
                 self.base,
                 encode(bucket),
                 encode(prefix)

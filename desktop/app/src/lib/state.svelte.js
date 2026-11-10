@@ -18,6 +18,64 @@ function loadPrefs() {
 export const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 export const ACTIVE = new Set(['pending', 'queued', 'running', 'scheduled']);
 
+/**
+ * Jobs as the user thinks of them: a split upload (one job per subfolder) is one run.
+ * A run is a job, or a combined job-like object with `group` = { id, name, parts, done,
+ * failed, cancelled, active, jobs, current } for split uploads. Newest first.
+ */
+export function collapseRuns(jobs) {
+  const groups = new Map();
+  const runs = [];
+  for (const job of jobs) {
+    const id = job.filters?.group?.id;
+    if (!id) {
+      runs.push(job);
+      continue;
+    }
+    if (!groups.has(id)) {
+      groups.set(id, []);
+      runs.push(id);
+    }
+    groups.get(id).push(job);
+  }
+  return runs.map((run) => (typeof run === 'string' ? groupRun(groups.get(run)) : run));
+}
+
+function groupRun(jobs) {
+  const info = jobs[0].filters.group;
+  const sum = (key) => jobs.reduce((total, j) => total + (Number(j[key]) || 0), 0);
+  const byStatus = (statuses) => jobs.filter((j) => statuses.includes(j.status));
+  const running = byStatus(['running']);
+  const active = byStatus(['running', 'queued', 'pending', 'scheduled']);
+  const failed = byStatus(['failed']);
+  const cancelled = byStatus(['cancelled']);
+  const done = byStatus(['completed']);
+  const status = running.length ? 'running' : active.length ? active[0].status : failed.length ? 'failed' : cancelled.length ? 'cancelled' : 'completed';
+  const total = sum('total_size_bytes');
+  const uploaded = sum('bytes_uploaded') + done.reduce((t, j) => t + (j.bytes_uploaded ? 0 : Number(j.total_size_bytes) || 0), 0);
+  const times = (key) => jobs.map((j) => j[key]).filter(Boolean).sort();
+  const current = running[0] || active[0] || null;
+  return {
+    ...jobs[0],
+    job_id: current?.job_id || failed[0]?.job_id || jobs[0].job_id,
+    status,
+    source_path: info.source_path,
+    destination_bucket: info.destination.split('/')[0],
+    destination_path: info.destination.split('/').slice(1).join('/'),
+    total_files: sum('total_files'),
+    files_uploaded: sum('files_uploaded'),
+    total_size_bytes: total,
+    bytes_uploaded: Math.min(uploaded, total),
+    progress_percent: total ? (Math.min(uploaded, total) / total) * 100 : (done.length / jobs.length) * 100,
+    created_at: times('created_at')[0] || jobs[0].created_at,
+    started_at: times('started_at')[0] || null,
+    completed_at: active.length ? null : times('completed_at').pop() || null,
+    duration_seconds: sum('duration_seconds') || null,
+    error_message: failed.length ? `${failed.length} of ${jobs.length} folders failed` : null,
+    group: { ...info, jobs, done: done.length, failed: failed.length, cancelled: cancelled.length, active: active.length, current },
+  };
+}
+
 export function lines(text) {
   const items = (text || '').split('\n').map((s) => s.trim()).filter(Boolean);
   return items.length ? items : null;
@@ -46,7 +104,7 @@ class AppState {
   /** Add/edit folder dialog: { preset, previousName } or null. */
   folderDialog = $state(null);
   /** Upload speed limit (Mbit/s, 0 = none), shared with the server. */
-  transfer = $state({ max_mbps: 0 });
+  transfer = $state({ max_mbps: 0, parallel_jobs: 1 });
   /** Paths dropped on the Cloud storage view, waiting to be uploaded there. */
   cloudDrop = $state(null);
   /** Synced folder shown on the Compare screen. */
@@ -63,6 +121,8 @@ class AppState {
   #events = null;
   #speed = new Map();
   #toastId = 0;
+  /** Split uploads already announced as finished (cleared when one runs again). */
+  #announcedGroups = new Set();
 
   async start() {
     this.applyTheme();
@@ -149,6 +209,7 @@ class AppState {
 
   #upsertJob(job) {
     const previous = this.jobs[job.job_id];
+    if (job.filters?.group?.id && ACTIVE.has(job.status)) this.#announcedGroups.delete(job.filters.group.id);
     if (job.status === 'running' && previous) {
       this.#sampleSpeed(job);
     }
@@ -177,7 +238,25 @@ class AppState {
 
   #jobFinished(info) {
     const kind = info.dry_run ? 'Preview' : info.job_type === 'cloud_sync' ? 'Cloud sync' : info.job_type === 'cloud_move' ? 'Move' : 'Sync';
-    const folder = this.presetForJob(this.jobs[info.job_id])?.name || info.name;
+    const job = this.jobs[info.job_id];
+    const groupId = job?.filters?.group?.id;
+    if (groupId) {
+      // A split upload: one message when its last subfolder finishes.
+      const siblings = this.jobList.filter((j) => j.filters?.group?.id === groupId);
+      if (siblings.some((j) => j.job_id !== info.job_id && ACTIVE.has(j.status))) return;
+      if (this.#announcedGroups.has(groupId)) return;
+      this.#announcedGroups.add(groupId);
+      const run = collapseRuns(siblings)[0];
+      const folder = this.presetForJob(job)?.name || run.group.name;
+      const failed = run.group.failed;
+      const title = failed ? `${kind} finished with ${failed} failed ${failed === 1 ? 'folder' : 'folders'}` : run.status === 'cancelled' ? `${kind} cancelled` : `${kind} finished`;
+      this.toast(`${title}: ${folder} (${run.group.parts} folders)`, failed ? 'error' : run.status === 'cancelled' ? 'info' : 'success', {
+        action: { label: 'View', run: () => this.openJob(info.job_id) },
+      });
+      if (this.prefs.notifications) notify(title, `${folder}\n${info.destination || ''}`);
+      return;
+    }
+    const folder = this.presetForJob(job)?.name || info.name;
     const title =
       info.status === 'completed' ? `${kind} finished` : info.status === 'failed' ? `${kind} failed` : `${kind} cancelled`;
     this.toast(`${title}: ${folder}`, info.status === 'completed' ? 'success' : info.status === 'failed' ? 'error' : 'info', {
@@ -231,13 +310,35 @@ class AppState {
 
   presetForJob(job) {
     if (!job) return null;
+    const group = job.filters?.group;
+    if (group) {
+      // A subfolder of a split upload belongs to the folder that was split.
+      const dest = normalizeDestination(group.destination);
+      return this.presets.find((p) => p.source_path === group.source_path && normalizeDestination(p.destination) === dest) || null;
+    }
     const dest = jobDestination(job);
     return this.presets.find((p) => p.source_path === job.source_path && normalizeDestination(p.destination) === dest) || null;
   }
 
   jobsForPreset(preset) {
-    const dest = normalizeDestination(preset.destination);
-    return this.jobList.filter((j) => j.source_path === preset.source_path && jobDestination(j) === dest);
+    return this.jobList.filter((j) => this.presetForJob(j)?.preset_id === preset.preset_id);
+  }
+
+  async cancelGroup(groupId) {
+    try {
+      await api.cancelGroup(groupId);
+    } catch (err) {
+      this.toast(`Couldn't cancel: ${err.message}`, 'error');
+    }
+  }
+
+  async retryFailedInGroup(groupId) {
+    try {
+      const result = await api.retryGroup(groupId);
+      this.toast(`Running ${result.retried} ${result.retried === 1 ? 'folder' : 'folders'} again`, 'info', { timeout: 3000 });
+    } catch (err) {
+      this.toast(`Couldn't retry: ${err.message}`, 'error');
+    }
   }
 
   async savePreset(preset, previousName) {
@@ -263,11 +364,11 @@ class AppState {
       gcs_destination: normalizeDestination(preset.destination),
       dry_run: dryRun,
       recursive: o.recursive !== false,
-      split_by_folder: false,
       upload_tool: tool,
       no_clobber: !!o.no_clobber,
       exclude_patterns: lines(o.exclude_patterns),
       exclude_folders: commaList(o.exclude_folders),
+      split_by_folder: !!o.split_by_folder,
       threads: 4,
     };
   }

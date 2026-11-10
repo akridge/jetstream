@@ -77,6 +77,8 @@ pub struct CompareReport {
     /// Skipped by the folder's filters (not expected in the cloud).
     pub excluded: u64,
     pub unreadable: u64,
+    /// Online-only cloud placeholders (OneDrive) that syncing skips until kept on this device.
+    pub online_only: u64,
     pub same: Group,
     /// Of `same`, how many were confirmed by checksum.
     pub verified: u64,
@@ -154,9 +156,10 @@ pub async fn compare(
             None => break,
         }
     }
-    let (files, excluded, unreadable) = local.await??;
+    let scanned = local.await??;
+    let (files, excluded, unreadable) = (scanned.files, scanned.excluded, scanned.unreadable);
     let known = match manifest {
-        Some(m) => m.load(&dest_key).unwrap_or_default(),
+        Some(m) => m.load_tree(&dest_key).unwrap_or_default(),
         None => HashMap::new(),
     };
 
@@ -165,6 +168,7 @@ pub async fn compare(
         destination: dest_key,
         excluded,
         unreadable,
+        online_only: scanned.online_only.len() as u64,
         cloud_files: cloud.len() as u64,
         cloud_bytes: cloud.values().map(|o| o.size).sum(),
         ..Default::default()

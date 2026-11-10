@@ -23,6 +23,15 @@
     }
   }
 
+  async function setParallel(n) {
+    try {
+      await app.saveTransfer({ parallel_jobs: n });
+      app.toast(n === 1 ? 'Uploads run one at a time' : `Up to ${n} uploads run at once`, 'success', { timeout: 3000 });
+    } catch (err) {
+      app.toast(`Couldn't save: ${err.message}`, 'error');
+    }
+  }
+
   let checking = $state(false);
   let signingIn = $state(false);
   let auth = $derived(app.auth);
@@ -124,6 +133,19 @@
             </span>
           </label>
         {/each}
+      </div>
+
+      <div class="limit">
+        <span class="label">Uploads at once</span>
+        <p class="sub">
+          How many jobs run at the same time, for example the subfolders of a folder uploaded "each subfolder as its own job". One at a time
+          is usually fastest with the JetStream engine, which already sends many files in parallel.
+        </p>
+        <div class="chips" role="radiogroup" aria-label="Uploads at once">
+          {#each [1, 2, 3, 4] as n (n)}
+            <button class="chip" role="radio" aria-checked={app.transfer.parallel_jobs === n} class:on={app.transfer.parallel_jobs === n} onclick={() => setParallel(n)}>{n === 1 ? 'One at a time' : n}</button>
+          {/each}
+        </div>
       </div>
 
       <div class="limit">

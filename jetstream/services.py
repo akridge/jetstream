@@ -955,6 +955,9 @@ def find_transfer_engine() -> Optional[str]:
     return None
 
 
+ENGINE_STOP_GRACE_SECONDS = 15
+
+
 class JobActivity:
     """Recent per-file activity of a running upload, for the live "files" view."""
 
@@ -967,14 +970,24 @@ class JobActivity:
         self.files_done = 0
         self.failed = 0
         self.paused = False
+        # Engine phase: scanning, listing, uploading; with what it has checked so far.
+        self.phase: Optional[str] = None
+        self.checking: Dict = {}
+        self.retrying: Dict[str, Dict] = {}
         self._lock = threading.Lock()
 
     def started(self, path: str, size: Optional[int] = None) -> None:
         with self._lock:
             self.in_flight[path] = {"path": path, "bytes": size, "started_at": time.time()}
 
+    def retry(self, path: str, attempt: int, max_attempts: int, error: str) -> None:
+        with self._lock:
+            self.retrying[path] = {"attempt": attempt, "max_attempts": max_attempts, "error": error}
+            self.in_flight.setdefault(path, {"path": path, "bytes": None, "started_at": time.time()})
+
     def finished(self, path: str, size: Optional[int] = None, error: Optional[str] = None) -> None:
         with self._lock:
+            self.retrying.pop(path, None)
             started = self.in_flight.pop(path, None)
             if size is None and started:
                 size = started.get("bytes")
@@ -990,10 +1003,13 @@ class JobActivity:
             return {
                 "tool": self.tool,
                 "paused": self.paused,
+                "phase": self.phase,
+                "checking": dict(self.checking),
                 "files_done": self.files_done,
                 "failed": self.failed,
                 "in_flight": [
-                    {**item, "seconds": round(now - item["started_at"], 1)} for item in self.in_flight.values()
+                    {**item, "seconds": round(now - item["started_at"], 1), "retry": self.retrying.get(item["path"])}
+                    for item in self.in_flight.values()
                 ],
                 "recent": [{**item, "seconds_ago": round(now - item["at"], 1)} for item in self.recent],
             }
@@ -1042,6 +1058,7 @@ class EngineRunState:
         self.error: Optional[str] = None
         self.dry_run = False
         self.activity: Optional[JobActivity] = None
+        self.online_only: List[str] = []
 
     def handle(self, line: str, progress_callback: Optional[Callable]) -> None:
         import json
@@ -1052,6 +1069,13 @@ class EngineRunState:
         kind = event.get("event")
         if kind == "start":
             self.dry_run = bool(event.get("dry_run"))
+        elif kind == "phase":
+            if self.activity is not None:
+                self.activity.phase = event.get("phase")
+        elif kind == "file_retrying":
+            if self.activity is not None:
+                self.activity.retry(event.get("path"), int(event.get("attempt") or 0),
+                                    int(event.get("max_attempts") or 0), event.get("error") or "")
         elif kind == "plan":
             self.total_bytes = int(event.get("local_bytes") or 0)
             self.base_bytes = self.total_bytes - int(event.get("to_check_bytes") or 0)
@@ -1062,6 +1086,15 @@ class EngineRunState:
         elif kind == "progress":
             if self.activity is not None:
                 self.activity.paused = bool(event.get("paused"))
+                if event.get("phase"):
+                    self.activity.phase = event.get("phase")
+                self.activity.checking = {
+                    "listed_objects": int(event.get("listed_objects") or 0),
+                    "hashed_files": int(event.get("hashed_files") or 0),
+                    "hashed_bytes": int(event.get("hashed_bytes") or 0),
+                    "files_done": int(event.get("files_done") or 0),
+                    "files_total": int(event.get("files_total") or 0),
+                }
             if not progress_callback:
                 return
             progress_callback(
@@ -1075,6 +1108,10 @@ class EngineRunState:
         elif kind in ("file_uploaded", "file_would_upload"):
             if self.activity:
                 self.activity.finished(event.get("path"), event.get("bytes"))
+        elif kind == "file_skipped":
+            reason = event.get("reason") or ""
+            if "online-only" in reason:
+                self.online_only.append(event.get("path"))
         elif kind == "file_failed":
             self.failure_count += 1
             if len(self.failures) < 20:
@@ -1095,16 +1132,25 @@ class EngineRunState:
             head = f"Preview: {s.get('would_upload', 0)} file(s), {mb(s.get('would_upload_bytes'))} would be uploaded."
         else:
             head = f"Uploaded {s.get('uploaded', 0)} file(s), {mb(s.get('uploaded_bytes'))}."
+        already = f"Already in cloud: {s.get('already_in_cloud', 0)}"
+        if s.get("matched_by_time"):
+            already += f" ({s['matched_by_time']} recognised by size and date, without reading them)"
         lines = [
             head,
-            f"Unchanged: {s.get('unchanged', 0)}  |  Already in cloud: {s.get('already_in_cloud', 0)}  |  "
+            f"Unchanged: {s.get('unchanged', 0)}  |  {already}  |  "
             f"Resumed: {s.get('resumed', 0)}  |  Skipped (exists): {s.get('skipped_exists', 0)}  |  "
             f"Excluded: {s.get('excluded', 0)}",
             f"Failed: {s.get('failed', 0)}  |  Unreadable: {s.get('unreadable', 0)}  |  "
-            f"Time: {s.get('elapsed_seconds', 0)} s",
+            f"Files read to check: {s.get('hashed_files', 0)}  |  Time: {s.get('elapsed_seconds', 0)} s",
         ]
+        if s.get("online_only"):
+            lines.append(
+                f"Skipped {s['online_only']} online-only file(s) (OneDrive or another cloud drive): their content isn't on "
+                "this computer. Right-click the folder and choose \"Always keep on this device\", then sync again."
+            )
+            lines.extend(f"  {p}" for p in self.online_only[:10])
         if s.get("cancelled"):
-            lines.append("Cancelled before finishing; run the job again to continue.")
+            lines.append("Stopped before finishing. Everything uploaded so far is kept; run the job again to continue.")
         if self.failures:
             lines.append("Failed files:")
             lines.extend(f"  {f}" for f in self.failures)
@@ -1577,7 +1623,20 @@ class UploadService:
         return sum(self._send_engine_command(job_id, {"cmd": "limit", "mbps": max_mbps}) for job_id in list(self.engine_jobs))
 
     def cancel_upload(self, job_id: str) -> bool:
-        """Cancel an active upload."""
+        """Cancel an active upload. Engine uploads stop gracefully (what's in flight finishes or is
+        saved, and the manifest is written) and are only killed if they don't exit in time."""
+        process = self.active_uploads.get(job_id)
+        if process is not None and self._send_engine_command(job_id, {"cmd": "stop"}):
+            def _kill_if_still_running():
+                try:
+                    process.wait(timeout=ENGINE_STOP_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+            threading.Thread(target=_kill_if_still_running, daemon=True).start()
+            return True
         if job_id in self.active_uploads:
             try:
                 process = self.active_uploads[job_id]
@@ -1711,4 +1770,13 @@ def clear_auth_cache() -> None:
 
 # Global instances
 upload_service = UploadService()
-queue_manager = QueueManager()
+def _initial_parallel_jobs() -> int:
+    try:
+        from .transfer_settings import load as load_transfer_settings
+
+        return load_transfer_settings()["parallel_jobs"]
+    except Exception:
+        return 1
+
+
+queue_manager = QueueManager(max_concurrent=_initial_parallel_jobs())

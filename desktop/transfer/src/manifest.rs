@@ -99,6 +99,51 @@ impl Manifest {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Records for `dest`, plus those saved by syncs of a parent or child destination (e.g. the
+    /// same folder synced whole and split by subfolder), translated to paths relative to `dest`.
+    /// Records saved for `dest` itself win.
+    pub fn load_tree(&self, dest: &str) -> Result<std::collections::HashMap<String, FileRecord>> {
+        let mut out = std::collections::HashMap::new();
+        if !dest.ends_with('/') {
+            return self.load(dest);
+        }
+        // Text range for "starts with `prefix`" when `prefix` ends in "/" ('0' follows '/').
+        let upper = |prefix: &str| format!("{}0", &prefix[..prefix.len() - 1]);
+        let row = |r: &rusqlite::Row| -> rusqlite::Result<(String, String, FileRecord)> {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                FileRecord { size: r.get::<_, i64>(2)? as u64, mtime_ns: r.get(3)?, crc32c: r.get::<_, i64>(4)? as u32 },
+            ))
+        };
+        {
+            let conn = self.conn.lock().unwrap();
+            // Child destinations: gs://b/p/sub/ + "x.jpg" -> "sub/x.jpg".
+            let mut children = conn.prepare(
+                "SELECT dest, rel_path, size, mtime_ns, crc32c FROM files WHERE dest > ?1 AND dest < ?2",
+            )?;
+            for item in children.query_map(params![dest, upper(dest)], row)? {
+                let (row_dest, rel, record) = item?;
+                out.insert(format!("{}{rel}", &row_dest[dest.len()..]), record);
+            }
+            // Parent destinations: gs://b/ + "p/x.jpg" -> "x.jpg" (each ancestor of `dest`).
+            let mut parents = conn.prepare(
+                "SELECT dest, rel_path, size, mtime_ns, crc32c FROM files WHERE dest = ?1 AND rel_path >= ?2 AND rel_path < ?3",
+            )?;
+            let scheme_end = dest.find("://").map(|i| i + 3).unwrap_or(0);
+            for (i, _) in dest.match_indices('/').filter(|(i, _)| *i >= scheme_end && *i + 1 < dest.len()) {
+                let parent = &dest[..=i];
+                let sub = &dest[i + 1..];
+                for item in parents.query_map(params![parent, sub, upper(sub)], row)? {
+                    let (_, rel, record) = item?;
+                    out.insert(rel[sub.len()..].to_string(), record);
+                }
+            }
+        }
+        out.extend(self.load(dest)?);
+        Ok(out)
+    }
+
     pub fn record(&self, dest: &str, rel_path: &str, file: &FileRecord, generation: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -170,5 +215,31 @@ mod tests {
         assert_eq!(manifest.session("gs://b/p/", "big.bin").unwrap().unwrap().session_uri, "https://upload/session");
         manifest.clear_session("gs://b/p/", "big.bin").unwrap();
         assert!(manifest.session("gs://b/p/", "big.bin").unwrap().is_none());
+    }
+
+    #[test]
+    fn load_tree_shares_records_between_whole_and_split_syncs() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Manifest::open(&dir.path().join("m.db")).unwrap();
+        let rec = |size| FileRecord { size, mtime_ns: 1, crc32c: 7 };
+        // Synced whole, then split by subfolder.
+        manifest.record("gs://b/site/", "photos/a.jpg", &rec(1), None).unwrap();
+        manifest.record("gs://b/site/", "photos-raw/z.jpg", &rec(9), None).unwrap();
+        manifest.record("gs://b/site/", "top.txt", &rec(2), None).unwrap();
+        manifest.record("gs://b/site/video/", "v.mp4", &rec(3), None).unwrap();
+        manifest.record("gs://b/sitemap/", "x", &rec(4), None).unwrap();
+
+        let whole = manifest.load_tree("gs://b/site/").unwrap();
+        let mut keys: Vec<_> = whole.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["photos-raw/z.jpg", "photos/a.jpg", "top.txt", "video/v.mp4"]);
+
+        let photos = manifest.load_tree("gs://b/site/photos/").unwrap();
+        assert_eq!(photos.keys().collect::<Vec<_>>(), ["a.jpg"], "photos-raw/ isn't inside photos/");
+        assert_eq!(manifest.load_tree("gs://b/site/video/").unwrap()["v.mp4"].size, 3);
+
+        // The destination's own record wins.
+        manifest.record("gs://b/site/photos/", "a.jpg", &rec(5), None).unwrap();
+        assert_eq!(manifest.load_tree("gs://b/site/photos/").unwrap()["a.jpg"].size, 5);
     }
 }
