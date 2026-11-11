@@ -5,12 +5,14 @@
 // nothing else changing (so a folder still being copied isn't uploaded half-done).
 
 import { app, commaList, lines } from './state.svelte.js';
-import { compareFolder, isDesktop } from './platform.js';
+import { compareFolder, isDesktop, onFolderChanged, watchFolders } from './platform.js';
 import { normalizeDestination } from './format.js';
 
 const STORE_KEY = 'jetstream.folderStatus.v1';
 /** Default minutes between background checks (a folder can choose its own; 0 = only on demand). */
 export const DEFAULT_CHECK_MINUTES = 15;
+/** After files change in a watched folder, check it once they've been still this long. */
+const SETTLE_MS = globalThis.__jetstreamSettleMs || 10_000;
 /** How long changes must stay the same before an auto-upload starts. */
 export const QUIET_MS = globalThis.__jetstreamQuietMs || 2 * 60 * 1000; // shorter in UI tests
 const BUSY = new Set(['pending', 'queued', 'running']);
@@ -46,12 +48,24 @@ class FolderStatus {
   #running = false;
   #started = false;
   #pending = {}; // preset_id -> { signature, at } for auto-upload
+  #settle = {}; // preset_id -> timer after a change was seen
+  #watchedKey = '';
+  /** preset_id -> true for folders watched for changes (others rely on timed checks). */
+  watched = $state({});
 
   start() {
     if (this.#started || !isDesktop) return;
     this.#started = true;
     // A moment after a run finishes (its final status arrives just before or after).
     app.onJobFinished((job, preset) => preset && setTimeout(() => this.check(preset, { soon: true }), 1500));
+    // Changes seen by the folder watcher: check once things have settled.
+    onFolderChanged((id) => {
+      clearTimeout(this.#settle[id]);
+      this.#settle[id] = setTimeout(() => {
+        const preset = app.presets.find((p) => p.preset_id === id);
+        if (preset) this.check(preset, { soon: true });
+      }, SETTLE_MS);
+    });
     setInterval(() => this.#tick(), 30_000);
     setTimeout(() => this.#tick(), 1500);
     document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && this.#tick());
@@ -171,6 +185,21 @@ class FolderStatus {
       const current = app.presets.find((p) => p.preset_id === id);
       if (current?.options?.auto_upload) this.check(current, { soon: true });
     }, QUIET_MS);
+  }
+
+  /** Watch the synced folders for changes (again whenever the list changes). */
+  async watch(presets) {
+    if (!isDesktop) return;
+    const folders = presets.map((p) => ({ id: p.preset_id, path: p.source_path }));
+    const key = JSON.stringify(folders);
+    if (key === this.#watchedKey) return;
+    this.#watchedKey = key;
+    try {
+      const failed = new Set((await watchFolders(folders)) || []);
+      this.watched = Object.fromEntries(folders.filter((f) => !failed.has(f.id)).map((f) => [f.id, true]));
+    } catch {
+      this.watched = {};
+    }
   }
 
   /** Forget a folder (removed). */

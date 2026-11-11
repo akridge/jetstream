@@ -48,7 +48,7 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - progress that survives **Cancel** and **Sync now**: what's already in the cloud counts straight away instead of starting again from 0%
   - its schedule and next run, if it syncs automatically
 
-  **Always up to date:** each card says **Up to date ✓** or **37 new or changed files · 1.2 GB** with an **Upload 37 files** button. JetStream checks every folder quietly in the background (names and sizes against the cloud; nothing is read or uploaded) when it opens, after each sync, and every 15 minutes (per folder: every 5 minutes to every 4 hours, or only when asked; big folders such as network shares are checked less often). **Check for changes now** is in the card's menu.
+  **Always up to date:** each card says **Up to date ✓** or **37 new or changed files · 1.2 GB** with an **Upload 37 files** button. JetStream checks every folder quietly in the background (names and sizes against the cloud; nothing is read or uploaded) when it opens, after each sync, and every 15 minutes (per folder: every 5 minutes to every 4 hours, or only when asked; big folders such as network shares are checked less often). **Check for changes now** is in the card's menu. Folders on this computer are also **watched**: new or changed files are noticed within seconds (the card says "watching for new files"); folders that can't be watched, such as some network shares, rely on the timed checks.
 
   **Upload new files automatically** (per folder): when a check finds new or changed files, JetStream looks again two minutes later and uploads once nothing has changed in between, so files still being copied in aren't uploaded half-done. The card shows when it will start.
 

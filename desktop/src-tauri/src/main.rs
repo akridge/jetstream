@@ -161,6 +161,8 @@ struct Core {
     undos: Mutex<HashMap<String, (Undo, bool)>>,
     /// Speed limit for downloads and file uploads run in the app.
     throttle: Arc<Throttle>,
+    /// Watches synced folders for changes (see `watch_folders`).
+    watcher: Mutex<Option<notify::RecommendedWatcher>>,
 }
 
 impl Core {
@@ -672,6 +674,64 @@ async fn compare_folder(
     Ok(report)
 }
 
+/// A synced folder to watch for changes.
+#[derive(Deserialize)]
+struct WatchFolder {
+    id: String,
+    path: String,
+}
+
+/// Watch synced folders and emit "folder-changed" (the folder's id) when files in one are
+/// added, changed or removed, at most every few seconds per folder. Replaces the folders
+/// watched before. Returns the ids that couldn't be watched (e.g. a disconnected drive; some
+/// network shares): those rely on the app's timed checks.
+#[tauri::command]
+async fn watch_folders(app: AppHandle, folders: Vec<WatchFolder>) -> Result<Vec<String>, String> {
+    // Setting up watches on a big tree takes a while: keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || watch_folders_blocking(app, folders)).await.map_err(|e| e.to_string())
+}
+
+fn watch_folders_blocking(app: AppHandle, folders: Vec<WatchFolder>) -> Vec<String> {
+    use notify::{EventKind, RecursiveMode, Watcher};
+    let emitter = app.clone();
+    let roots: Vec<(String, std::path::PathBuf)> = folders.iter().map(|f| (f.id.clone(), std::path::PathBuf::from(&f.path))).collect();
+    let last: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+    let watched_roots = roots.clone();
+    let handler = move |result: notify::Result<notify::Event>| {
+        let Ok(event) = result else { return };
+        if matches!(event.kind, EventKind::Access(_) | EventKind::Other) {
+            return;
+        }
+        let mut last = last.lock().unwrap();
+        for path in &event.paths {
+            // The most specific synced folder containing the path.
+            let Some((id, _)) = watched_roots.iter().filter(|(_, root)| path.starts_with(root)).max_by_key(|(_, root)| root.as_os_str().len()) else {
+                continue;
+            };
+            let now = Instant::now();
+            if last.get(id).is_some_and(|t| now.duration_since(*t) < Duration::from_secs(3)) {
+                continue;
+            }
+            last.insert(id.clone(), now);
+            let _ = emitter.emit("folder-changed", id.clone());
+        }
+    };
+    let core = app.state::<Core>();
+    let mut slot = core.watcher.lock().unwrap();
+    *slot = None; // stop the previous watcher first
+    let Ok(mut watcher) = notify::recommended_watcher(handler) else {
+        return folders.into_iter().map(|f| f.id).collect();
+    };
+    let mut failed = Vec::new();
+    for (id, root) in &roots {
+        if watcher.watch(root, RecursiveMode::Recursive).is_err() {
+            failed.push(id.clone());
+        }
+    }
+    *slot = Some(watcher);
+    failed
+}
+
 /// The folders directly inside `path` (e.g. a network share), for adding several at once.
 #[derive(serde::Serialize)]
 struct Subfolder {
@@ -862,6 +922,7 @@ fn main() {
             set_transfer_limit,
             classify_paths,
             list_subfolders,
+            watch_folders,
             make_receipt,
             list_receipts
         ])

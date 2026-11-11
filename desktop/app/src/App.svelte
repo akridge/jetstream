@@ -45,6 +45,10 @@
   $effect(() => {
     if (app.loaded) folderStatus.start();
   });
+  // Watch synced folders for new files (re-watched when folders are added or removed).
+  $effect(() => {
+    if (app.loaded) folderStatus.watch($state.snapshot(app.presets));
+  });
 
   $effect(() => {
     if (app.server.phase === 'failed') serverLog().then((text) => (log = text));

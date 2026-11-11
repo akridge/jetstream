@@ -240,8 +240,8 @@
         <strong>{count(changes)} new or changed {changes === 1 ? 'file' : 'files'}</strong>
         <span class="muted">{bytes(status.bytes)} to upload</span>
       </div>
+      {#if autoAt}<div class="checked auto-note">Uploading automatically at {clock(autoAt)} if nothing else changes</div>{/if}
       <div class="checked">
-        {#if autoAt}<span>Uploading automatically at {clock(autoAt)} if nothing else changes ·</span>{/if}
         {#if checking}<RefreshCw size={12} class="spin" /> Checking…{:else}Checked {ago(status.checked_at)}{/if}{lastReal ? ` · last synced ${relativeTime(lastReal.completed_at)}` : ''}
       </div>
     {:else if status && !status.error}
@@ -251,7 +251,7 @@
         <span class="muted">{count(status.same)} files · {bytes(status.same_bytes)}{status.cloud_only ? ` · ${count(status.cloud_only)} more in the cloud` : ''}</span>
       </div>
       <div class="checked">
-        {#if checking}<RefreshCw size={12} class="spin" /> Checking…{:else}Checked {ago(status.checked_at)}{/if}{lastReal ? ` · synced ${relativeTime(lastReal.completed_at)}` : ''}{status.online_only ? ` · ${count(status.online_only)} online-only (OneDrive) skipped` : ''}
+        {#if checking}<RefreshCw size={12} class="spin" /> Checking…{:else}Checked {ago(status.checked_at)}{/if}{lastReal ? ` · synced ${relativeTime(lastReal.completed_at)}` : ''}{folderStatus.watched[preset.preset_id] ? ' · watching for new files' : ''}{status.online_only ? ` · ${count(status.online_only)} online-only (OneDrive) skipped` : ''}
       </div>
     {:else if !status && checking && !lastFinished}
       <div class="row muted"><RefreshCw size={14} class="spin" /> Checking what's new…</div>
@@ -449,6 +449,9 @@
     align-items: center;
     gap: 4px;
     flex-wrap: wrap;
+  }
+  .auto-note {
+    color: var(--accent);
   }
   .checked.danger {
     color: var(--danger);

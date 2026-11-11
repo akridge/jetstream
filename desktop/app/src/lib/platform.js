@@ -241,6 +241,18 @@ export async function listSubfolders(path) {
   return invoke('list_subfolders', { path });
 }
 
+/** Watch synced folders ([{ id, path }]) for changes; resolves to the ids that can't be watched. */
+export async function watchFolders(folders) {
+  if (!isDesktop) return folders.map((f) => f.id);
+  return invoke('watch_folders', { folders });
+}
+
+/** onChange(id) when files in a watched folder change. */
+export async function onFolderChanged(onChange) {
+  if (!isDesktop) return () => {};
+  return listen('folder-changed', (event) => onChange(event.payload));
+}
+
 /** Native picker for several folders at once; returns paths ([] if cancelled). */
 export async function pickFolders(defaultPath, title = 'Choose folders to sync') {
   if (!isDesktop) {
