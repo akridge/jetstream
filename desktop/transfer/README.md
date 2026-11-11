@@ -61,7 +61,7 @@ target/release/jetstream-transfer sync D:\Survey\2026 gs://my-bucket/surveys/202
 
 | Option | Meaning |
 |---|---|
-| `--dry-run` | Report what would upload; changes nothing (not even the manifest) |
+| `--dry-run` | Report what would upload; uploads nothing. Only same-size files are read (anything new or resized uploads anyway), and files it confirms are already in the cloud are recorded in the manifest, so the real sync after it skips them |
 | `--no-clobber` | Never overwrite an existing object (`ifGenerationMatch=0`) |
 | `--verify` | Compare every file against a fresh bucket listing instead of trusting the manifest; repairs objects deleted or changed in the cloud |
 | `--exclude REGEX` | Skip relative paths (`/` separators) matching the regex; repeatable |

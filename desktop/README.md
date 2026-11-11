@@ -93,7 +93,9 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - **only in the cloud:** e.g. added by someone else, or deleted locally
   - **different:** changed on one side
 
-  There's a per-folder breakdown and a button for each file to show it on this computer or in the cloud. The folder's skip filters are applied.
+  There's a per-folder breakdown and a button for each file to show it on this computer or in the cloud. The folder's skip filters are applied. **Upload N files** starts the sync right there: its progress shows at the top, and the comparison refreshes when it finishes.
+
+  Compare is the quick look (sizes only). **Preview** goes further and confirms same-size files by checksum, but only reads those: files not in the cloud, or with another size, are listed without being read. What a preview confirms is remembered, so the upload after it doesn't read those files again.
 - **Cloud cleanup:** scan a bucket or folder for junk: unfinished uploads (`.gstmp`), NAS thumbnail folders, `Thumbs.db`, `.DS_Store`, Office lock files and temporary files. You can add your own patterns. The Rust core does the scan (read-only, tens of thousands of objects a second), then shows:
   - totals and a breakdown by kind, which you can click to filter
   - the matching objects, largest first

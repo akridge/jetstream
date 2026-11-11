@@ -206,7 +206,7 @@ async fn dry_run_uploads_nothing() {
     let (summary, _) = env.run(opts).await;
     assert_eq!((summary.would_upload, summary.uploaded), (1, 0));
     assert!(env.object("data/a.jpg").await.is_none());
-    // A dry run doesn't record anything, so the real sync still uploads.
+    // A dry run records only what it confirmed is in the cloud, so the real sync still uploads.
     let (summary, _) = env.run(env.options()).await;
     assert_eq!(summary.uploaded, 1);
 }
@@ -838,4 +838,25 @@ mod pause_and_reconnect {
         assert!(stopped.elapsed() < Duration::from_secs(2), "stopped after {:?}", stopped.elapsed());
         assert_eq!(summary.uploaded, 0);
     }
+}
+
+#[tokio::test]
+async fn a_preview_reads_only_what_it_must_and_the_upload_after_it_reads_nothing_twice() {
+    let Some(env) = Env::new().await else { return };
+    let same = big(50_000, 1);
+    env.write("same.bin", &same); // already in the cloud (uploaded by another tool)
+    env.write("new.bin", &big(60_000, 2)); // not in the cloud
+    env.write("changed.bin", &big(70_000, 3)); // in the cloud with another size
+    env.client.upload_multipart("bucket", "data/same.bin", same.clone(), crc32c::crc32c(&same), false).await.unwrap();
+    env.client.upload_multipart("bucket", "data/changed.bin", big(10, 9), crc32c::crc32c(&big(10, 9)), false).await.unwrap();
+
+    let mut opts = env.options();
+    opts.dry_run = true;
+    let (preview, _) = env.run(opts).await;
+    assert_eq!((preview.would_upload, preview.already_in_cloud), (2, 1), "{preview:?}");
+    assert_eq!((preview.hashed_files, preview.hashed_bytes), (1, 50_000), "only the same-size file is read");
+
+    let (sync, _) = env.run(env.options()).await;
+    assert_eq!((sync.uploaded, sync.unchanged), (2, 1), "the preview recorded what it confirmed: {sync:?}");
+    assert_eq!(sync.hashed_files, 2, "same.bin isn't read again");
 }

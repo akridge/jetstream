@@ -10,7 +10,8 @@
   import Laptop from '@lucide/svelte/icons/laptop';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import ShieldCheck from '@lucide/svelte/icons/shield-check';
-  import { app, commaList, lines } from '../lib/state.svelte.js';
+  import { app, commaList, lines, ACTIVE, collapseRuns } from '../lib/state.svelte.js';
+  import ProgressBar from '../components/ProgressBar.svelte';
   import { bytes, count, dateTime, duration, normalizeDestination, relativeTime } from '../lib/format.js';
   import { compareFolder, isDesktop, listReceipts, revealPath } from '../lib/platform.js';
   import FileCheck from '@lucide/svelte/icons/file-check';
@@ -78,6 +79,20 @@
     }
   });
 
+  // A sync or preview of this folder running now (or just asked for): shown here, so starting
+  // one from this page is visibly under way, and the comparison refreshes when it finishes.
+  let current = $derived(preset ? collapseRuns(app.jobsForPreset(preset)).find((j) => ACTIVE.has(j.status)) : null);
+  let starting = $derived(preset ? app.starting[preset.preset_id] : null);
+  let busy = $derived(!!current || !!starting);
+  let speed = $derived(current?.status === 'running' ? app.speedOf(current.group?.current?.job_id || current.job_id) : 0);
+  let watching = null;
+  $effect(() => {
+    const id = current?.job_id || null;
+    if (watching && !id && !loading) run(); // it finished: show the result
+    watching = id;
+  });
+  let toUpload = $derived(report ? report.local_only.files + report.different.files : 0);
+
   function openInCloud(path = '') {
     const [bucket, ...rest] = normalizeDestination(preset.destination).split('/');
     const folder = [...rest, ...path.split('/').slice(0, -1)].filter(Boolean).join('/');
@@ -107,9 +122,33 @@
       </div>
       <div class="head-actions">
         <button class="btn" disabled={loading} onclick={run}><RefreshCw size={15} class={loading ? 'spin' : ''} /> {loading ? 'Comparing…' : 'Compare again'}</button>
-        <button class="btn primary" onclick={() => app.runPreset(preset, false)}><Play size={14} /> Sync now</button>
+        {#if busy}
+          <button class="btn primary" disabled><RefreshCw size={15} class="spin" /> {starting ? 'Starting…' : current?.dry_run ? 'Previewing…' : 'Uploading…'}</button>
+        {:else}
+          <button class="btn primary" onclick={() => app.runPreset(preset, false)}><Play size={14} /> {toUpload ? `Upload ${count(toUpload)} ${toUpload === 1 ? 'file' : 'files'}` : 'Sync now'}</button>
+        {/if}
       </div>
     </header>
+
+    {#if busy}
+      <div class="card running">
+        <div class="row">
+          <strong>
+            {#if starting}Starting…
+            {:else if current.status !== 'running'}Waiting for its turn (other folders are uploading)…
+            {:else}{current.dry_run ? 'Previewing' : 'Uploading'} · {Math.round(current.progress_percent || 0)}%{/if}
+          </strong>
+          {#if current?.status === 'running'}
+            <span class="muted">
+              {bytes(current.bytes_uploaded)} of {bytes(current.total_size_bytes)}{speed > 0 ? ` · ${bytes(speed)}/s` : ''}{current.group ? ` · folder ${current.group.done + current.group.failed + current.group.cancelled + 1} of ${current.group.parts}` : ''}
+            </span>
+          {/if}
+          {#if current}<button class="btn ghost sm push" onclick={() => app.openJob(current.job_id)}>Details</button>{/if}
+        </div>
+        <ProgressBar value={current?.progress_percent || 0} indeterminate={!current || current.status !== 'running' || !current.total_size_bytes} />
+        <span class="muted small">This comparison refreshes when it finishes. You can leave this page; the upload carries on.</span>
+      </div>
+    {/if}
 
     {#if !isDesktop}
       <div class="card notice">Comparing runs in the JetStream desktop app.</div>
@@ -136,7 +175,7 @@
             <strong>
               {count(n)} {n === 1 ? 'file' : 'files'} ({bytes(report.local_only.bytes + report.different.bytes)}) on this computer {n === 1 ? "isn't" : "aren't"} in the cloud yet{report.different.files ? (n === 1 ? ' or has changed' : ' or have changed') : ''}.
             </strong>
-            <span class="muted">Sync now uploads them. Compared {relativeTime(new Date(Date.now() - report.elapsed_seconds * 1000).toISOString())} in {duration(report.elapsed_seconds)}.</span>
+            <span class="muted">{busy ? 'Uploading them now.' : 'Upload them with the button above.'} Compared {relativeTime(new Date(Date.now() - report.elapsed_seconds * 1000).toISOString())} in {duration(report.elapsed_seconds)}.</span>
           </div>
         {/if}
       </div>
@@ -300,6 +339,24 @@
     padding: 14px 16px;
     color: var(--danger);
     background: var(--danger-soft);
+  }
+  .running {
+    display: grid;
+    gap: 8px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+  }
+  .running .row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .running .push {
+    margin-left: auto;
+  }
+  .running .small {
+    font-size: 12px;
   }
   .verdict {
     display: flex;

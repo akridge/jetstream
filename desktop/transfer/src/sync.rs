@@ -260,6 +260,8 @@ struct Ctx {
     live_bytes: Arc<AtomicU64>,
     files_done: AtomicU64,
     hashed_files: AtomicU64,
+    /// Files a preview settled without reading them (see `hash`).
+    decided_files: AtomicU64,
     hashed_bytes: AtomicU64,
     listed: Arc<AtomicU64>,
     phase: std::sync::Mutex<&'static str>,
@@ -573,10 +575,9 @@ pub async fn sync(
         });
         match by_time {
             Some((crc, generation)) if !opts.verify => {
-                if !opts.dry_run {
-                    let record = FileRecord { size: file.size, mtime_ns: file.mtime_ns, crc32c: crc };
-                    let _ = manifest.record_by_time(&dest, &file.rel, &record, generation.as_deref());
-                }
+                // Previews record it too (see AlreadyInCloud).
+                let record = FileRecord { size: file.size, mtime_ns: file.mtime_ns, crc32c: crc };
+                let _ = manifest.record_by_time(&dest, &file.rel, &record, generation.as_deref());
                 summary.already_in_cloud += 1;
                 summary.matched_by_time += 1;
             }
@@ -620,6 +621,7 @@ pub async fn sync(
         live_bytes: Arc::new(AtomicU64::new(0)),
         files_done: AtomicU64::new(0),
         hashed_files: AtomicU64::new(0),
+        decided_files: AtomicU64::new(0),
         hashed_bytes: AtomicU64::new(0),
         listed,
         phase: std::sync::Mutex::new("uploading"),
@@ -633,7 +635,7 @@ pub async fn sync(
         files_total,
         bytes_done: (ctx.bytes_done.load(Ordering::Relaxed) + ctx.live_bytes.load(Ordering::Relaxed)).min(to_check_bytes),
         bytes_total: to_check_bytes,
-        hashed_files: ctx.hashed_files.load(Ordering::Relaxed),
+        hashed_files: ctx.hashed_files.load(Ordering::Relaxed) + ctx.decided_files.load(Ordering::Relaxed),
         hashed_bytes: ctx.hashed_bytes.load(Ordering::Relaxed),
         listed_objects: ctx.listed.load(Ordering::Relaxed),
         paused,
@@ -756,6 +758,12 @@ async fn hash(ctx: &Arc<Ctx>, candidate: Candidate) -> Result<Hashed, Outcome> {
     if let Some(crc) = candidate.known_crc {
         return Ok(Hashed { file, crc, data: None });
     }
+    // A preview needn't read a file that uploads whatever its content: nothing by that name in
+    // the cloud, or a different size. (A real sync reads it anyway, to upload it.)
+    if ctx.opts.dry_run && ctx.remote.as_ref().is_some_and(|r| r.get(&file.rel).is_none_or(|o| o.size != file.size)) {
+        ctx.decided_files.fetch_add(1, Ordering::Relaxed);
+        return Err(Outcome::WouldUpload);
+    }
     let abs = file.abs.clone();
     let size = file.size;
     let worker = ctx.clone();
@@ -796,9 +804,9 @@ async fn upload(ctx: &Ctx, hashed: Hashed) -> Outcome {
     }
     if let Some(object) = ctx.remote.as_ref().and_then(|remote| remote.get(&file.rel)) {
         if object.size == record.size && object.crc32c.as_deref().and_then(crate::gcs::parse_crc32c_b64) == Some(crc) {
-            if !ctx.opts.dry_run {
-                let _ = ctx.manifest.record(&ctx.dest, &file.rel, &record, object.generation.as_deref());
-            }
+            // Recorded by previews too: it's true either way, and the upload after a preview
+            // then doesn't read the file again.
+            let _ = ctx.manifest.record(&ctx.dest, &file.rel, &record, object.generation.as_deref());
             return Outcome::AlreadyInCloud;
         }
     }
