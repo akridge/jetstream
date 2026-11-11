@@ -321,6 +321,15 @@ def test_engine_jobs_can_be_paused_resumed_and_limited(tmp_path, monkeypatch):
     state.handle('{"event":"progress","files_done":1,"files_total":2,"bytes_done":5,"bytes_total":9,"paused":true}', None)
     assert services.job_activity("job-e")["paused"] is True
 
+    # A dropped connection: shown while it lasts, and mentioned in the summary.
+    state.handle('{"event":"offline","error":"network error: connection refused"}', None)
+    snap = services.job_activity("job-e")
+    assert snap["offline"] is True and snap["offline_seconds"] == 0
+    state.handle('{"event":"online","offline_seconds":42}', None)
+    assert services.job_activity("job-e")["offline"] is False
+    state.handle('{"event":"done","uploaded":3,"failed":0,"unchanged":0,"elapsed_seconds":50}', None)
+    assert "connection dropped 1 time(s) (42 s in all)" in state.summary_text(0)
+
 
 def test_pause_endpoint_refuses_jobs_it_cannot_pause(db_env):
     app = FastAPI()

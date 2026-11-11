@@ -75,6 +75,32 @@ impl Throttle {
     }
 }
 
+impl Throttle {
+    /// Wait for the bandwidth limit only (not for a pause). Used for each piece of an upload
+    /// body while its request is already open: a pause interrupts that request instead.
+    pub async fn reserve(&self, bytes: u64) {
+        let rate = self.rate();
+        if rate == 0 || bytes == 0 {
+            return;
+        }
+        let start = {
+            let mut next = self.next_free.lock().await;
+            let now = Instant::now();
+            let start = next.filter(|t| *t > now).unwrap_or(now);
+            *next = Some(start + Duration::from_secs_f64(bytes as f64 / rate as f64));
+            start
+        };
+        tokio::time::sleep_until(start).await;
+    }
+
+    /// Wait while paused (or until `cancelled`).
+    pub async fn wait_while_paused(&self, cancelled: impl Fn() -> bool) {
+        while self.is_paused() && !cancelled() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+}
+
 pub fn mbps_to_bytes(mbps: f64) -> u64 {
     if mbps.is_finite() && mbps > 0.0 {
         (mbps * 1_000_000.0 / 8.0) as u64

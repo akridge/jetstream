@@ -533,7 +533,7 @@ where
     let mut attempt = 0;
     loop {
         match f().await {
-            Err(GcsError::Retryable(_)) if attempt + 1 < MAX_ATTEMPTS => {
+            Err(GcsError::Retryable(_) | GcsError::Network(_)) if attempt + 1 < MAX_ATTEMPTS => {
                 attempt += 1;
                 let jitter = rand::random::<u64>() % 250;
                 tokio::time::sleep(Duration::from_millis(500 * 2u64.pow(attempt - 1) + jitter)).await;

@@ -267,7 +267,7 @@ async fn fetch(
     let cancelled = || progress.cancel.load(Ordering::Relaxed);
     let mut response = match client.download(bucket, &object.name, object.generation.as_deref()).await {
         Ok(r) => r,
-        Err(GcsError::Retryable(m)) => return Err(FetchError::Retryable(m)),
+        Err(GcsError::Retryable(m) | GcsError::Network(m)) => return Err(FetchError::Retryable(m)),
         Err(e) => return Err(FetchError::Fatal(e.to_string())),
     };
     let mut file = tokio::fs::File::create(part).await.map_err(|e| FetchError::Fatal(format!("can't write {}: {e}", part.display())))?;
@@ -400,7 +400,7 @@ async fn upload_one(
                 offset = have;
                 attempts = 0;
             }
-            Err(GcsError::Retryable(msg)) if attempts < 5 => {
+            Err(GcsError::Retryable(msg) | GcsError::Network(msg)) if attempts < 5 => {
                 attempts += 1;
                 tokio::time::sleep(Duration::from_millis(500 * 2u64.pow(attempts))).await;
                 match client.query_resumable(&session, size, crc).await {

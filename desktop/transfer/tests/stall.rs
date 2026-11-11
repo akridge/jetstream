@@ -30,7 +30,7 @@ async fn a_stalled_upload_is_abandoned_and_reported_as_retryable() {
     let result = client.upload_multipart("bucket", "big.bin", data, 1, false).await;
     let elapsed = started.elapsed();
     match result {
-        Err(GcsError::Retryable(message)) => assert!(message.contains("stalled"), "{message}"),
+        Err(GcsError::Network(message)) => assert!(message.contains("stalled"), "{message}"),
         other => panic!("expected a retryable stall, got {:?}", other.map(|i| i.name)),
     }
     assert!(elapsed < Duration::from_secs(15), "gave up after {elapsed:?}");

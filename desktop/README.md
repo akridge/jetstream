@@ -48,7 +48,7 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - progress that survives **Cancel** and **Sync now**: what's already in the cloud counts straight away instead of starting again from 0%
   - its schedule and next run, if it syncs automatically
 
-  **Preview** shows what would upload. **Sync now** uploads only what's new.
+  **Preview** shows what would upload. **Sync now** uploads only what's new (it waits its turn if other folders are uploading). While a preview runs, **Upload when done** starts the upload as soon as it finishes. Adding or editing a folder offers **Save & upload** to skip the preview.
 - **Add folders your way:** **Add folder** opens the native folder picker, or you can drag a folder from File Explorer onto the window. The dialog counts the folder's files, offers quick bucket choices, and lets you choose:
   - which upload tool to use: `gcloud storage rsync`, or the faster-to-re-sync **JetStream engine** (see [`transfer/README.md`](transfer/README.md))
   - **Create a folder in the destination:** upload the folder itself rather than just its contents. `C:\folder1` to `gs://bucket/folder` then lands in `gs://bucket/folder/folder1/`. New folders remember your last choice.
@@ -155,7 +155,8 @@ JetStream.app / JetStream.exe        Rust shell (src-tauri/src/main.rs)
 
 - **OneDrive folders (e.g. Desktop or Documents):** online-only files aren't on the computer, so they're skipped with a note in the job output. Right-click the folder and choose **Always keep on this device**, then sync again.
 - **Files open in another program** are tried again at the end of the sync; close the program if they still fail.
-- **A dropped connection** is noticed within about a minute and the upload continues from where Google has it ("retrying" in the job details).
+- **A dropped internet connection** (JetStream engine): the card says **Waiting for the internet connection**, and everything carries on by itself when it's back, however long it was down, without failing files. Large files continue from where Google has them. A connection that silently stops moving is noticed within a minute.
+- **Pause** (JetStream engine) stops sending within a second, even in the middle of a large file; **Resume** carries on from there. **Cancel** stops just as quickly and keeps what's done, so the next run continues.
 - **A big folder:** turn on **Upload each subfolder as its own job**. Starting a sync or preview answers at once whatever the folder's size: the card says **Starting…**, then **Counting files… N found so far** (gcloud uploads count first so progress has a total; the JetStream engine counts as it goes). Clicking again while it runs doesn't start a second copy; you're told it's already running.
 - **Moving from gcloud to the JetStream engine:** the first engine sync recognises files gcloud uploaded by size and date, without reading them again.
 

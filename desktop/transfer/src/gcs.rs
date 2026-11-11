@@ -18,6 +18,7 @@ use reqwest::{Response, StatusCode};
 use serde::Deserialize;
 
 use crate::auth::TokenProvider;
+use crate::throttle::Throttle;
 
 /// Characters left unescaped in a URL path/query component (RFC 3986 unreserved).
 const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
@@ -55,8 +56,14 @@ pub enum GcsError {
     AlreadyExists,
     /// Resumable session no longer valid; start a new one.
     SessionExpired,
-    /// Worth retrying (network, 408, 429, 5xx, checksum mismatch).
+    /// Worth retrying (408, 429, 5xx, checksum mismatch).
     Retryable(String),
+    /// The request couldn't reach Cloud Storage (no connection, DNS, reset, timeout) or an
+    /// access token couldn't be fetched. Worth retrying; uploads first check whether the
+    /// internet is reachable and wait for it to come back.
+    Network(String),
+    /// The upload was paused or stopped while its body was going out (see UploadExtras).
+    Interrupted,
     /// Retrying won't help (permissions, bad request, ...).
     Fatal(String),
 }
@@ -66,7 +73,8 @@ impl std::fmt::Display for GcsError {
         match self {
             GcsError::AlreadyExists => write!(f, "object already exists"),
             GcsError::SessionExpired => write!(f, "upload session expired"),
-            GcsError::Retryable(msg) | GcsError::Fatal(msg) => write!(f, "{msg}"),
+            GcsError::Retryable(msg) | GcsError::Network(msg) | GcsError::Fatal(msg) => write!(f, "{msg}"),
+            GcsError::Interrupted => write!(f, "paused or stopped"),
         }
     }
 }
@@ -129,6 +137,17 @@ pub struct UploadExtras {
     /// Incremented as body bytes are handed to the network, for live progress. Bytes counted
     /// for a request that then fails are subtracted again.
     pub live: Option<Arc<AtomicU64>>,
+    /// Bandwidth limit (applied to each piece of the body as it goes out) and pause: pausing
+    /// interrupts a request within half a second instead of letting its chunk finish.
+    pub throttle: Option<Arc<Throttle>>,
+    /// Set to stop: interrupts a request the same way.
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+impl UploadExtras {
+    fn interrupted(&self) -> bool {
+        self.throttle.as_ref().is_some_and(|t| t.is_paused()) || self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))
+    }
 }
 
 /// No body bytes moving for this long means the connection has stalled: the request is
@@ -241,8 +260,20 @@ impl GcsClient {
         match self.auth.token().await {
             Ok(Some(token)) => Ok(builder.bearer_auth(token)),
             Ok(None) => Ok(builder),
-            Err(err) => Err(GcsError::Fatal(format!("{err:#}"))),
+            // Usually no connection (or the sign-in helper couldn't reach Google): retried, and
+            // uploads wait for the internet to come back. A real sign-in problem still fails
+            // once the retries run out.
+            Err(err) => Err(GcsError::Network(format!("could not get an access token: {err:#}"))),
         }
+    }
+
+    /// Whether Cloud Storage can be reached at all (any HTTP answer counts), for telling a
+    /// dropped internet connection from a failing request.
+    pub async fn reachable(&self) -> bool {
+        matches!(
+            tokio::time::timeout(Duration::from_secs(10), self.http.get(format!("{}/storage/v1/b", self.base)).send()).await,
+            Ok(Ok(_))
+        )
     }
 
     async fn send(&self, builder: reqwest::RequestBuilder) -> Result<Response, GcsError> {
@@ -251,7 +282,7 @@ impl GcsClient {
             .await?
             .send()
             .await
-            .map_err(|e| GcsError::Retryable(format!("network error: {e}")))?;
+            .map_err(|e| GcsError::Network(format!("network error: {e}")))?;
         if response.status() == StatusCode::UNAUTHORIZED {
             // Token may have been revoked or expired early; next attempt fetches a new one.
             self.auth.invalidate().await;
@@ -262,7 +293,8 @@ impl GcsClient {
 
     /// Send `builder` with `data` as the body, piece by piece. Gives up with a retryable error if
     /// no piece moves for `stall_timeout()` while the body is going out.
-    async fn send_body(&self, builder: reqwest::RequestBuilder, data: Vec<u8>, live: Option<&Arc<AtomicU64>>) -> Result<Response, GcsError> {
+    async fn send_body(&self, builder: reqwest::RequestBuilder, data: Vec<u8>, extras: &UploadExtras) -> Result<Response, GcsError> {
+        let live = extras.live.as_ref();
         let total = data.len();
         let bytes = bytes::Bytes::from(data);
         let sent = Arc::new(AtomicU64::new(0));
@@ -270,18 +302,25 @@ impl GcsClient {
         let started = Instant::now();
         let last_move_ms = Arc::new(AtomicU64::new(0));
         let pieces: Vec<bytes::Bytes> = (0..total).step_by(BODY_PIECE).map(|at| bytes.slice(at..(at + BODY_PIECE).min(total))).collect();
-        let (s, f, l, live_counter) = (sent.clone(), finished.clone(), last_move_ms.clone(), live.cloned());
-        let body = futures::StreamExt::map(futures::stream::iter(pieces), move |piece| {
-            let n = piece.len() as u64;
-            let done = s.fetch_add(n, Ordering::Relaxed) + n;
-            if let Some(c) = &live_counter {
-                c.fetch_add(n, Ordering::Relaxed);
+        let (s, f, l, live_counter, throttle) = (sent.clone(), finished.clone(), last_move_ms.clone(), live.cloned(), extras.throttle.clone());
+        let body = futures::StreamExt::then(futures::stream::iter(pieces), move |piece| {
+            let (s, f, l, live_counter, throttle) = (s.clone(), f.clone(), l.clone(), live_counter.clone(), throttle.clone());
+            async move {
+                let n = piece.len() as u64;
+                // The bandwidth limit, a piece at a time, so the rate is smooth.
+                if let Some(t) = &throttle {
+                    t.reserve(n).await;
+                }
+                let done = s.fetch_add(n, Ordering::Relaxed) + n;
+                if let Some(c) = &live_counter {
+                    c.fetch_add(n, Ordering::Relaxed);
+                }
+                l.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                if done as usize >= total {
+                    f.store(true, Ordering::Relaxed);
+                }
+                Ok::<_, std::io::Error>(piece)
             }
-            l.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
-            if done as usize >= total {
-                f.store(true, Ordering::Relaxed);
-            }
-            Ok::<_, std::io::Error>(piece)
         });
         let request = builder.header(CONTENT_LENGTH, total.to_string()).body(reqwest::Body::wrap_stream(body));
 
@@ -293,17 +332,20 @@ impl GcsClient {
                     // The response is covered by the client's read timeout.
                     std::future::pending::<()>().await;
                 }
+                // Paused or stopped: drop the request now rather than finish the chunk. A
+                // resumable upload continues from what Cloud Storage kept.
+                if extras.interrupted() {
+                    return GcsError::Interrupted;
+                }
                 let idle = started.elapsed().saturating_sub(Duration::from_millis(last_move_ms.load(Ordering::Relaxed)));
                 if idle >= stall {
-                    return;
+                    return GcsError::Network(format!("upload stalled (nothing sent for {}s); retrying", stall.as_secs()));
                 }
             }
         };
         let result = tokio::select! {
             result = self.send(request) => result,
-            _ = watchdog => Err(GcsError::Retryable(format!(
-                "upload stalled (nothing sent for {}s); retrying", stall.as_secs()
-            ))),
+            err = watchdog => Err(err),
         };
         // Only finished requests keep their bytes in the live count; the caller adds them for real.
         if let Some(live) = live {
@@ -374,7 +416,7 @@ impl GcsClient {
             url.push_str("&ifGenerationMatch=0");
         }
         let request = self.http.post(url).header(CONTENT_TYPE, format!("multipart/related; boundary={boundary}"));
-        let response = self.send_body(request, body, extras.live.as_ref()).await?;
+        let response = self.send_body(request, body, extras).await?;
         if !response.status().is_success() {
             return Err(Self::error_for(response).await);
         }
@@ -490,7 +532,7 @@ impl GcsClient {
         size: u64,
         crc: u32,
     ) -> Result<ResumableStatus, GcsError> {
-        self.put_chunk_with(session, offset, data, size, crc, None).await
+        self.put_chunk_with(session, offset, data, size, crc, &UploadExtras::default()).await
     }
 
     pub async fn put_chunk_with(
@@ -500,11 +542,11 @@ impl GcsClient {
         data: Vec<u8>,
         size: u64,
         crc: u32,
-        live: Option<&Arc<AtomicU64>>,
+        extras: &UploadExtras,
     ) -> Result<ResumableStatus, GcsError> {
         let end = offset + data.len() as u64 - 1;
         let request = self.http.put(session).header(CONTENT_RANGE, format!("bytes {offset}-{end}/{size}"));
-        let response = self.send_body(request, data, live).await?;
+        let response = self.send_body(request, data, extras).await?;
         Self::resumable_response(response, size, crc).await
     }
 

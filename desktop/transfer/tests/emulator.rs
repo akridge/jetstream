@@ -567,7 +567,7 @@ mod resume_and_speed {
         env.write("a/no_time.bin", &big(6000, 2));
         // Uploaded earlier by another tool: one with gcloud's file-time metadata, one without.
         let with = big(5000, 1);
-        let extras = UploadExtras { mtime_secs: Some(mtime_ns(&env.src().join("a/with_time.bin")) / 1_000_000_000), live: None };
+        let extras = UploadExtras { mtime_secs: Some(mtime_ns(&env.src().join("a/with_time.bin")) / 1_000_000_000), live: None, ..Default::default() };
         env.client.upload_multipart_with("bucket", "data/a/with_time.bin", with.clone(), crc32c::crc32c(&with), false, &extras).await.unwrap();
         let without = big(6000, 2);
         env.client.upload_multipart("bucket", "data/a/no_time.bin", without.clone(), crc32c::crc32c(&without), false).await.unwrap();
@@ -685,4 +685,157 @@ async fn receipt_verifies_every_file_and_learns_checksums() {
     assert!(csv_path.exists() && json_path.exists());
     let json: serde_json::Value = serde_json::from_slice(&std::fs::read(json_path).unwrap()).unwrap();
     assert_eq!(json["totals"]["mismatch"], 1);
+}
+
+/// Pause, stop and a dropped internet connection, through a proxy that can be unplugged.
+mod pause_and_reconnect {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use jetstream_transfer::throttle::Throttle;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Forwards to the emulator; `unplug` drops every connection and refuses new ones, like a
+    /// lost internet connection. Counts the bytes sent upstream.
+    struct Proxy {
+        base: String,
+        down: Arc<AtomicBool>,
+        sent: Arc<AtomicU64>,
+        conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    }
+
+    impl Proxy {
+        async fn start(upstream: &str) -> Proxy {
+            let upstream = upstream.trim_start_matches("http://").to_string();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let (down, sent, conns) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)), Arc::new(Mutex::new(Vec::new())));
+            let (d, s, c) = (down.clone(), sent.clone(), conns.clone());
+            tokio::spawn(async move {
+                loop {
+                    let (client, _) = listener.accept().await.unwrap();
+                    if d.load(Ordering::Relaxed) {
+                        drop(client);
+                        continue;
+                    }
+                    let (upstream, sent) = (upstream.clone(), s.clone());
+                    let handle = tokio::spawn(async move {
+                        let Ok(server) = tokio::net::TcpStream::connect(&upstream).await else { return };
+                        let (mut cr, mut cw) = client.into_split();
+                        let (mut sr, mut sw) = server.into_split();
+                        let up = async {
+                            let mut buf = vec![0u8; 64 * 1024];
+                            loop {
+                                let n = match cr.read(&mut buf).await { Ok(0) | Err(_) => break, Ok(n) => n };
+                                sent.fetch_add(n as u64, Ordering::Relaxed);
+                                if sw.write_all(&buf[..n]).await.is_err() { break; }
+                            }
+                            let _ = sw.shutdown().await;
+                        };
+                        let downstream = async {
+                            let _ = tokio::io::copy(&mut sr, &mut cw).await;
+                            let _ = cw.shutdown().await;
+                        };
+                        tokio::join!(up, downstream);
+                    });
+                    c.lock().unwrap().push(handle);
+                }
+            });
+            Proxy { base, down, sent, conns }
+        }
+
+        fn unplug(&self) {
+            self.down.store(true, Ordering::Relaxed);
+            for handle in self.conns.lock().unwrap().drain(..) {
+                handle.abort();
+            }
+        }
+
+        fn plug(&self) {
+            self.down.store(false, Ordering::Relaxed);
+        }
+    }
+
+    fn spawn_sync(env: &Env, client: GcsClient, opts: SyncOptions, cancel: Arc<AtomicBool>) -> (tokio::task::JoinHandle<Summary>, Arc<Mutex<Vec<Event>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let manifest = env.manifest.clone();
+        let handle = tokio::spawn(async move {
+            sync(client, manifest, opts, "test", Arc::new(move |e| sink.lock().unwrap().push(e)), cancel).await.unwrap()
+        });
+        (handle, events)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connection_waits_and_carries_on_without_failing_files() {
+        let Some(env) = Env::new().await else { return };
+        let proxy = Proxy::start(&env.emulator.base).await;
+        let http = GcsClient::http_client();
+        let client = GcsClient::with_base(http.clone(), &proxy.base, Arc::new(TokenProvider::none(http)));
+        for i in 0..3 {
+            env.write(&format!("big/{i}.bin"), &big(3 * 1024 * 1024, i as u8));
+        }
+        for i in 0..20 {
+            env.write(&format!("small/{i}.txt"), &big(40_000, i as u8));
+        }
+        let mut opts = env.options();
+        opts.throttle = Arc::new(Throttle::new(4_000_000)); // ~3 s of uploading
+        let (handle, events) = spawn_sync(&env, client, opts, Arc::new(AtomicBool::new(false)));
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        proxy.unplug();
+        tokio::time::sleep(Duration::from_secs(5)).await; // longer than all the retries together
+        proxy.plug();
+        let summary = tokio::time::timeout(Duration::from_secs(60), handle).await.expect("finished").unwrap();
+        assert_eq!((summary.uploaded, summary.failed), (23, 0), "{summary:?}");
+        {
+            let events = events.lock().unwrap();
+            assert!(events.iter().any(|e| matches!(e, Event::Offline { .. })), "reported offline");
+            assert!(events.iter().any(|e| matches!(e, Event::Online { offline_seconds } if *offline_seconds >= 3)), "and back online");
+        }
+        for i in 0..3 {
+            assert_eq!(env.object(&format!("data/big/{i}.bin")).await.unwrap().1, big(3 * 1024 * 1024, i as u8));
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_stops_sending_within_a_second_and_resume_finishes() {
+        let Some(env) = Env::new().await else { return };
+        let proxy = Proxy::start(&env.emulator.base).await;
+        let http = GcsClient::http_client();
+        let client = GcsClient::with_base(http.clone(), &proxy.base, Arc::new(TokenProvider::none(http)));
+        let data = big(8 * 1024 * 1024, 9);
+        env.write("video.bin", &data);
+        let mut opts = env.options();
+        opts.chunk_size = 8 * 1024 * 1024; // one long request: pause must interrupt it
+        let throttle = Arc::new(Throttle::new(2_000_000));
+        opts.throttle = throttle.clone();
+        let (handle, events) = spawn_sync(&env, client, opts, Arc::new(AtomicBool::new(false)));
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        throttle.set_paused(true);
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let at_pause = proxy.sent.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        assert!(proxy.sent.load(Ordering::Relaxed) - at_pause < 64 * 1024, "nothing more sent while paused");
+        throttle.set_paused(false);
+        let summary = tokio::time::timeout(Duration::from_secs(60), handle).await.expect("finished").unwrap();
+        assert_eq!((summary.uploaded, summary.failed), (1, 0), "{summary:?}");
+        assert_eq!(env.object("data/video.bin").await.unwrap().1, data);
+        assert!(!events.lock().unwrap().iter().any(|e| matches!(e, Event::FileRetrying { .. })), "a pause isn't a failure");
+    }
+
+    #[tokio::test]
+    async fn stop_ends_a_long_request_at_once() {
+        let Some(env) = Env::new().await else { return };
+        env.write("video.bin", &big(8 * 1024 * 1024, 3));
+        let mut opts = env.options();
+        opts.chunk_size = 8 * 1024 * 1024;
+        opts.throttle = Arc::new(Throttle::new(1_000_000)); // the chunk alone would take 8 s
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (handle, _) = spawn_sync(&env, env.client.clone(), opts, cancel.clone());
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let stopped = Instant::now();
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let summary = tokio::time::timeout(Duration::from_secs(10), handle).await.expect("finished").unwrap();
+        assert!(stopped.elapsed() < Duration::from_secs(2), "stopped after {:?}", stopped.elapsed());
+        assert_eq!(summary.uploaded, 0);
+    }
 }

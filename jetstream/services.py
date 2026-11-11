@@ -1010,6 +1010,8 @@ class JobActivity:
         self.files_done = 0
         self.failed = 0
         self.paused = False
+        # Waiting for the internet connection to come back (time.time() when it dropped).
+        self.offline_since: Optional[float] = None
         # Engine phase: scanning, listing, uploading; with what it has checked so far.
         self.phase: Optional[str] = None
         self.checking: Dict = {}
@@ -1043,6 +1045,8 @@ class JobActivity:
             return {
                 "tool": self.tool,
                 "paused": self.paused,
+                "offline": self.offline_since is not None,
+                "offline_seconds": round(now - self.offline_since) if self.offline_since else 0,
                 "phase": self.phase,
                 "checking": dict(self.checking),
                 "files_done": self.files_done,
@@ -1146,6 +1150,8 @@ class EngineRunState:
         self.dry_run = False
         self.activity: Optional[JobActivity] = None
         self.online_only: List[str] = []
+        self.offline_events = 0
+        self.offline_seconds = 0
 
     def handle(self, line: str, progress_callback: Optional[Callable]) -> None:
         import json
@@ -1159,6 +1165,14 @@ class EngineRunState:
         elif kind == "phase":
             if self.activity is not None:
                 self.activity.phase = event.get("phase")
+        elif kind == "offline":
+            if self.activity is not None and self.activity.offline_since is None:
+                self.activity.offline_since = time.time()
+            self.offline_events += 1
+        elif kind == "online":
+            if self.activity is not None:
+                self.activity.offline_since = None
+            self.offline_seconds += int(event.get("offline_seconds") or 0)
         elif kind == "file_retrying":
             if self.activity is not None:
                 self.activity.retry(event.get("path"), int(event.get("attempt") or 0),
@@ -1174,6 +1188,10 @@ class EngineRunState:
         elif kind == "progress":
             if self.activity is not None:
                 self.activity.paused = bool(event.get("paused"))
+                if event.get("offline") and self.activity.offline_since is None:
+                    self.activity.offline_since = time.time()
+                elif not event.get("offline"):
+                    self.activity.offline_since = None
                 if event.get("phase"):
                     self.activity.phase = event.get("phase")
                 self.activity.checking = {
@@ -1237,6 +1255,11 @@ class EngineRunState:
                 "this computer. Right-click the folder and choose \"Always keep on this device\", then sync again."
             )
             lines.extend(f"  {p}" for p in self.online_only[:10])
+        if self.offline_events:
+            lines.append(
+                f"The internet connection dropped {self.offline_events} time(s) ({self.offline_seconds} s in all); "
+                "uploads waited and carried on when it came back."
+            )
         if s.get("cancelled"):
             lines.append("Stopped before finishing. Everything uploaded so far is kept; run the job again to continue.")
         if self.failures:

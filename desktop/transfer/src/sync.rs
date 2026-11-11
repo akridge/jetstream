@@ -169,6 +169,11 @@ pub enum Event {
     FileStarted { path: String, bytes: u64 },
     /// A request failed (or stalled) and is being tried again.
     FileRetrying { path: String, attempt: u32, max_attempts: u32, error: String },
+    /// Cloud Storage can't be reached (the internet connection dropped): every upload waits,
+    /// without using up its retries, and carries on by itself when the connection is back.
+    Offline { error: String },
+    /// The connection is back after `offline_seconds`; uploads continue where they were.
+    Online { offline_seconds: u64 },
     FileUploaded { path: String, bytes: u64, generation: Option<String>, resumed_from: Option<u64> },
     FileWouldUpload { path: String, bytes: u64 },
     FileSkipped { path: String, reason: String },
@@ -183,6 +188,8 @@ pub enum Event {
         hashed_bytes: u64,
         listed_objects: u64,
         paused: bool,
+        /// Waiting for the internet connection to come back.
+        offline: bool,
     },
     Done {
         #[serde(flatten)]
@@ -256,6 +263,17 @@ struct Ctx {
     hashed_bytes: AtomicU64,
     listed: Arc<AtomicU64>,
     phase: std::sync::Mutex<&'static str>,
+    net: Net,
+}
+
+/// Whether Cloud Storage is reachable, shared by every upload of a sync.
+#[derive(Default)]
+struct Net {
+    offline: AtomicBool,
+    /// Bumped each time an outage ends, so uploads that failed during it don't each probe again.
+    outages: AtomicU64,
+    /// One upload checks the connection at a time; the rest wait for its answer.
+    checking: tokio::sync::Mutex<()>,
 }
 
 impl Ctx {
@@ -341,6 +359,32 @@ const LIST_FIELDS: &str = "name,size,crc32c,md5Hash,generation,updated,metadata"
 /// List objects under gs://bucket/prefix, keyed by name relative to the prefix. With `only`,
 /// just those top-level subfolders ("" = objects directly under the prefix). Subfolders are
 /// listed in parallel.
+/// One page of a bucket listing, tried again (for about a minute) when the connection drops or
+/// Cloud Storage is briefly unavailable, so a blip doesn't fail the whole sync.
+async fn list_page_retrying(
+    client: &GcsClient,
+    bucket: &str,
+    prefix: &str,
+    token: Option<&str>,
+) -> Result<(Vec<serde_json::Value>, Option<String>)> {
+    let mut attempt = 0u32;
+    loop {
+        match client.list_raw(bucket, prefix, token, LIST_FIELDS, false).await {
+            Ok(page) => return Ok(page),
+            Err(err) if attempt < 6 && is_transient(&format!("{err:#}")) => {
+                tokio::time::sleep(Duration::from_secs(1 << attempt.min(4))).await;
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Network trouble or a temporary Cloud Storage error (not permissions or a missing bucket).
+fn is_transient(message: &str) -> bool {
+    ["network error", "access token", "stalled", "408", "429", "500 ", "502 ", "503 ", "504 "].iter().any(|m| message.contains(m))
+}
+
 pub(crate) async fn list_remote(
     client: &GcsClient,
     bucket: &str,
@@ -386,7 +430,7 @@ pub(crate) async fn list_remote(
             let mut found = Vec::new();
             let mut token: Option<String> = None;
             loop {
-                let (items, next) = client.list_raw(bucket, &sub, token.as_deref(), LIST_FIELDS, false).await?;
+                let (items, next) = list_page_retrying(client, bucket, &sub, token.as_deref()).await?;
                 listed.fetch_add(items.len() as u64, Ordering::Relaxed);
                 found.extend(items);
                 match next {
@@ -490,6 +534,7 @@ pub async fn sync(
                         hashed_bytes: 0,
                         listed_objects: listed.load(Ordering::Relaxed),
                         paused: false,
+                        offline: false,
                     });
                 }
             })
@@ -578,6 +623,7 @@ pub async fn sync(
         hashed_bytes: AtomicU64::new(0),
         listed,
         phase: std::sync::Mutex::new("uploading"),
+        net: Net::default(),
     });
     emit(Event::Phase { phase: "uploading" });
 
@@ -591,6 +637,7 @@ pub async fn sync(
         hashed_bytes: ctx.hashed_bytes.load(Ordering::Relaxed),
         listed_objects: ctx.listed.load(Ordering::Relaxed),
         paused,
+        offline: ctx.net.offline.load(Ordering::Relaxed),
     };
     let ticker = {
         let (ctx, emit) = (ctx.clone(), emit.clone());
@@ -815,7 +862,55 @@ fn retrying(ctx: &Ctx, file: &LocalFile, attempt: u32, error: &str) {
 }
 
 fn extras(ctx: &Ctx, file: &LocalFile) -> UploadExtras {
-    UploadExtras { mtime_secs: Some(file.mtime_secs()), live: Some(ctx.live_bytes.clone()) }
+    UploadExtras {
+        mtime_secs: Some(file.mtime_secs()),
+        live: Some(ctx.live_bytes.clone()),
+        throttle: Some(ctx.opts.throttle.clone()),
+        cancel: Some(ctx.cancel.clone()),
+    }
+}
+
+/// Wait while the sync is paused or the internet connection is down (or until it's stopped).
+async fn wait_ready(ctx: &Ctx) {
+    loop {
+        ctx.opts.throttle.wait_while_paused(|| ctx.cancelled()).await;
+        if ctx.cancelled() || !ctx.net.offline.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// After a network error: if Cloud Storage can't be reached at all, wait (checking every few
+/// seconds, up to every 10 s) until it can, and return true so the failed attempt isn't counted.
+/// Returns false when the connection is fine (a one-off failure, retried as usual).
+async fn wait_for_network(ctx: &Ctx, error: &str) -> bool {
+    let outages = ctx.net.outages.load(Ordering::Relaxed);
+    let _checking = ctx.net.checking.lock().await;
+    if ctx.net.outages.load(Ordering::Relaxed) != outages {
+        return true; // failed during an outage another upload has just waited out
+    }
+    if ctx.client.reachable().await {
+        return false;
+    }
+    ctx.net.offline.store(true, Ordering::Relaxed);
+    (ctx.emit)(Event::Offline { error: error.chars().take(300).collect() });
+    let since = Instant::now();
+    let mut wait = Duration::from_secs(2);
+    loop {
+        let until = Instant::now() + wait;
+        while Instant::now() < until && !ctx.cancelled() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if ctx.cancelled() || ctx.client.reachable().await {
+            break;
+        }
+        wait = (wait * 2).min(Duration::from_secs(10));
+    }
+    ctx.net.offline.store(false, Ordering::Relaxed);
+    ctx.net.outages.fetch_add(1, Ordering::Relaxed);
+    (ctx.emit)(Event::Online { offline_seconds: since.elapsed().as_secs() });
+    true
 }
 
 async fn upload_small(
@@ -827,6 +922,10 @@ async fn upload_small(
 ) -> Result<ObjectInfo, UploadError> {
     let mut attempt = 0;
     loop {
+        wait_ready(ctx).await;
+        if ctx.cancelled() {
+            return Err(UploadError::Cancelled);
+        }
         let data = match kept.take() {
             Some(data) => data,
             None => tokio::fs::read(&file.abs).await.map_err(|e| UploadError::Io(format!("could not read file: {e}")))?,
@@ -834,14 +933,22 @@ async fn upload_small(
         if data.len() as u64 != record.size || crc32c::crc32c(&data) != record.crc32c {
             return Err(UploadError::Io("file changed while it was being uploaded; it will be retried on the next sync".into()));
         }
-        ctx.opts.throttle.take(record.size, || ctx.cancelled()).await;
-        if ctx.cancelled() {
-            return Err(UploadError::Cancelled);
-        }
         match ctx.client.upload_multipart_with(&ctx.opts.bucket, name, data, record.crc32c, ctx.opts.no_clobber, &extras(ctx, file)).await {
             Ok(info) => {
                 ctx.bytes_done.fetch_add(record.size, Ordering::Relaxed);
                 return Ok(info);
+            }
+            // Paused or stopped mid-request: send it again once resumed (a stop ends above).
+            Err(GcsError::Interrupted) => {}
+            Err(GcsError::Network(error)) => {
+                if !wait_for_network(ctx, &error).await {
+                    if attempt + 1 >= ctx.opts.max_attempts {
+                        return Err(GcsError::Network(error).into());
+                    }
+                    retrying(ctx, file, attempt, &error);
+                    tokio::time::sleep(backoff(ctx, attempt)).await;
+                    attempt += 1;
+                }
             }
             Err(GcsError::Retryable(error)) if attempt + 1 < ctx.opts.max_attempts => {
                 retrying(ctx, file, attempt, &error);
@@ -850,6 +957,18 @@ async fn upload_small(
             }
             Err(err) => return Err(err.into()),
         }
+    }
+}
+
+/// Move `offset` to what Cloud Storage has kept of a resumable upload.
+async fn resync_offset(ctx: &Ctx, uri: &str, record: &FileRecord, offset: &mut u64) {
+    if let Ok(ResumableStatus::Incomplete { offset: have }) = ctx.client.query_resumable(uri, record.size, record.crc32c).await {
+        if have >= *offset {
+            ctx.bytes_done.fetch_add(have - *offset, Ordering::Relaxed);
+        } else {
+            ctx.bytes_done.fetch_sub((*offset - have).min(ctx.bytes_done.load(Ordering::Relaxed)), Ordering::Relaxed);
+        }
+        *offset = have;
     }
 }
 
@@ -899,6 +1018,7 @@ async fn upload_resumable(
     let mut attempt = 0;
     let mut restarts = 0;
     loop {
+        wait_ready(ctx).await;
         if ctx.cancelled() {
             // The session stays saved, so the next sync continues from `offset`.
             return Err(UploadError::Cancelled);
@@ -916,7 +1036,8 @@ async fn upload_resumable(
                     offset = 0;
                     uri
                 }
-                Err(GcsError::Retryable(error)) if attempt + 1 < ctx.opts.max_attempts => {
+                Err(GcsError::Network(error)) if wait_for_network(ctx, &error).await => continue,
+                Err(GcsError::Retryable(error) | GcsError::Network(error)) if attempt + 1 < ctx.opts.max_attempts => {
                     retrying(ctx, file, attempt, &error);
                     tokio::time::sleep(backoff(ctx, attempt)).await;
                     attempt += 1;
@@ -928,11 +1049,7 @@ async fn upload_resumable(
 
         let len = chunk.min((record.size - offset) as usize);
         let data = read_at(&file.abs, offset, len).await?;
-        ctx.opts.throttle.take(data.len() as u64, || ctx.cancelled()).await;
-        if ctx.cancelled() {
-            return Err(UploadError::Cancelled);
-        }
-        match ctx.client.put_chunk_with(&uri, offset, data, record.size, record.crc32c, Some(&ctx.live_bytes)).await {
+        match ctx.client.put_chunk_with(&uri, offset, data, record.size, record.crc32c, &extras(ctx, file)).await {
             Ok(ResumableStatus::Incomplete { offset: have }) => {
                 ctx.bytes_done.fetch_add(have.saturating_sub(offset), Ordering::Relaxed);
                 offset = have;
@@ -949,7 +1066,18 @@ async fn upload_resumable(
                 session = None;
                 restarts += 1;
             }
-            Err(GcsError::Retryable(error)) if attempt + 1 < ctx.opts.max_attempts => {
+            // Paused or stopped mid-chunk, or the connection dropped and is back: ask Cloud
+            // Storage how much it kept and continue from there (a stop ends at the top).
+            Err(GcsError::Interrupted) => {
+                wait_ready(ctx).await;
+                if !ctx.cancelled() {
+                    resync_offset(ctx, &uri, record, &mut offset).await;
+                }
+            }
+            Err(GcsError::Network(error)) if wait_for_network(ctx, &error).await => {
+                resync_offset(ctx, &uri, record, &mut offset).await;
+            }
+            Err(GcsError::Retryable(error) | GcsError::Network(error)) if attempt + 1 < ctx.opts.max_attempts => {
                 retrying(ctx, file, attempt, &error);
                 tokio::time::sleep(backoff(ctx, attempt)).await;
                 attempt += 1;

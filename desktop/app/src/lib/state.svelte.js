@@ -95,6 +95,8 @@ class AppState {
    * yet: their buttons stay disabled and the card says "Starting…", so a slow start never
    * invites a second click. */
   starting = $state({});
+  /** Folders (by preset id) to upload as soon as their running preview finishes. */
+  uploadAfterPreview = $state({});
   presets = $state([]);
   auth = $state(null);
   tools = $state([]);
@@ -303,6 +305,7 @@ class AppState {
       this.#announcedGroups.add(groupId);
       if (info.status === 'completed' && !siblings.some((j) => j.job_id !== info.job_id && j.status !== 'completed')) this.#autoReceipt(job);
       const run = collapseRuns(siblings)[0];
+      if (job.dry_run && this.#continueAfterPreview(job, run.status === 'completed' && !run.group.failed)) return;
       const folder = this.presetForJob(job)?.name || run.group.name;
       const failed = run.group.failed;
       const title = failed ? `${kind} finished with ${failed} failed ${failed === 1 ? 'folder' : 'folders'}` : run.status === 'cancelled' ? `${kind} cancelled` : `${kind} finished`;
@@ -313,6 +316,7 @@ class AppState {
       return;
     }
     if (info.status === 'completed' && job && !job.filters?.job_type) this.#autoReceipt(job);
+    if (info.dry_run && job && this.#continueAfterPreview(job, info.status === 'completed')) return;
     const folder = this.presetForJob(job)?.name || info.name;
     const title =
       info.status === 'completed' ? `${kind} finished` : info.status === 'failed' ? `${kind} failed` : `${kind} cancelled`;
@@ -320,6 +324,30 @@ class AppState {
       action: { label: 'View', run: () => this.openJob(info.job_id) },
     });
     if (this.prefs.notifications) notify(title, `${folder}\n${info.destination || ''}`);
+  }
+
+  /** Upload when this preview finishes (or don't). */
+  setUploadAfterPreview(preset, on) {
+    const { [preset.preset_id]: _, ...rest } = this.uploadAfterPreview;
+    this.uploadAfterPreview = on ? { ...rest, [preset.preset_id]: true } : rest;
+  }
+
+  /** A preview of a folder marked "upload when done" finished: start the upload. Returns true
+   * when it took over (no separate "Preview finished" message). */
+  #continueAfterPreview(job, ok) {
+    const preset = this.presetForJob(job);
+    if (!preset || !this.uploadAfterPreview[preset.preset_id]) return false;
+    this.setUploadAfterPreview(preset, false);
+    if (!ok) {
+      this.toast(`The preview of ${preset.name} didn't finish, so the upload wasn't started.`, 'error', {
+        action: { label: 'View', run: () => this.openJob(job.job_id) },
+        timeout: 12000,
+      });
+      return true;
+    }
+    this.toast(`Preview of ${preset.name} finished. Uploading now…`, 'success', { timeout: 4000 });
+    this.runPreset(preset, false);
+    return true;
   }
 
   toast(message, kind = 'info', { action = null, timeout = 6000 } = {}) {
@@ -430,9 +458,11 @@ class AppState {
     };
   }
 
-  async runPreset(preset, dryRun) {
+  /** Sync (or preview) a folder. thenUpload: a preview that starts the upload when it finishes. */
+  async runPreset(preset, dryRun, { thenUpload = false } = {}) {
     const id = preset.preset_id;
     if (id && this.starting[id]) return null; // already starting
+    if (dryRun && thenUpload) this.setUploadAfterPreview(preset, true);
     ensureNotificationPermission();
     if (id) this.starting = { ...this.starting, [id]: dryRun ? 'preview' : 'sync' };
     const done = () => {
@@ -444,6 +474,7 @@ class AppState {
     try {
       const result = await api.createUpload(this.uploadPayload(preset, dryRun));
       if (result?.already_running) {
+        if (!result.dry_run) this.setUploadAfterPreview(preset, false); // it's uploading already
         const what = result.dry_run ? 'being previewed' : 'syncing';
         this.toast(`${preset.name} is already ${what}, so nothing new was started. Its progress is on the card.`, 'info', { timeout: 6000 });
       }
@@ -451,6 +482,7 @@ class AppState {
       await this.refreshJobs().catch(() => {});
       return result;
     } catch (err) {
+      if (dryRun) this.setUploadAfterPreview(preset, false);
       this.toast(`Couldn't start ${preset.name}: ${err.message}`, 'error', { timeout: 10000 });
       return null;
     } finally {

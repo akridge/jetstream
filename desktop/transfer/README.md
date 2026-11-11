@@ -84,6 +84,7 @@ target/release/jetstream-transfer sync D:\Survey\2026 gs://my-bucket/surveys/202
 - `plan`: counts of local, unchanged and to-check files; first an `estimate` from the manifest, then refined after listing.
 - `tuned`: the concurrency and chunk size chosen.
 - `file_started` (files ≥ 4 MiB), `file_retrying` (with the attempt and reason, e.g. a stalled connection).
+- `offline` / `online` (with `offline_seconds`): Cloud Storage couldn't be reached, so every upload waited without using up its retries, then carried on. `progress` also carries `offline` while it lasts.
 - `file_uploaded`: includes `resumed_from` when a saved session was continued.
 - `file_would_upload`, `file_skipped` (including online-only placeholders) and `file_failed`.
 - `progress`: once a second, with the phase, files read for checking, objects listed, and bytes including those still in flight.
@@ -107,6 +108,8 @@ target/release/jetstream-transfer sync D:\Survey\2026 gs://my-bucket/surveys/202
    - Larger files use a resumable session whose URI is saved in the manifest. After a restart, the engine asks Cloud Storage how much it already has and sends only the rest.
    - **Auto-tuning:** many small files raise concurrency to 64; files over 1 GiB / 8 GiB use 32 / 64 MiB chunks (`--no-auto-tune` keeps your settings).
    - **No stuck uploads:** request bodies go out in 256 KiB pieces, and if none moves for 60 s (a dead connection) the request is abandoned and retried from the server's confirmed offset. TCP keepalive notices dead connections too. Each retry is reported (`file_retrying`).
+   - **Pause and stop act at once:** a request whose body is going out is dropped within half a second (not left to finish its chunk); large files continue from what Cloud Storage kept. The speed limit applies per 256 KiB piece, so the rate is smooth.
+   - **Lost internet connection:** after a network error the engine checks whether Cloud Storage is reachable. If not, all uploads wait (checking every few seconds, up to every 10 s) and continue when it's back, however long that takes, without failing files. An access token that can't be refreshed while offline is treated the same way.
    - **Locked files** (open in another program) are tried once more at the end.
    - A completed object is only accepted if its size and crc32c match.
 6. **Stopping** (Ctrl+C, or `{"cmd":"stop"}` with `--control-stdin`) finishes or saves what's in flight, keeps the manifest and exits with code 3; the next run continues.

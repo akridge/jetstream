@@ -99,7 +99,8 @@
     form.options.exclude_folders = [...folders].join(', ');
   }
 
-  async function save(previewAfter) {
+  /** then: null (just save), 'preview', 'preview-upload' or 'upload'. */
+  async function save(then) {
     error = '';
     saving = true;
     try {
@@ -117,7 +118,8 @@
       const saved = await app.savePreset(preset, dialog.previousName);
       app.folderDialog = null;
       app.toast(`Saved ${saved.name}`, 'success', { timeout: 3000 });
-      if (previewAfter) await app.runPreset(saved, true);
+      if (then === 'upload') await app.runPreset(saved, false);
+      else if (then) await app.runPreset(saved, true, { thenUpload: then === 'preview-upload' });
     } catch (err) {
       error = err.message;
     } finally {
@@ -301,8 +303,9 @@
 
     <footer>
       <button class="btn ghost" onclick={close}>Cancel</button>
-      <button class="btn" disabled={!canSave} onclick={() => save(false)}>{saving ? 'Saving…' : 'Save'}</button>
-      <button class="btn primary" disabled={!canSave} onclick={() => save(true)}>{saving ? 'Saving…' : 'Save & preview'}</button>
+      <button class="btn" disabled={!canSave} onclick={() => save(null)}>{saving ? 'Saving…' : 'Save'}</button>
+      <button class="btn" disabled={!canSave} title="Check what would upload; nothing is uploaded" onclick={() => save('preview')}>Save &amp; preview</button>
+      <button class="btn primary" disabled={!canSave} title="Upload what isn't in the cloud yet (waits its turn if other folders are uploading)" onclick={() => save('upload')}>{saving ? 'Saving…' : 'Save & upload'}</button>
     </footer>
   </div>
 </div>

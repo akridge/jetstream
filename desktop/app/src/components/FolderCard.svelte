@@ -57,6 +57,7 @@
   /** What the engine is doing right now, in words. */
   let phaseText = $derived.by(() => {
     if (paused) return 'Paused at';
+    if (activity?.offline) return 'Waiting for the internet connection ·';
     const phase = activity?.phase;
     if (phase === 'counting') return 'Counting files…';
     if (phase === 'scanning') return 'Looking through the folder…';
@@ -81,6 +82,7 @@
   let menuOpen = $state(false);
   // Asked to start and not yet showing as a job (also when started from the folder dialog).
   let starting = $derived(app.starting[preset.preset_id]);
+  let uploadAfter = $derived(!!app.uploadAfterPreview[preset.preset_id]);
   let busy = $derived(!!starting);
 
   function run(dryRun) {
@@ -174,8 +176,8 @@
           <strong>{phaseText} {Math.round(current.progress_percent || 0)}%</strong>
           <span class="muted">
             {bytes(current.bytes_uploaded)} of {bytes(current.total_size_bytes)}
-            {#if speed > 0 && !paused}· {bytes(speed)}/s{/if}
-            {#if remaining !== null && !paused}· {duration(remaining)} left{/if}
+            {#if speed > 0 && !paused && !activity?.offline}· {bytes(speed)}/s{/if}
+            {#if remaining !== null && !paused && !activity?.offline}· {duration(remaining)} left{/if}
           </span>
         </div>
         <ProgressBar value={current.progress_percent || 0} indeterminate={!current.total_size_bytes} />
@@ -184,6 +186,8 @@
             Folder {group.done + group.failed + group.cancelled + 1} of {group.parts}{#if group.current}: <span class="mono">{partName(group.current)}</span>{/if}{#if group.failed} · <span class="danger">{group.failed} failed</span>{/if}
           </div>
         {/if}
+        {#if current.dry_run && uploadAfter}<div class="now">The upload starts when this preview finishes.</div>{/if}
+        {#if activity?.offline}<div class="now">No connection to Google Cloud for {duration(activity.offline_seconds || 0)}. Uploads continue on their own when it's back.</div>{/if}
         {#if checkingText}<div class="now">{checkingText}</div>{/if}
         {#if nowFile}<div class="now mono truncate start" title={nowFile}><bdi>{nowFile}</bdi></div>{/if}
       {:else}
@@ -256,6 +260,13 @@
     {#if current}
       {#if runningJob && runningJob.upload_tool === 'jetstream' && !runningJob.dry_run}
         <button class="btn sm" onclick={togglePause}>{#if paused}<Play size={14} /> Resume{:else}<Pause size={14} /> Pause{/if}</button>
+      {/if}
+      {#if current.dry_run}
+        {#if uploadAfter}
+          <button class="btn sm" title="Don't upload when the preview finishes" onclick={() => app.setUploadAfterPreview(preset, false)}><CloudUpload size={15} /> Uploads when done ✓</button>
+        {:else}
+          <button class="btn primary sm" title="Start the upload as soon as this preview finishes" onclick={() => app.setUploadAfterPreview(preset, true)}><CloudUpload size={15} /> Upload when done</button>
+        {/if}
       {/if}
       <button class="btn sm" onclick={cancel}><Square size={14} /> {group ? 'Cancel all' : 'Cancel'}</button>
       <button class="btn ghost sm" onclick={() => app.openJob(current.job_id)}>Details</button>
