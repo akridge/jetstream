@@ -5,6 +5,7 @@
   import OpsTray from './components/OpsTray.svelte';
   import DropOverlay from './components/DropOverlay.svelte';
   import FolderDialog from './components/FolderDialog.svelte';
+  import AddFoldersDialog from './components/AddFoldersDialog.svelte';
   import FoldersView from './views/FoldersView.svelte';
   import ActivityView from './views/ActivityView.svelte';
   import SettingsView from './views/SettingsView.svelte';
@@ -15,10 +16,12 @@
   import AuditView from './views/AuditView.svelte';
   import CompareView from './views/CompareView.svelte';
   import { app } from './lib/state.svelte.js';
+  import { folderStatus } from './lib/status.svelte.js';
   import { onFolderDrop, serverLog } from './lib/platform.js';
 
   let dragging = $state(false);
   let dialogRef = $state();
+  let addRef = $state();
   let log = $state('');
 
   onMount(() => {
@@ -26,14 +29,21 @@
     const unlisten = onFolderDrop(
       (paths) => {
         if (app.server.phase !== 'ready') return;
-        if (app.folderDialog && dialogRef) dialogRef.setFolder(paths[0]);
+        if (app.addFoldersDialog && addRef) addRef.addPaths(paths);
+        else if (app.folderDialog && dialogRef) dialogRef.setFolder(paths[0]);
         else if (app.view === 'insights') app.scanRequest = paths[0];
         else if (app.view === 'cloud' && app.cloudLocation) app.cloudDrop = paths;
+        else if (paths.length > 1) app.addFolders({ paths });
         else app.addFolder(paths[0]);
       },
       (hovering) => (dragging = hovering && app.server.phase === 'ready'),
     );
     return () => unlisten.then((fn) => fn());
+  });
+
+  // Keep every folder's "what's new" status fresh once the folders are loaded.
+  $effect(() => {
+    if (app.loaded) folderStatus.start();
   });
 
   $effect(() => {
@@ -66,6 +76,9 @@
       {/if}
     </main>
   </div>
+  {#if app.addFoldersDialog}
+    <AddFoldersDialog bind:this={addRef} dialog={app.addFoldersDialog} />
+  {/if}
   {#if app.folderDialog}
     {#key app.folderDialog}
       <FolderDialog bind:this={dialogRef} dialog={app.folderDialog} />

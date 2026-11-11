@@ -651,15 +651,49 @@ async fn compare_folder(
     exclude_patterns: Vec<String>,
     exclude_folders: Vec<String>,
     recursive: bool,
+    lists: Option<bool>,
 ) -> Result<CompareReport, String> {
     let client = core.client()?;
     let excludes = compare::exclude_regexes(&exclude_patterns, &exclude_folders).map_err(|e| format!("{e:#}"))?;
     let data_dir = portable_data_dir().unwrap_or_else(default_data_dir);
     let manifest_path = data_dir.join("transfer-manifest.db");
     let manifest = if manifest_path.exists() { Manifest::open(&manifest_path).ok() } else { None };
-    compare::compare(&client, std::path::Path::new(&path), &destination, &excludes, recursive, manifest.as_ref())
+    let mut report = compare::compare(&client, std::path::Path::new(&path), &destination, &excludes, recursive, manifest.as_ref())
         .await
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| format!("{e:#}"))?;
+    // Background status checks only need the counts.
+    if lists == Some(false) {
+        for group in [&mut report.same, &mut report.different, &mut report.local_only, &mut report.cloud_only] {
+            group.truncated = group.truncated || !group.list.is_empty();
+            group.list.clear();
+        }
+        report.folders.clear();
+    }
+    Ok(report)
+}
+
+/// The folders directly inside `path` (e.g. a network share), for adding several at once.
+#[derive(serde::Serialize)]
+struct Subfolder {
+    name: String,
+    path: String,
+}
+
+#[tauri::command]
+async fn list_subfolders(path: String) -> Result<Vec<Subfolder>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out: Vec<Subfolder> = std::fs::read_dir(&path)
+            .map_err(|e| format!("Can't open {path}: {e}"))?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|entry| Subfolder { name: entry.file_name().to_string_lossy().into_owned(), path: entry.path().to_string_lossy().into_owned() })
+            .filter(|s| !s.name.starts_with('.') && !s.name.starts_with('$') && s.name != "System Volume Information")
+            .collect();
+        out.sort_by_key(|s| s.name.to_lowercase());
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Portable mode: a "JetStreamData" folder next to the program keeps the job history,
@@ -827,6 +861,7 @@ fn main() {
             upload_local_files,
             set_transfer_limit,
             classify_paths,
+            list_subfolders,
             make_receipt,
             list_receipts
         ])

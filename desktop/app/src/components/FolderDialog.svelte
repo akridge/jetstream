@@ -6,6 +6,7 @@
   import Cloud from '@lucide/svelte/icons/cloud';
   import { app } from '../lib/state.svelte.js';
   import { api } from '../lib/api.js';
+  import { DEFAULT_CHECK_MINUTES, folderStatus } from '../lib/status.svelte.js';
   import { bytes, count, normalizeDestination, basename } from '../lib/format.js';
   import { pickFolder } from '../lib/platform.js';
 
@@ -29,6 +30,8 @@
     form.destination = form.options.parent_destination;
   }
   form.options.schedule ??= { mode: 'off' };
+  form.options.check_minutes ??= DEFAULT_CHECK_MINUTES;
+  form.options.auto_upload ??= false;
   const sched = form.options.schedule;
   sched.time ??= '18:00';
   sched.every_hours ??= 6;
@@ -116,6 +119,7 @@
       };
       app.savePrefs({ include_folder_name: !!form.options.include_folder_name });
       const saved = await app.savePreset(preset, dialog.previousName);
+      if (!then) folderStatus.check(saved, { soon: true });
       app.folderDialog = null;
       app.toast(`Saved ${saved.name}`, 'success', { timeout: 3000 });
       if (then === 'upload') await app.runPreset(saved, false);
@@ -243,6 +247,24 @@
             <span><strong>Also keep a copy in the cloud</strong><small>Saved next to the data, in <span class="mono">_jetstream/receipts/</span>.</small></span>
           </label>
         {/if}
+      </div>
+
+      <div class="field">
+        <span class="label">Keep it up to date</span>
+        <label class="toggle">
+          <input type="checkbox" bind:checked={form.options.auto_upload} />
+          <span>
+            <strong>Upload new files automatically</strong>
+            <small>When a check finds new or changed files, they're uploaded once nothing has changed for 2 minutes (so files still being copied aren't sent half-done).</small>
+          </span>
+        </label>
+        <div class="schedule-row">
+          <span>Check for changes</span>
+          <select class="input" aria-label="How often to check for changes" bind:value={form.options.check_minutes}>
+            {#each [[5, 'every 5 minutes'], [15, 'every 15 minutes'], [60, 'every hour'], [240, 'every 4 hours'], [0, 'only when I ask']] as [n, label] (n)}<option value={n}>{label}</option>{/each}
+          </select>
+        </div>
+        <span class="hint">A check compares names and sizes with the cloud (nothing is read or uploaded), so the folder card always shows what's new. It runs while JetStream is open, including from the tray.</span>
       </div>
 
       <div class="field">

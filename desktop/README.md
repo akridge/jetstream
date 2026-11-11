@@ -48,7 +48,14 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - progress that survives **Cancel** and **Sync now**: what's already in the cloud counts straight away instead of starting again from 0%
   - its schedule and next run, if it syncs automatically
 
+  **Always up to date:** each card says **Up to date ✓** or **37 new or changed files · 1.2 GB** with an **Upload 37 files** button. JetStream checks every folder quietly in the background (names and sizes against the cloud; nothing is read or uploaded) when it opens, after each sync, and every 15 minutes (per folder: every 5 minutes to every 4 hours, or only when asked; big folders such as network shares are checked less often). **Check for changes now** is in the card's menu.
+
+  **Upload new files automatically** (per folder): when a check finds new or changed files, JetStream looks again two minutes later and uploads once nothing has changed in between, so files still being copied in aren't uploaded half-done. The card shows when it will start.
+
   **Preview** shows what would upload. **Sync now** uploads only what's new (it waits its turn if other folders are uploading). While a preview runs, **Upload when done** starts the upload as soon as it finishes. Adding or editing a folder offers **Save & upload** to skip the preview.
+- **Several folders or a network share:** **Add several…** lists the folders inside a folder or share (`\\server\share\projects` works) with a tick box each (filter, select all). The ticked ones become separate synced folders under one destination (`gs://bucket/path/<folder name>/`), with the same upload tool, auto-upload and receipt choices; folders already synced are marked. Dropping several folders on the window opens the same dialog, and **Add folders from somewhere else…** adds folders from anywhere. **Add & upload** uploads them one after another.
+
+  With several folders, a bar at the top says **3 folders have new files · 10 files · 879 KB · Upload all** (or "All 5 folders are up to date"). **Select** puts a tick box on each card for **Upload**, **Preview**, **Check for changes**, **Auto-upload on/off** or **Remove** on the chosen ones. Finished uploads close together are announced in one message, and receipts that verify everything don't pop up a message at all (the card shows them).
 - **Add folders your way:** **Add folder** opens the native folder picker, or you can drag a folder from File Explorer onto the window. The dialog counts the folder's files, offers quick bucket choices, and lets you choose:
   - which upload tool to use: `gcloud storage rsync`, or the faster-to-re-sync **JetStream engine** (see [`transfer/README.md`](transfer/README.md))
   - **Create a folder in the destination:** upload the folder itself rather than just its contents. `C:\folder1` to `gs://bucket/folder` then lands in `gs://bucket/folder/folder1/`. New folders remember your last choice.

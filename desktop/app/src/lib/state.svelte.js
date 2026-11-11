@@ -95,6 +95,8 @@ class AppState {
    * yet: their buttons stay disabled and the card says "Starting…", so a slow start never
    * invites a second click. */
   starting = $state({});
+  /** The "Add several folders" dialog: { parent?, paths? } or null. */
+  addFoldersDialog = $state(null);
   /** Folders (by preset id) to upload as soon as their running preview finishes. */
   uploadAfterPreview = $state({});
   presets = $state([]);
@@ -267,6 +269,8 @@ class AppState {
         const message = problems
           ? `Receipt for ${preset.name}: ${problems.toLocaleString()} of ${(t.local_files || 0).toLocaleString()} files not verified`
           : `Receipt for ${preset.name}: all ${(t.verified || 0).toLocaleString()} files verified`;
+        // An automatic receipt that verified everything shows on the folder card; no toast.
+        if (auto && !problems) return;
         this.toast(message, problems ? 'error' : 'success', {
           action: problems ? { label: 'Compare', run: () => this.compareFolder(preset) } : { label: 'Show', run: () => revealPath(r.csv) },
           timeout: auto && !problems ? 6000 : 12000,
@@ -293,7 +297,17 @@ class AppState {
     this.createReceipt(preset, { auto: true });
   }
 
+  #finishedHooks = [];
+  /** Call fn(job, preset) when a job (or a whole split upload) finishes. */
+  onJobFinished(fn) {
+    this.#finishedHooks.push(fn);
+  }
+
   #jobFinished(info) {
+    const job0 = this.jobs[info.job_id];
+    const group0 = job0?.filters?.group?.id;
+    const lastOfGroup = !group0 || !this.jobList.some((j) => j.filters?.group?.id === group0 && j.job_id !== info.job_id && ACTIVE.has(j.status));
+    if (job0 && lastOfGroup) for (const fn of this.#finishedHooks) fn(job0, this.presetForJob(job0));
     const kind = info.dry_run ? 'Preview' : info.job_type === 'cloud_sync' ? 'Cloud sync' : info.job_type === 'cloud_move' ? 'Move' : 'Sync';
     const job = this.jobs[info.job_id];
     const groupId = job?.filters?.group?.id;
@@ -309,9 +323,11 @@ class AppState {
       const folder = this.presetForJob(job)?.name || run.group.name;
       const failed = run.group.failed;
       const title = failed ? `${kind} finished with ${failed} failed ${failed === 1 ? 'folder' : 'folders'}` : run.status === 'cancelled' ? `${kind} cancelled` : `${kind} finished`;
-      this.toast(`${title}: ${folder} (${run.group.parts} folders)`, failed ? 'error' : run.status === 'cancelled' ? 'info' : 'success', {
-        action: { label: 'View', run: () => this.openJob(info.job_id) },
-      });
+      if (!failed && run.status === 'completed') this.#announceSuccess(kind, `${folder} (${run.group.parts} folders)`, info.job_id);
+      else
+        this.toast(`${title}: ${folder} (${run.group.parts} folders)`, failed ? 'error' : run.status === 'cancelled' ? 'info' : 'success', {
+          action: { label: 'View', run: () => this.openJob(info.job_id) },
+        });
       if (this.prefs.notifications) notify(title, `${folder}\n${info.destination || ''}`);
       return;
     }
@@ -320,10 +336,30 @@ class AppState {
     const folder = this.presetForJob(job)?.name || info.name;
     const title =
       info.status === 'completed' ? `${kind} finished` : info.status === 'failed' ? `${kind} failed` : `${kind} cancelled`;
-    this.toast(`${title}: ${folder}`, info.status === 'completed' ? 'success' : info.status === 'failed' ? 'error' : 'info', {
-      action: { label: 'View', run: () => this.openJob(info.job_id) },
-    });
+    if (info.status === 'completed') this.#announceSuccess(kind, folder, info.job_id);
+    else
+      this.toast(`${title}: ${folder}`, info.status === 'failed' ? 'error' : 'info', {
+        action: { label: 'View', run: () => this.openJob(info.job_id) },
+      });
     if (this.prefs.notifications) notify(title, `${folder}\n${info.destination || ''}`);
+  }
+
+  #successes = [];
+  #successTimer = null;
+  /** "Sync finished" messages close together (Upload all, several auto-uploads) become one. */
+  #announceSuccess(kind, folder, jobId) {
+    this.#successes.push({ kind, folder, jobId });
+    clearTimeout(this.#successTimer);
+    this.#successTimer = setTimeout(() => {
+      const done = this.#successes;
+      this.#successes = [];
+      if (done.length === 1) {
+        this.toast(`${done[0].kind} finished: ${done[0].folder}`, 'success', { action: { label: 'View', run: () => this.openJob(done[0].jobId) } });
+      } else {
+        const names = done.slice(0, 3).map((d) => d.folder).join(', ') + (done.length > 3 ? ` and ${done.length - 3} more` : '');
+        this.toast(`Finished ${done.length} folders: ${names}`, 'success', { action: { label: 'Activity', run: () => (this.view = 'activity') } });
+      }
+    }, 2500);
   }
 
   /** Upload when this preview finishes (or don't). */
@@ -459,7 +495,7 @@ class AppState {
   }
 
   /** Sync (or preview) a folder. thenUpload: a preview that starts the upload when it finishes. */
-  async runPreset(preset, dryRun, { thenUpload = false } = {}) {
+  async runPreset(preset, dryRun, { thenUpload = false, reason = null, quiet = false } = {}) {
     const id = preset.preset_id;
     if (id && this.starting[id]) return null; // already starting
     if (dryRun && thenUpload) this.setUploadAfterPreview(preset, true);
@@ -470,10 +506,10 @@ class AppState {
       const { [id]: _, ...rest } = this.starting;
       this.starting = rest;
     };
-    this.toast(`${dryRun ? 'Starting a preview of' : 'Starting to sync'} ${preset.name}…`, 'info', { timeout: 3000 });
+    if (!quiet) this.toast(reason === 'auto' ? `New files in ${preset.name}: uploading them…` : `${dryRun ? 'Starting a preview of' : 'Starting to sync'} ${preset.name}…`, 'info', { timeout: 3000 });
     try {
       const result = await api.createUpload(this.uploadPayload(preset, dryRun));
-      if (result?.already_running) {
+      if (result?.already_running && !quiet) {
         if (!result.dry_run) this.setUploadAfterPreview(preset, false); // it's uploading already
         const what = result.dry_run ? 'being previewed' : 'syncing';
         this.toast(`${preset.name} is already ${what}, so nothing new was started. Its progress is on the card.`, 'info', { timeout: 6000 });
@@ -488,6 +524,12 @@ class AppState {
     } finally {
       done();
     }
+  }
+
+  /** Add several folders: { parent } (pick from its subfolders) or { paths }. */
+  addFolders(dialog = {}) {
+    this.view = 'folders';
+    this.addFoldersDialog = { ...dialog };
   }
 
   addFolder(path = '') {

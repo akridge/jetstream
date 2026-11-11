@@ -11,14 +11,18 @@
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import ShieldCheck from '@lucide/svelte/icons/shield-check';
   import ShieldAlert from '@lucide/svelte/icons/shield-alert';
+  import CircleCheck from '@lucide/svelte/icons/circle-check';
+  import ArrowUpCircle from '@lucide/svelte/icons/circle-arrow-up';
+  import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   import StatusIcon from './StatusIcon.svelte';
+  import { folderStatus } from '../lib/status.svelte.js';
   import ProgressBar from './ProgressBar.svelte';
   import { app, ACTIVE, TERMINAL, collapseRuns } from '../lib/state.svelte.js';
   import { api, pollActivity } from '../lib/api.js';
   import { bytes, count, duration, relativeTime, normalizeDestination, scheduleText, upcoming } from '../lib/format.js';
   import { isDesktop, revealPath } from '../lib/platform.js';
 
-  let { preset } = $props();
+  let { preset, selecting = false, selected = false, onselect = () => {} } = $props();
 
   // A split upload (one job per subfolder) counts as one run.
   let jobs = $derived(collapseRuns(app.jobsForPreset(preset)));
@@ -83,6 +87,15 @@
   // Asked to start and not yet showing as a job (also when started from the folder dialog).
   let starting = $derived(app.starting[preset.preset_id]);
   let uploadAfter = $derived(!!app.uploadAfterPreview[preset.preset_id]);
+  // What's new since the last sync, from the background check (no file reads).
+  let status = $derived(folderStatus.of(preset));
+  let checking = $derived(!!folderStatus.checking[preset.preset_id]);
+  let autoAt = $derived(folderStatus.autoAt[preset.preset_id]);
+  let changes = $derived(status && !status.error ? status.changes : null);
+  const ago = (ms) => relativeTime(new Date(ms).toISOString());
+  const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  // A failure is old news once a later check finds everything uploaded.
+  let failureCleared = $derived(!!(lastFinished?.status === 'failed' && status && !status.error && status.changes === 0 && status.checked_at > Date.parse(lastFinished.completed_at)));
   let busy = $derived(!!starting);
 
   function run(dryRun) {
@@ -123,9 +136,13 @@
 
 <svelte:window onclick={() => (menuOpen = false)} />
 
-<article class="card folder" class:running={current}>
+<article class="card folder" class:running={current} class:picked={selecting && selected}>
   <header>
-    <div class="icon"><Folder size={20} /></div>
+    {#if selecting}
+      <label class="icon pick" title="Select {preset.name}"><input type="checkbox" checked={selected} onchange={onselect} aria-label="Select {preset.name}" /></label>
+    {:else}
+      <div class="icon"><Folder size={20} /></div>
+    {/if}
     <div class="titles">
       <h3 class="truncate" title={preset.name}>{preset.name}</h3>
       <div class="path mono truncate start" title={preset.source_path}><bdi>{preset.source_path}</bdi></div>
@@ -138,6 +155,7 @@
         <div class="menu card" role="menu">
           <button role="menuitem" onclick={() => app.editFolder(preset)}>Edit…</button>
           <button role="menuitem" onclick={() => app.compareFolder(preset)}>Compare with cloud</button>
+          <button role="menuitem" onclick={() => { menuOpen = false; folderStatus.check(preset, { soon: true }); }}>Check for changes now</button>
           <button role="menuitem" onclick={() => { menuOpen = false; app.createReceipt(preset); }}>Make a receipt now</button>
           <button role="menuitem" onclick={() => openCloud()}>Open in Cloud storage</button>
           {#if isDesktop}
@@ -155,6 +173,7 @@
   <div class="dest">
     <Cloud size={15} />
     <span class="mono truncate start" title={`gs://${normalizeDestination(preset.destination)}/`}><bdi>gs://{normalizeDestination(preset.destination)}/</bdi></span>
+    {#if preset.options?.auto_upload}<span class="pill auto" title="New files are uploaded automatically">Auto-upload</span>{/if}
     <span class="pill">{tool}</span>
   </div>
 
@@ -208,13 +227,34 @@
         <strong>Preview ready</strong>
         <span class="muted">{relativeTime(lastFinished.completed_at)} · check what will upload, then upload</span>
       </div>
-    {:else if lastFinished?.status === 'failed'}
+    {:else if lastFinished?.status === 'failed' && !failureCleared}
       <div class="row">
         <StatusIcon job={lastFinished} size={16} />
         <strong class="danger">Last sync failed</strong>
         <span class="muted">{relativeTime(lastFinished.completed_at)}</span>
       </div>
       <div class="error truncate" title={lastFinished.error_message}>{lastFinished.error_message || 'See activity for details'}</div>
+    {:else if changes}
+      <div class="row">
+        <span class="state-icon pending"><ArrowUpCircle size={16} /></span>
+        <strong>{count(changes)} new or changed {changes === 1 ? 'file' : 'files'}</strong>
+        <span class="muted">{bytes(status.bytes)} to upload</span>
+      </div>
+      <div class="checked">
+        {#if autoAt}<span>Uploading automatically at {clock(autoAt)} if nothing else changes ·</span>{/if}
+        {#if checking}<RefreshCw size={12} class="spin" /> Checking…{:else}Checked {ago(status.checked_at)}{/if}{lastReal ? ` · last synced ${relativeTime(lastReal.completed_at)}` : ''}
+      </div>
+    {:else if status && !status.error}
+      <div class="row">
+        <span class="state-icon ok"><CircleCheck size={16} /></span>
+        <strong>Up to date</strong>
+        <span class="muted">{count(status.same)} files · {bytes(status.same_bytes)}{status.cloud_only ? ` · ${count(status.cloud_only)} more in the cloud` : ''}</span>
+      </div>
+      <div class="checked">
+        {#if checking}<RefreshCw size={12} class="spin" /> Checking…{:else}Checked {ago(status.checked_at)}{/if}{lastReal ? ` · synced ${relativeTime(lastReal.completed_at)}` : ''}{status.online_only ? ` · ${count(status.online_only)} online-only (OneDrive) skipped` : ''}
+      </div>
+    {:else if !status && checking && !lastFinished}
+      <div class="row muted"><RefreshCw size={14} class="spin" /> Checking what's new…</div>
     {:else if lastReal?.status === 'completed'}
       <div class="row">
         <StatusIcon job={lastReal} size={16} />
@@ -229,6 +269,9 @@
       </div>
     {:else}
       <div class="row muted">Not synced yet — preview first to see what will upload.</div>
+    {/if}
+    {#if status?.error && !current && !starting}
+      <div class="checked danger truncate" title={status.error}>Couldn't check for changes: {status.error}</div>
     {/if}
   </div>
 
@@ -273,8 +316,12 @@
     {:else if previewReady}
       <button class="btn primary sm" disabled={busy} onclick={() => run(false)}><CloudUpload size={15} /> Upload now</button>
       <button class="btn ghost sm" onclick={() => app.openJob(lastFinished.job_id)}>Review preview</button>
+    {:else if changes}
+      <button class="btn primary sm" disabled={busy} onclick={() => run(false)}><CloudUpload size={15} /> Upload {count(changes)} {changes === 1 ? 'file' : 'files'}</button>
+      <button class="btn sm" disabled={busy} onclick={() => run(true)}><Eye size={15} /> Preview</button>
+      <button class="btn ghost sm" title="What's on this computer vs in the cloud" onclick={() => app.compareFolder(preset)}><GitCompare size={14} /> Compare</button>
     {:else}
-      <button class="btn primary sm" disabled={busy} onclick={() => run(false)}><Play size={14} /> Sync now</button>
+      <button class="btn sm" class:primary={!status} disabled={busy} onclick={() => run(false)}><Play size={14} /> Sync now</button>
       <button class="btn sm" disabled={busy} onclick={() => run(true)}><Eye size={15} /> Preview</button>
       <button class="btn ghost sm" title="What's on this computer vs in the cloud" onclick={() => app.compareFolder(preset)}><GitCompare size={14} /> Compare</button>
       {#if lastFinished?.status === 'failed' && lastFinished.group}
@@ -394,6 +441,44 @@
   .now {
     color: var(--muted);
     font-size: 12px;
+  }
+  .checked {
+    color: var(--muted);
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .checked.danger {
+    color: var(--danger);
+    display: block;
+  }
+  .folder.picked {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .pick {
+    cursor: pointer;
+  }
+  .pick input {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .state-icon {
+    display: inline-flex;
+  }
+  .state-icon.ok {
+    color: var(--success);
+  }
+  .state-icon.pending {
+    color: var(--accent);
+  }
+  .pill.auto {
+    background: var(--accent-soft);
+    color: var(--accent);
   }
   .receipt {
     display: flex;

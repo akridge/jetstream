@@ -230,9 +230,25 @@ export async function newFolder(bucket, parent, name) {
 }
 
 /** Compare a local folder with gs://destination: same / different / local_only / cloud_only. */
-export async function compareFolder(path, destination, { excludePatterns = [], excludeFolders = [], recursive = true } = {}) {
+export async function compareFolder(path, destination, { excludePatterns = [], excludeFolders = [], recursive = true, lists = true } = {}) {
   if (!isDesktop) throw desktopOnly();
-  return invoke('compare_folder', { path, destination, excludePatterns, excludeFolders, recursive });
+  return invoke('compare_folder', { path, destination, excludePatterns, excludeFolders, recursive, lists });
+}
+
+/** Folders directly inside `path`: [{ name, path }], sorted by name. */
+export async function listSubfolders(path) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('list_subfolders', { path });
+}
+
+/** Native picker for several folders at once; returns paths ([] if cancelled). */
+export async function pickFolders(defaultPath, title = 'Choose folders to sync') {
+  if (!isDesktop) {
+    const typed = window.prompt('Folder paths (one per line or separated by ";"):', defaultPath || '');
+    return typed ? typed.split(/[\n;]+/).map((p) => p.trim()).filter(Boolean) : [];
+  }
+  const selected = await openDialog({ directory: true, multiple: true, defaultPath: defaultPath || undefined, title });
+  return !selected ? [] : Array.isArray(selected) ? selected : [selected];
 }
 
 /** Download files/folders (paths ending "/") into destDir; onProgress({total, done, ...}). */
