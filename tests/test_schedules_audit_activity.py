@@ -106,7 +106,8 @@ def test_due_preset_queues_a_job_and_schedules_the_next_run(db_env):
     assert job.status == "queued"
     assert job.friendly_name.startswith("scheduled-")
     assert (job.destination_bucket, job.destination_path) == ("bucket", "backups/site")
-    assert job.total_files == 1 and job.no_clobber is True
+    # Files are counted when the job runs, not when it is queued.
+    assert job.total_files == 0 and job.no_clobber is True
     assert job.filters["preset_id"] == preset_id and job.filters["trigger"] == "schedule"
     assert started[0] in services.queue_manager.queue
 
@@ -359,10 +360,12 @@ def test_split_upload_creates_a_job_per_subfolder_plus_root_files(db_env, monkey
         jobs = sorted(db.query(UploadJob).all(), key=lambda j: j.destination_path)
         db.close()
         parts = [(j.destination_path, j.recursive, j.total_files, j.filters["group_part"], j.status) for j in jobs]
+        # Only the top level is listed (empty subfolders skipped); each job counts its own
+        # files when it runs, so the request answers at once for huge folders.
         assert parts == [
-            ("backups/site", False, 1, "", "queued"),  # files directly in the folder
-            ("backups/site/photos", True, 2, "photos", "queued"),
-            ("backups/site/video", True, 1, "video", "queued"),
+            ("backups/site", False, 0, "", "queued"),  # files directly in the folder
+            ("backups/site/photos", True, 0, "photos", "queued"),
+            ("backups/site/video", True, 0, "video", "queued"),
         ]
         group = jobs[0].filters["group"]
         assert group["source_path"] == str(source) and group["parts"] == 3 and group["destination"] == "bucket/backups/site"
@@ -429,3 +432,99 @@ def test_cancelled_jobs_stay_cancelled_and_engine_stop_is_graceful(db_env, monke
     import time
     time.sleep(0.1)
     assert not process.killed
+
+
+# ----- starting an upload answers at once and can't start twice -------------------------
+
+def test_starting_an_upload_never_walks_the_folder_and_refuses_duplicates(db_env, monkeypatch):
+    from jetstream.routers import uploads as uploads_router
+
+    def no_walk(*args, **kwargs):
+        raise AssertionError("the request must not walk the folder")
+
+    monkeypatch.setattr(services.FolderAnalyzer, "analyze", no_walk)
+    monkeypatch.setattr(services.FolderAnalyzer, "analyze_subfolders", no_walk)
+    monkeypatch.setattr(services, "count_files", no_walk)
+    ran = []
+
+    async def fake_process(job_id, db_path):
+        ran.append(job_id)
+
+    monkeypatch.setattr(uploads_router, "process_upload_job", fake_process)
+    monkeypatch.setattr(uploads_router, "start_queued_jobs", lambda: 0)
+    source = db_env / "site"
+    _tree(source)
+    app = FastAPI()
+    app.include_router(uploads.router, prefix="/api/uploads")
+    payload = {"source_path": str(source), "gcs_destination": "bucket/backups/site", "upload_tool": "gcloud", "dry_run": True}
+    with TestClient(app) as client:
+        first = client.post("/api/uploads/", json=payload).json()
+        assert not first["already_running"]
+        job = get_job(first["job_id"])
+        assert job.total_files == 0, "files are counted when the job runs"
+
+        # A second click (preview or sync) while it runs returns the same job.
+        second = client.post("/api/uploads/", json={**payload, "dry_run": False}).json()
+        assert second["already_running"] and second["job_id"] == first["job_id"] and second["dry_run"] is True
+        # Another destination is a different upload.
+        other = client.post("/api/uploads/", json={**payload, "gcs_destination": "bucket/elsewhere"}).json()
+        assert not other["already_running"] and other["job_id"] != first["job_id"]
+
+        # Split uploads: the second click returns the group.
+        split = {**payload, "gcs_destination": "bucket/split", "split_by_folder": True}
+        group = client.post("/api/uploads/", json=split).json()
+        again = client.post("/api/uploads/", json=split).json()
+        assert group["job_id"].startswith("group:") and again["already_running"] and again["job_id"] == group["job_id"]
+
+        # Once it has finished, the same folder starts again.
+        db = database.SessionLocal()
+        db.query(UploadJob).filter(UploadJob.job_id == first["job_id"]).update({UploadJob.status: "completed"})
+        db.commit()
+        db.close()
+        third = client.post("/api/uploads/", json=payload).json()
+        assert not third["already_running"] and third["job_id"] != first["job_id"]
+
+
+def test_jobs_count_their_files_when_they_run(db_env):
+    import asyncio
+
+    source = db_env / "site"
+    _tree(source)
+    (source / "skip.tmp").write_bytes(b"x")
+    db = database.SessionLocal()
+    job = UploadJob(job_id="count-1", friendly_name="c", status="running", source_path=str(source),
+                    destination_bucket="b", destination_path="", recursive=True, upload_tool="gcloud",
+                    filters={"exclude_patterns": ["*.tmp"], "exclude_folders": []})
+    db.add(job)
+    db.commit()
+    assert asyncio.run(services.count_job_files(job))
+    db.refresh(job)
+    assert (job.total_files, job.total_size_bytes) == (4, 65)  # top, a, b, v; not skip.tmp
+    activity = services.job_activity("count-1")
+    assert activity["checking"]["counted_files"] == 4 and activity["phase"] is None
+
+    # Cancelled while counting: the upload doesn't start.
+    job2 = UploadJob(job_id="count-2", friendly_name="c2", status="running", source_path=str(source),
+                     destination_bucket="b", destination_path="", recursive=True, upload_tool="gcloud", filters={})
+    db.add(job2)
+    db.commit()
+    original = services.count_files
+
+    def cancel_midway(*args, **kwargs):
+        services.upload_service.cancel_upload("count-2")
+        return original(*args, **kwargs)
+
+    services.count_files = cancel_midway
+    try:
+        assert not asyncio.run(services.count_job_files(job2))
+    finally:
+        services.count_files = original
+
+    # The engine counts for itself.
+    job3 = UploadJob(job_id="count-3", friendly_name="c3", status="running", source_path=str(source),
+                     destination_bucket="b", destination_path="", recursive=True, upload_tool="jetstream", filters={})
+    db.add(job3)
+    db.commit()
+    assert asyncio.run(services.count_job_files(job3))
+    assert job3.total_files == 0
+    db.close()

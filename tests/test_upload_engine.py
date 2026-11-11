@@ -81,7 +81,7 @@ def test_engine_command_line_progress_and_summary(tmp_path, monkeypatch):
     assert excludes == [r".*\.tmp$", ".*/_archive/.*", "^_archive/.*"]
 
     # Unchanged bytes/files count as already done, so the bar reflects the whole folder.
-    assert progress[0] == {"bytes_uploaded": 600, "total_bytes": 1000, "files_uploaded": 6}
+    assert progress[0] == {"bytes_uploaded": 600, "total_bytes": 1000, "files_uploaded": 6, "total_files": 10}
     assert progress[-1] == {"bytes_uploaded": 750, "total_bytes": 1000, "files_uploaded": 8}
 
     assert success is False

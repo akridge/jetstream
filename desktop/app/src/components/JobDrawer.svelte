@@ -37,6 +37,7 @@
   /** What the engine is doing, for the parts of a sync that aren't uploading yet. */
   let phaseText = $derived.by(() => {
     const c = activity?.checking || {};
+    if (activity?.phase === 'counting') return `Counting files: ${count(c.counted_files || 0)} found so far (${bytes(c.counted_bytes || 0)})…`;
     if (activity?.phase === 'scanning') return 'Looking through the folder…';
     if (activity?.phase === 'listing') return `Checking what's already in the cloud${c.listed_objects ? `: ${count(c.listed_objects)} objects listed` : ''}…`;
     if (activity?.phase === 'uploading' && c.files_total && c.hashed_files < c.files_total) {

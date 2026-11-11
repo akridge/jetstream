@@ -58,6 +58,7 @@
   let phaseText = $derived.by(() => {
     if (paused) return 'Paused at';
     const phase = activity?.phase;
+    if (phase === 'counting') return 'Counting files…';
     if (phase === 'scanning') return 'Looking through the folder…';
     if (phase === 'listing') return `Checking what's in the cloud${activity.checking?.listed_objects ? ` (${count(activity.checking.listed_objects)} listed)` : ''}…`;
     return current?.dry_run ? 'Previewing…' : 'Syncing…';
@@ -78,12 +79,12 @@
   let scheduled = $derived(schedule && schedule.mode && schedule.mode !== 'off');
 
   let menuOpen = $state(false);
-  let busy = $state(false);
+  // Asked to start and not yet showing as a job (also when started from the folder dialog).
+  let starting = $derived(app.starting[preset.preset_id]);
+  let busy = $derived(!!starting);
 
-  async function run(dryRun) {
-    busy = true;
-    await app.runPreset(preset, dryRun);
-    busy = false;
+  function run(dryRun) {
+    app.runPreset(preset, dryRun);
   }
 
   function openCloud() {
@@ -157,7 +158,17 @@
 
   <div class="status">
     {#if current}
-      {#if current.status === 'running'}
+      {#if current.status === 'running' && activity?.phase === 'counting'}
+        <div class="row">
+          <StatusIcon job={current} size={16} />
+          <strong>Counting files…</strong>
+          <span class="muted">{count(activity.checking?.counted_files || 0)} found so far · {bytes(activity.checking?.counted_bytes || 0)}</span>
+        </div>
+        <ProgressBar indeterminate />
+        {#if group}
+          <div class="now">Folder {group.done + group.failed + group.cancelled + 1} of {group.parts}{#if group.current}: <span class="mono">{partName(group.current)}</span>{/if}</div>
+        {/if}
+      {:else if current.status === 'running'}
         <div class="row">
           <StatusIcon job={current} size={16} />
           <strong>{phaseText} {Math.round(current.progress_percent || 0)}%</strong>
@@ -182,6 +193,11 @@
         </div>
         <ProgressBar indeterminate />
       {/if}
+    {:else if starting}
+      <div class="row">
+        <strong>{starting === 'preview' ? 'Starting preview…' : 'Starting sync…'}</strong>
+      </div>
+      <ProgressBar indeterminate />
     {:else if previewReady}
       <div class="row">
         <StatusIcon job={lastFinished} size={16} />

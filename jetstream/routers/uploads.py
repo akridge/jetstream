@@ -15,7 +15,7 @@ from ..models import (
 from ..events import notify_job
 from ..services import (
     FileFilter, FolderAnalyzer, upload_service, queue_manager, generate_friendly_job_name,
-    make_progress_callback, claim_job_for_run, job_activity
+    make_progress_callback, claim_job_for_run, job_activity, count_job_files
 )
 
 router = APIRouter()
@@ -63,6 +63,14 @@ async def process_upload_job(job_id: str, db_path: str):
         if not claim_job_for_run(db, job_id):
             return
         queue_manager.start_job(job_id)
+        db.refresh(job)
+
+        # Count the files first (off the event loop) so progress has a total.
+        if not await count_job_files(job):
+            # Cancelled while counting: free the slot for the next folder.
+            queue_manager.complete_job(job_id)
+            start_queued_jobs()
+            return
         db.refresh(job)
         
         # Perform upload
@@ -151,29 +159,41 @@ async def create_upload(
 ):
     """
     Create a new upload job.
-    
+
+    Answers at once: the folder's files are counted when the job runs, never here, so a big
+    folder doesn't hold up the app. If this folder is already uploading to this destination,
+    nothing new starts and the running job is returned (already_running), so a double click
+    can't start the same upload twice.
+
     If split_by_folder is True, creates separate jobs for each immediate subfolder.
     """
-    # Analyze folder first (note: include_patterns not used since rsync doesn't support it)
-    file_filter = FileFilter(
-        include_patterns=None,  # Not using include patterns for analysis since rsync won't filter by them
-        exclude_patterns=request.exclude_patterns,
-        exclude_folders=request.exclude_folders
-    )
-    analyzer = FolderAnalyzer(file_filter)
-    
-    if not request.split_by_folder:
-        try:
-            stats = analyzer.analyze(request.source_path, recursive=request.recursive)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-    
+    import asyncio
+
+    from ..schedules import RUNNING_STATUSES, find_active_job
+
+    destination = f"gs://{request.destination_bucket}/{request.destination_path or ''}"
+    if not request.scheduled_for:
+        existing = find_active_job(db, request.source_path, request.destination_bucket,
+                                   request.destination_path or "", statuses=RUNNING_STATUSES)
+        if existing is not None:
+            group = (existing.filters or {}).get("group")
+            return UploadResponse(
+                job_id=f"group:{group['id']}" if group else existing.job_id,
+                status=JobStatus(existing.status),
+                message="This folder is already uploading to this destination",
+                source_path=request.source_path,
+                destination=destination,
+                already_running=True,
+                dry_run=bool(existing.dry_run),
+            )
+
     # One job per subfolder (plus one for files directly in the folder), grouped.
     if request.split_by_folder:
         from ..split import create_split_jobs
 
         try:
-            jobs = create_split_jobs(db, request)
+            # Lists only the top level; still off the event loop for slow network drives.
+            jobs = await asyncio.to_thread(create_split_jobs, db, request)
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
         scheduled = jobs[0].status == "scheduled"
@@ -188,7 +208,8 @@ async def create_upload(
             status=JobStatus.SCHEDULED if scheduled else JobStatus.QUEUED,
             message=f"Created {len(jobs)} upload jobs (one per subfolder){when}",
             source_path=request.source_path,
-            destination=f"gs://{request.destination_bucket}/{request.destination_path or ''}"
+            destination=destination,
+            dry_run=request.dry_run,
         )
 
     else:
@@ -208,8 +229,6 @@ async def create_upload(
             source_path=request.source_path,
             destination_bucket=request.destination_bucket,
             destination_path=request.destination_path or "",
-            total_files=stats['total_files'],
-            total_size_bytes=stats['total_size_bytes'],
             dry_run=request.dry_run,
             recursive=request.recursive,
             threads=request.threads,

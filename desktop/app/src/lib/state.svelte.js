@@ -91,6 +91,10 @@ class AppState {
   server = $state({ phase: 'starting', base: null, message: null });
   view = $state('folders');
   jobs = $state({});
+  /** Folders (by preset id) whose sync or preview was asked for and hasn't shown up as a job
+   * yet: their buttons stay disabled and the card says "Starting…", so a slow start never
+   * invites a second click. */
+  starting = $state({});
   presets = $state([]);
   auth = $state(null);
   tools = $state([]);
@@ -427,14 +431,30 @@ class AppState {
   }
 
   async runPreset(preset, dryRun) {
+    const id = preset.preset_id;
+    if (id && this.starting[id]) return null; // already starting
     ensureNotificationPermission();
+    if (id) this.starting = { ...this.starting, [id]: dryRun ? 'preview' : 'sync' };
+    const done = () => {
+      if (!id) return;
+      const { [id]: _, ...rest } = this.starting;
+      this.starting = rest;
+    };
+    this.toast(`${dryRun ? 'Starting a preview of' : 'Starting to sync'} ${preset.name}…`, 'info', { timeout: 3000 });
     try {
       const result = await api.createUpload(this.uploadPayload(preset, dryRun));
-      this.toast(`${dryRun ? 'Previewing' : 'Syncing'} ${preset.name}…`, 'info', { timeout: 3000 });
+      if (result?.already_running) {
+        const what = result.dry_run ? 'being previewed' : 'syncing';
+        this.toast(`${preset.name} is already ${what}, so nothing new was started. Its progress is on the card.`, 'info', { timeout: 6000 });
+      }
+      // Show the new job before the buttons come back.
+      await this.refreshJobs().catch(() => {});
       return result;
     } catch (err) {
       this.toast(`Couldn't start ${preset.name}: ${err.message}`, 'error', { timeout: 10000 });
       return null;
+    } finally {
+      done();
     }
   }
 

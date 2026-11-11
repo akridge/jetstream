@@ -145,7 +145,7 @@ class UploadScheduler:
     async def _run_scheduled_upload(self, job_id: str, upload_service, queue_manager):
         """Run a scheduled upload job."""
         from . import database
-        from .services import make_progress_callback, claim_job_for_run
+        from .services import make_progress_callback, claim_job_for_run, count_job_files
         from datetime import timedelta
 
         if database.SessionLocal is None:
@@ -169,6 +169,11 @@ class UploadScheduler:
                 owned_elsewhere = job.status == "running"
                 return
             queue_manager.start_job(job_id)
+            db.refresh(job)
+
+            # Count the files first (off the event loop) so progress has a total.
+            if not await count_job_files(job):
+                return
             db.refresh(job)
 
             # Perform upload

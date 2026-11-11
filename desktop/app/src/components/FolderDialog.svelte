@@ -301,8 +301,8 @@
 
     <footer>
       <button class="btn ghost" onclick={close}>Cancel</button>
-      <button class="btn" disabled={!canSave} onclick={() => save(false)}>Save</button>
-      <button class="btn primary" disabled={!canSave} onclick={() => save(true)}>Save &amp; preview</button>
+      <button class="btn" disabled={!canSave} onclick={() => save(false)}>{saving ? 'Saving…' : 'Save'}</button>
+      <button class="btn primary" disabled={!canSave} onclick={() => save(true)}>{saving ? 'Saving…' : 'Save & preview'}</button>
     </footer>
   </div>
 </div>

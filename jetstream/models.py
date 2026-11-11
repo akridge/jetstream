@@ -118,6 +118,10 @@ class UploadResponse(BaseModel):
     message: str
     source_path: str
     destination: str
+    # True when this folder was already uploading to this destination: job_id is that job
+    # (or "group:<id>" for a split upload) and nothing new was started.
+    already_running: bool = False
+    dry_run: Optional[bool] = None
 
 class JobStatusResponse(BaseModel):
     """Response model for job status."""

@@ -156,7 +156,7 @@ JetStream.app / JetStream.exe        Rust shell (src-tauri/src/main.rs)
 - **OneDrive folders (e.g. Desktop or Documents):** online-only files aren't on the computer, so they're skipped with a note in the job output. Right-click the folder and choose **Always keep on this device**, then sync again.
 - **Files open in another program** are tried again at the end of the sync; close the program if they still fail.
 - **A dropped connection** is noticed within about a minute and the upload continues from where Google has it ("retrying" in the job details).
-- **A big folder:** turn on **Upload each subfolder as its own job**.
+- **A big folder:** turn on **Upload each subfolder as its own job**. Starting a sync or preview answers at once whatever the folder's size: the card says **Starting…**, then **Counting files… N found so far** (gcloud uploads count first so progress has a total; the JetStream engine counts as it goes). Clicking again while it runs doesn't start a second copy; you're told it's already running.
 - **Moving from gcloud to the JetStream engine:** the first engine sync recognises files gcloud uploaded by size and date, without reading them again.
 
 ## Run from source (development)

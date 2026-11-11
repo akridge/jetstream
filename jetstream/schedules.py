@@ -72,7 +72,7 @@ def _commas(text: Optional[str]) -> Optional[List[str]]:
 def create_preset_job(db, preset: SyncPreset, dry_run: bool) -> UploadJob:
     """Queue an upload for a saved folder. Problems become a failed job the user can see."""
     from .models import UploadRequest
-    from .services import FileFilter, FolderAnalyzer, find_transfer_engine, generate_friendly_job_name, queue_manager
+    from .services import find_transfer_engine, generate_friendly_job_name, queue_manager
 
     options = preset.options or {}
     tool = options.get("upload_tool") or "gcloud"
@@ -124,9 +124,7 @@ def create_preset_job(db, preset: SyncPreset, dry_run: bool) -> UploadJob:
             queue_manager.add_to_queue(job.job_id)
         return jobs[0]
 
-    stats = FolderAnalyzer(
-        FileFilter(include_patterns=None, exclude_patterns=request.exclude_patterns, exclude_folders=request.exclude_folders)
-    ).analyze(request.source_path, recursive=request.recursive)
+    # Files are counted when the job runs, so starting it never waits on a walk of the folder.
     job = UploadJob(
         job_id=job_id,
         friendly_name=friendly_name,
@@ -134,8 +132,6 @@ def create_preset_job(db, preset: SyncPreset, dry_run: bool) -> UploadJob:
         source_path=request.source_path,
         destination_bucket=request.destination_bucket,
         destination_path=request.destination_path,
-        total_files=stats["total_files"],
-        total_size_bytes=stats["total_size_bytes"],
         dry_run=dry_run,
         recursive=request.recursive,
         threads=4,
@@ -152,23 +148,36 @@ def create_preset_job(db, preset: SyncPreset, dry_run: bool) -> UploadJob:
     return job
 
 
+RUNNING_STATUSES = ("pending", "queued", "running")
+
+
+def find_active_job(db, source_path: str, bucket: str, path: str, statuses=ACTIVE_STATUSES) -> Optional[UploadJob]:
+    """A job (or split upload) of this folder to gs://bucket/path that hasn't finished."""
+    from sqlalchemy import func
+
+    jobs = db.query(UploadJob).filter(
+        UploadJob.source_path == source_path,
+        UploadJob.destination_bucket == bucket,
+        UploadJob.status.in_(statuses),
+    ).all()
+    for job in jobs:
+        if (job.destination_path or "").strip("/") == (path or "").strip("/"):
+            return job
+    # A split upload of this folder: its jobs have the subfolders as their source.
+    destination = f"{bucket}/{(path or '').strip('/')}".rstrip("/")
+    for job in db.query(UploadJob).filter(
+        func.json_extract(UploadJob.filters, "$.group.source_path") == source_path,
+        UploadJob.status.in_(statuses),
+    ).all():
+        if (job.filters or {}).get("group", {}).get("destination", destination) == destination:
+            return job
+    return None
+
+
 def _has_active_job(db, preset: SyncPreset) -> bool:
     destination = (preset.destination or "").strip().replace("gs://", "").strip("/")
     bucket, _, path = destination.partition("/")
-    jobs = db.query(UploadJob).filter(
-        UploadJob.source_path == preset.source_path,
-        UploadJob.destination_bucket == bucket,
-        UploadJob.status.in_(ACTIVE_STATUSES),
-    ).all()
-    if any((j.destination_path or "").strip("/") == path.strip("/") for j in jobs):
-        return True
-    # A split upload of this folder: its jobs have the subfolders as their source.
-    from sqlalchemy import func
-
-    return db.query(UploadJob).filter(
-        func.json_extract(UploadJob.filters, "$.group.source_path") == preset.source_path,
-        UploadJob.status.in_(ACTIVE_STATUSES),
-    ).first() is not None
+    return find_active_job(db, preset.source_path, bucket, path) is not None
 
 
 def run_due_presets(now: Optional[datetime] = None) -> List[str]:

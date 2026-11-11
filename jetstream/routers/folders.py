@@ -1,5 +1,7 @@
 """Folder analysis and preview endpoints."""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 from typing import List
 
@@ -27,7 +29,9 @@ async def analyze_folder(request: FolderAnalysisRequest):
     analyzer = FolderAnalyzer(file_filter)
     
     try:
-        stats = analyzer.analyze(request.path, recursive=request.recursive)
+        # A big folder takes a while to walk: do it on a worker thread so the server keeps
+        # answering everything else (starting uploads, progress) meanwhile.
+        stats = await asyncio.to_thread(analyzer.analyze, request.path, recursive=request.recursive)
         
         # Convert to response format
         response_data = {
@@ -68,11 +72,11 @@ async def analyze_folder_split(request: FolderAnalysisRequest):
     
     try:
         # Get overall stats (use folder-only mode for speed)
-        overall_stats = analyzer.analyze(request.path, recursive=request.recursive, 
-                                        folder_only_mode=True)
-        
+        overall_stats = await asyncio.to_thread(analyzer.analyze, request.path, recursive=request.recursive,
+                                                folder_only_mode=True)
+
         # Get subfolder breakdown (also use folder-only mode)
-        subfolders = analyzer.analyze_subfolders(request.path, folder_only_mode=True)
+        subfolders = await asyncio.to_thread(analyzer.analyze_subfolders, request.path, folder_only_mode=True)
         
         # Format subfolder data
         subfolder_data = []
@@ -108,7 +112,7 @@ async def analyze_folder_split(request: FolderAnalysisRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/preview/{path:path}")
-async def preview_files(path: str, limit: int = 50):
+def preview_files(path: str, limit: int = 50):  # walks: runs on a worker thread
     """Get a preview list of files in a folder."""
     import os
     

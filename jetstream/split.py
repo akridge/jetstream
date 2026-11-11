@@ -13,30 +13,52 @@ from typing import Dict, List, Optional
 from .database import UploadJob
 from .events import notify_job
 from .models import UploadRequest
-from .services import FileFilter, FolderAnalyzer, generate_friendly_job_name
+from .services import FileFilter, generate_friendly_job_name
+
+
+def _has_entries(path: str) -> bool:
+    """Whether a folder has anything in it (reads one entry, not the whole folder)."""
+    try:
+        with os.scandir(path) as entries:
+            return next(entries, None) is not None
+    except OSError:
+        return True  # let the job report the problem
 
 
 def create_split_jobs(db, request: UploadRequest, extra_filters: Optional[Dict] = None, name_prefix: str = "") -> List[UploadJob]:
-    """Create the jobs for a split upload, queued (or scheduled). Raises ValueError when the
-    folder has nothing to upload."""
+    """Create the jobs for a split upload, queued (or scheduled): one per subfolder, plus one
+    for files directly in the folder. Raises ValueError when the folder has nothing in it."""
     file_filter = FileFilter(
         include_patterns=None,
         exclude_patterns=request.exclude_patterns,
         exclude_folders=request.exclude_folders,
     )
-    analyzer = FolderAnalyzer(file_filter)
     source = request.source_path
     base_dest = (request.destination_path or "").strip("/")
 
-    parts = []  # (source path, destination path, recursive, stats, part name)
-    root = analyzer.analyze(source, recursive=False)
-    if root.get("total_files"):
-        parts.append((source, base_dest, False, root, ""))
-    for sub in sorted(analyzer.analyze_subfolders(source), key=lambda s: s["name"].lower()):
-        if not sub.get("total_files"):
-            continue
-        dest = f"{base_dest}/{sub['name']}" if base_dest else sub["name"]
-        parts.append((sub["path"], dest, True, sub, sub["name"]))
+    # Only the top level is listed here, so the request answers at once even for huge
+    # folders; each job counts its own files when it runs.
+    parts = []  # (source path, destination path, recursive, part name)
+    has_root_files = False
+    subfolders = []
+    try:
+        with os.scandir(source) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if not file_filter.should_exclude_folder(entry.name) and _has_entries(entry.path):
+                            subfolders.append((entry.name, entry.path))
+                    elif not has_root_files and file_filter.should_include_file(entry.path):
+                        has_root_files = True
+                except OSError:
+                    continue
+    except OSError as exc:
+        raise ValueError(f"Can't read {source}: {exc.strerror or exc}") from exc
+    if has_root_files:
+        parts.append((source, base_dest, False, ""))
+    for name, path in sorted(subfolders, key=lambda s: s[0].lower()):
+        dest = f"{base_dest}/{name}" if base_dest else name
+        parts.append((path, dest, True, name))
     if not parts:
         raise ValueError(f"Nothing to upload in {source}")
 
@@ -50,7 +72,7 @@ def create_split_jobs(db, request: UploadRequest, extra_filters: Optional[Dict] 
     scheduled = request.scheduled_for and request.scheduled_for > datetime.now(timezone.utc)
     log_dir = os.path.join(os.getcwd(), "logs")
     jobs = []
-    for path, dest, recursive, stats, part in parts:
+    for path, dest, recursive, part in parts:
         friendly_name = name_prefix + generate_friendly_job_name(path)
         job = UploadJob(
             job_id=str(uuid.uuid4()),
@@ -59,8 +81,8 @@ def create_split_jobs(db, request: UploadRequest, extra_filters: Optional[Dict] 
             source_path=path,
             destination_bucket=request.destination_bucket,
             destination_path=dest,
-            total_files=stats.get("total_files", 0),
-            total_size_bytes=stats.get("total_size_bytes", 0),
+            total_files=0,
+            total_size_bytes=0,
             dry_run=request.dry_run,
             recursive=recursive,
             threads=request.threads,

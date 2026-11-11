@@ -233,6 +233,43 @@ class FileFilter:
         """Check if folder should be excluded."""
         return folder_name in self.exclude_folders
 
+
+def count_files(path: str, recursive: bool = True, file_filter: Optional[FileFilter] = None,
+                on_progress=None, should_stop=None) -> Tuple[int, int]:
+    """Count the files (and bytes) an upload of `path` would cover, with the folder's filters.
+
+    Blocking; run it in a worker thread. on_progress(files, bytes) is called every few thousand
+    files so the UI can show "Counting files… N found"; should_stop() ends the count early.
+    Unreadable folders are skipped.
+    """
+    file_filter = file_filter or FileFilter()
+    files = size = 0
+    stack = [path]
+    while stack:
+        if should_stop and should_stop():
+            break
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if recursive and not file_filter.should_exclude_folder(entry.name):
+                                stack.append(entry.path)
+                        elif file_filter.should_include_file(entry.path):
+                            files += 1
+                            size += entry.stat(follow_symlinks=False).st_size
+                            if on_progress and files % 2000 == 0:
+                                on_progress(files, size)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    if on_progress:
+        on_progress(files, size)
+    return files, size
+
+
 class FolderAnalyzer:
     """Analyze folder structure and calculate statistics."""
     
@@ -892,9 +929,10 @@ def make_progress_callback(job_id: str, db=None) -> Callable:
     """
     last_write = [0.0]
 
-    def callback(bytes_uploaded=None, total_bytes=None, files_uploaded=None):
+    def callback(bytes_uploaded=None, total_bytes=None, files_uploaded=None, total_files=None):
         now = time.time()
-        if now - last_write[0] < 2.0:
+        # New totals are always written; plain progress at most every 2 s.
+        if total_files is None and now - last_write[0] < 2.0:
             return
         last_write[0] = now
         from . import database
@@ -909,6 +947,8 @@ def make_progress_callback(job_id: str, db=None) -> Callable:
                 values[UploadJob.total_size_bytes] = total_bytes
             if files_uploaded is not None:
                 values[UploadJob.files_uploaded] = files_uploaded
+            if total_files is not None:
+                values[UploadJob.total_files] = total_files
             if values:
                 session.query(UploadJob).filter(UploadJob.job_id == job_id).update(
                     values, synchronize_session=False
@@ -1041,6 +1081,53 @@ def job_activity(job_id: str) -> Optional[Dict]:
     return activity.snapshot() if activity else None
 
 
+async def count_job_files(job: UploadJob) -> bool:
+    """Count a job's files before a gcloud/gsutil upload, so its progress has a total.
+
+    Runs in a worker thread (the server keeps answering) and shows "counting" with a running
+    count on the job's activity. The JetStream engine counts for itself, and jobs that already
+    know their totals skip this. Returns False if the job was cancelled meanwhile.
+    """
+    tool = getattr(job, "upload_tool", None) or "gcloud"
+    if job.total_files or tool == "jetstream":
+        return True
+    job_id = job.job_id
+    activity = start_job_activity(job_id, tool)
+    activity.phase = "counting"
+    activity.checking = {"counted_files": 0, "counted_bytes": 0}
+    filters = job.filters or {}
+    file_filter = FileFilter(include_patterns=None, exclude_patterns=filters.get("exclude_patterns"),
+                             exclude_folders=filters.get("exclude_folders"))
+
+    def on_progress(files: int, size: int) -> None:
+        activity.checking = {"counted_files": files, "counted_bytes": size}
+
+    upload_service.stop_requested.discard(job_id)
+    files, size = await asyncio.to_thread(
+        count_files, job.source_path, bool(job.recursive), file_filter, on_progress,
+        lambda: job_id in upload_service.stop_requested,
+    )
+    if job_id in upload_service.stop_requested:
+        upload_service.stop_requested.discard(job_id)
+        return False
+    from . import database
+    session = database.SessionLocal() if database.SessionLocal is not None else None
+    if session is not None:
+        try:
+            session.query(UploadJob).filter(UploadJob.job_id == job_id).update(
+                {UploadJob.total_files: files, UploadJob.total_size_bytes: size}, synchronize_session=False)
+            session.commit()
+            current = session.query(UploadJob.status).filter(UploadJob.job_id == job_id).scalar()
+        finally:
+            session.close()
+        notify_job(job_id)
+        if current == "cancelled":
+            return False
+    job.total_files, job.total_size_bytes = files, size
+    activity.phase = None
+    return True
+
+
 # "Copying file://C:\data\a.jpg to gs://bucket/a.jpg" (gcloud) / "Copying file://... [Content-Type=...]" (gsutil)
 _COPY_LINE_RE = re.compile(r"Copying file://(.+?)(?: to gs://| \[Content-Type)")
 
@@ -1082,7 +1169,8 @@ class EngineRunState:
             self.base_files = int(event.get("local_files") or 0) - int(event.get("to_check") or 0)
             if progress_callback:
                 progress_callback(bytes_uploaded=self.base_bytes, total_bytes=self.total_bytes,
-                                  files_uploaded=self.base_files)
+                                  files_uploaded=self.base_files,
+                                  total_files=int(event.get("local_files") or 0))
         elif kind == "progress":
             if self.activity is not None:
                 self.activity.paused = bool(event.get("paused"))
@@ -1213,6 +1301,7 @@ class UploadService:
     
     def __init__(self):
         self.active_uploads = {}  # Track active upload processes
+        self.stop_requested = set()  # Jobs cancelled while counting their files
         self.engine_jobs = set()  # Jobs run by the JetStream engine (can pause / change speed)
     
     async def upload_to_gcs(self, job_id: str, source_path: str,
@@ -1625,6 +1714,8 @@ class UploadService:
     def cancel_upload(self, job_id: str) -> bool:
         """Cancel an active upload. Engine uploads stop gracefully (what's in flight finishes or is
         saved, and the manifest is written) and are only killed if they don't exit in time."""
+        # Stops a file count that runs before the upload itself (see count_job_files).
+        self.stop_requested.add(job_id)
         process = self.active_uploads.get(job_id)
         if process is not None and self._send_engine_command(job_id, {"cmd": "stop"}):
             def _kill_if_still_running():
