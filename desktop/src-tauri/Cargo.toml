@@ -1,6 +1,6 @@
 [package]
 name = "jetstream-desktop"
-version = "0.1.29"
+version = "0.2.0"
 description = "NOAA JetStream desktop app"
 edition = "2021"
 publish = false

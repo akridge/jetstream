@@ -8,14 +8,17 @@ portable package. Works on Windows, macOS and Linux; run it from anywhere.
 Needs Python 3.10+, Rust (stable), Node 18+, and on Windows the WebView2 runtime
 (included with Windows 10/11). Output goes to desktop/release/.
 
-Portable package: JetStream.exe (or JetStream on Linux) plus its two helper programs and an
-empty JetStreamData folder. Unzip anywhere and run; job history and logs stay in
+Portable package: JetStream.exe (or JetStream on Linux), the upload engine, the JetStream
+server (as a folder, server/, when built with build_sidecar.py --portable; otherwise one
+program) and an empty JetStreamData folder. CI builds are named with their build number
+(JetStream-0.2.0-build18-windows-x64-portable.zip); release tags use the plain version. Unzip anywhere and run; job history and logs stay in
 JetStreamData next to the program. Delete that folder to use the normal per-user data
 folder instead (shared with an installed copy and the pip version).
 """
 
 import argparse
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -41,7 +44,9 @@ Run {app} to start JetStream. Nothing is installed.
 - Job history, logs and the upload manifest are kept in the JetStreamData folder next to
   the program, so you can carry this folder (for example on a USB drive).
 - To share history with an installed copy of JetStream instead, delete JetStreamData.
-- Keep {app}, jetstream-server{exe} and jetstream-transfer{exe} together in this folder.
+- Keep everything in this folder together ({app}, jetstream-transfer{exe} and the
+  JetStream server{server}).
+- Version: {version}
 - Requirements: Google Cloud SDK (gcloud) for signing in and gcloud uploads.
   On Windows, the Microsoft Edge WebView2 runtime (built into Windows 10 and 11).
 """
@@ -68,7 +73,7 @@ def platform_name() -> str:
 def build(args) -> None:
     if not args.skip_python_deps:
         run([sys.executable, "-m", "pip", "install", "--upgrade", "-r", REPO / "requirements.txt", "pyinstaller"])
-    run([sys.executable, DESKTOP / "scripts" / "build_sidecar.py"])
+    run([sys.executable, DESKTOP / "scripts" / "build_sidecar.py", "--portable"])
     run([sys.executable, DESKTOP / "scripts" / "build_engine.py"])
     run([NPM, "ci"] if (DESKTOP / "package-lock.json").exists() else [NPM, "install"], cwd=DESKTOP)
     tauri = [NPX, "tauri", "build"]
@@ -77,14 +82,32 @@ def build(args) -> None:
     run(tauri, cwd=DESKTOP)
 
 
+def build_label() -> str:
+    """"0.2.0-build18" for CI builds, "0.2.0" for release tags and local builds."""
+    build = os.environ.get("JETSTREAM_BUILD", "").strip()
+    tagged = os.environ.get("GITHUB_REF", "").startswith("refs/tags/")
+    return f"{version()}-build{build}" if build and not tagged else version()
+
+
+def version_text() -> str:
+    build = os.environ.get("JETSTREAM_BUILD", "").strip()
+    commit = os.environ.get("JETSTREAM_COMMIT", "").strip()[:7]
+    extra = ", ".join(p for p in (f"build {build}" if build else "", commit) if p)
+    return f"{version()} ({extra})" if extra else f"{version()} (local build)"
+
+
 def package_portable() -> Path:
     """Zip the built app with its helpers into desktop/release/."""
     app_name = "JetStream" + EXE
+    server_dir = DESKTOP / "build" / "portable" / "jetstream-server"
     files = {
         app_name: RELEASE_DIR / f"jetstream-desktop{EXE}",
-        f"jetstream-server{EXE}": RELEASE_DIR / f"jetstream-server{EXE}",
         f"jetstream-transfer{EXE}": RELEASE_DIR / f"jetstream-transfer{EXE}",
     }
+    # The server as a folder (server/) when built that way, else the single program.
+    if not (server_dir / f"jetstream-server{EXE}").exists():
+        files[f"jetstream-server{EXE}"] = RELEASE_DIR / f"jetstream-server{EXE}"
+        server_dir = None
     missing = [str(p) for p in files.values() if not p.exists()]
     if missing:
         raise SystemExit("Build output missing (run without --package-only first):\n  " + "\n  ".join(missing))
@@ -93,7 +116,7 @@ def package_portable() -> Path:
         return OUT
 
     OUT.mkdir(parents=True, exist_ok=True)
-    folder = f"JetStream-{version()}-{platform_name()}-{arch()}-portable"
+    folder = f"JetStream-{build_label()}-{platform_name()}-{arch()}-portable"
     archive = OUT / f"{folder}.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for name, source in files.items():
@@ -101,7 +124,15 @@ def package_portable() -> Path:
             info.external_attr = 0o755 << 16  # keep Linux executables executable
             with open(source, "rb") as fh:
                 zf.writestr(info, fh.read(), compress_type=zipfile.ZIP_DEFLATED)
-        for name, text, mode in (("JetStreamData/", "", 0o40755), ("README.txt", PORTABLE_README.format(app=app_name, exe=EXE), 0o644)):
+        if server_dir:
+            for path in sorted(server_dir.rglob("*")):
+                if path.is_file():
+                    info = zipfile.ZipInfo.from_file(path, f"{folder}/server/{path.relative_to(server_dir).as_posix()}")
+                    info.external_attr = (0o755 if path.name.startswith("jetstream-server") else 0o644) << 16
+                    with open(path, "rb") as fh:
+                        zf.writestr(info, fh.read(), compress_type=zipfile.ZIP_DEFLATED)
+        readme = PORTABLE_README.format(app=app_name, exe=EXE, server=" in server/" if server_dir else f": jetstream-server{EXE}", version=version_text())
+        for name, text, mode in (("JetStreamData/", "", 0o40755), ("README.txt", readme, 0o644)):
             info = zipfile.ZipInfo(f"{folder}/{name}")
             info.external_attr = mode << 16
             zf.writestr(info, text, compress_type=zipfile.ZIP_DEFLATED)

@@ -214,6 +214,20 @@
     </div>
 
     <div class="card panel">
+      <h2>About</h2>
+      <dl class="about">
+        {#if app.desktop}
+          <dt>JetStream Desktop</dt>
+          <dd>{app.desktop.version}{app.desktop.build ? ` · build ${app.desktop.build}` : ' · local build'}{app.desktop.commit ? ` · ${app.desktop.commit}` : ''}{app.desktop.portable ? ' · portable' : ''}</dd>
+          <dt>Upload engine</dt>
+          <dd>{app.desktop.engine}</dd>
+        {/if}
+        <dt>JetStream server</dt>
+        <dd>{app.version || '…'} <span class="muted">(the Python package, versioned separately)</span></dd>
+      </dl>
+    </div>
+
+    <div class="card panel">
       <h2>More settings</h2>
       <p class="sub">Filters, Drive and other options are still on the classic settings page.</p>
       <button class="btn" onclick={() => openClassic('static/settings.html', apiBase())}><ExternalLink size={15} /> Open classic settings</button>
@@ -222,6 +236,21 @@
 </section>
 
 <style>
+  .about {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 6px 16px;
+    margin: 0;
+    font-size: 13.5px;
+  }
+  .about dt {
+    color: var(--muted);
+  }
+  .about dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 12.5px;
+  }
   .view {
     padding: 28px 32px 40px;
     max-width: 860px;

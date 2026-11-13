@@ -183,6 +183,7 @@ Once, from the repository root, build the two helper programs the app starts:
 ```bash
 pip install -r requirements.txt pyinstaller
 python desktop/scripts/build_sidecar.py   # bundled server  -> desktop/src-tauri/binaries/
+                                          # (--portable also builds it as a folder for the portable zip)
 python desktop/scripts/build_engine.py    # upload engine   -> desktop/src-tauri/binaries/
 cd desktop && npm install
 ```
@@ -234,7 +235,7 @@ This installs the Python requirements and PyInstaller, then builds:
 - the UI and app
 
 It puts everything in `desktop/release/`:
-- `JetStream-<version>-<os>-<arch>-portable.zip`
+- `JetStream-<version>-<os>-<arch>-portable.zip` (CI builds add the build number: `JetStream-0.2.0-build18-windows-x64-portable.zip`). Inside, the server is a folder (`server/`) rather than a self-extracting program, which browsers and virus scanners are much less suspicious of. The programs carry version details and the JetStream icon.
 - the installers (`.msi`, setup `.exe`, `.dmg`, `.AppImage`, `.deb`)
 
 `--package-only` re-zips an existing build. Use a virtual environment if you don't want the Python packages installed globally.
@@ -252,9 +253,11 @@ python scripts/build_desktop.py --package-only   # adds the portable zip; copies
 ```
 
 - **Icons:** regenerate them from `jetstream/static/icon.png` with `npm run icons`.
-- **CI:** the **Build desktop app** GitHub workflow (`.github/workflows/desktop.yml`) builds for Windows, macOS and Linux:
+- **Versions:** the desktop app (with its upload engine) has its own version, separate from the `jetstream` Python package. It lives in `src-tauri/tauri.conf.json`. Change it everywhere with `python desktop/scripts/set_version.py 0.2.1`; `--check` confirms the files agree. Every CI build also carries its build number and commit. They show in the sidebar ("v0.2.0 · build 18"), in **Settings → About** (desktop app, upload engine and server versions), in `jetstream-transfer --version`, and in the portable zip's name. Local builds say "local build".
+- **CI:** the **Build desktop app (Windows)** GitHub workflow (`.github/workflows/desktop.yml`) builds the Windows portable zip and installers:
   - It runs on any push that changes `desktop/`, `jetstream/` or `requirements.txt` (README-only changes are skipped), when started from the Actions tab, or when a `desktop-v*` tag is pushed.
-  - Each run uploads a `jetstream-desktop-<os>` artifact with the installers and the portable zip. Download it from the run's summary page.
-  - A tag such as `desktop-v0.1.29` also creates a draft release with the installers and portable zips attached.
+  - Each run uploads a `jetstream-desktop-windows-latest` artifact with the portable zip and installers. Download it from the run's summary page.
+  - A tag such as `desktop-v0.2.0` (which must match the desktop version) also creates a draft release with the installers and portable zip attached.
+  - macOS and Linux builds are parked in **Build desktop app (macOS and Linux)** (`.github/workflows/desktop-mac-linux.yml`), which only runs when started from the Actions tab.
   - The **Run workflow** button only appears once the workflow file is on the default branch.
 - **Code signing:** Windows SmartScreen and macOS Gatekeeper warn about unsigned apps. Signing needs certificates that are not set up yet. See the [Tauri signing guides](https://tauri.app/distribute/).

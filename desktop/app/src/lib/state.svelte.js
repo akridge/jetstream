@@ -2,7 +2,7 @@
 
 import { api, eventsUrl, setApiBase } from './api.js';
 import { jobDestination, normalizeDestination, basename } from './format.js';
-import { ensureNotificationPermission, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
+import { appInfo, ensureNotificationPermission, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
 import { cloudOps } from './cloudops.svelte.js';
 
 const PREFS_KEY = 'jetstreamDesktopPrefs';
@@ -102,7 +102,10 @@ class AppState {
   presets = $state([]);
   auth = $state(null);
   tools = $state([]);
+  /** The JetStream server's (Python package) version. */
   version = $state('');
+  /** The desktop app: { version, build, commit, engine, portable } (null in a browser). */
+  desktop = $state(null);
   live = $state(false);
   prefs = $state(loadPrefs());
   toasts = $state([]);
@@ -176,6 +179,7 @@ class AppState {
   }
 
   async #loadVersion() {
+    this.desktop = await appInfo().catch(() => null);
     this.version = (await api.version()).version || '';
   }
 

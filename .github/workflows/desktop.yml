@@ -1,10 +1,16 @@
-name: Build desktop app
+name: Build desktop app (Windows)
 
-# Builds JetStream Desktop for Windows, macOS and Linux: installers (.msi and setup .exe on
-# Windows, .dmg, .AppImage/.deb) plus a portable .zip for Windows and Linux. Each platform's
-# files are uploaded as a workflow artifact. It runs on pushes that change the app (any
-# branch), by hand from the Actions tab, and on tags like desktop-v0.1.29, which also create
-# a draft release with everything attached.
+# Builds JetStream Desktop for Windows: the portable .zip (unzip and run; the main download)
+# plus the .msi and setup .exe installers, uploaded as a workflow artifact. It runs on pushes
+# that change the app (any branch), by hand from the Actions tab, and on tags like
+# desktop-v0.2.0, which also create a draft release with everything attached.
+#
+# Versions: the desktop app has its own version (desktop/src-tauri/tauri.conf.json; change it
+# with desktop/scripts/set_version.py), separate from the Python package. Every build also
+# carries its build number and commit (JETSTREAM_BUILD / JETSTREAM_COMMIT below), shown in the
+# app and in the portable zip's name: JetStream-0.2.0-build18-windows-x64-portable.zip.
+#
+# macOS and Linux builds are in desktop-mac-linux.yml (run by hand for now).
 # To build locally instead: desktop/scripts/build_windows.ps1 or desktop/scripts/build_desktop.py.
 on:
   workflow_dispatch:
@@ -19,6 +25,7 @@ on:
       - "jetstream/**"
       - "requirements.txt"
       - ".github/workflows/desktop.yml"
+      - "desktop/scripts/**"
       # Documentation-only changes don't rebuild (and don't cancel a build in progress).
       - "!**/*.md"
 
@@ -33,24 +40,23 @@ jobs:
       matrix:
         include:
           - platform: windows-latest
-          - platform: macos-latest
-          - platform: ubuntu-22.04
     runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
+    env:
+      JETSTREAM_BUILD: ${{ github.run_number }}
+      JETSTREAM_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v5
-
-      - name: Install Linux build dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+
+      - name: Check the desktop version
+        # The version files must agree; a release tag must match them.
+        run: python desktop/scripts/set_version.py --check ${{ startsWith(github.ref, 'refs/tags/desktop-v') && format('--tag {0}', github.ref_name) || '' }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -71,7 +77,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
-          python desktop/scripts/build_sidecar.py
+          python desktop/scripts/build_sidecar.py --portable
 
       - name: Build JetStream upload engine
         run: python desktop/scripts/build_engine.py
@@ -91,9 +97,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Package portable build and collect installers
-        # Windows: JetStream-<version>-windows-x64-portable.zip (unzip and run, no install)
-        # plus the .msi and setup .exe. Linux: a portable .zip plus .AppImage/.deb.
-        # macOS: the .dmg (the .app inside is already portable).
+        # JetStream-<version>-build<N>-windows-x64-portable.zip (unzip and run, no install; the
+        # server is a folder inside it) plus the .msi and setup .exe.
         run: python desktop/scripts/build_desktop.py --package-only
 
       - name: Upload build
@@ -104,7 +109,7 @@ jobs:
           if-no-files-found: error
 
       - name: Attach portable build to the draft release
-        if: startsWith(github.ref, 'refs/tags/desktop-v') && matrix.platform != 'macos-latest'
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}

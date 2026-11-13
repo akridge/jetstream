@@ -1,7 +1,7 @@
 {
   "name": "jetstream-desktop",
   "private": true,
-  "version": "0.1.29",
+  "version": "0.2.0",
   "description": "NOAA JetStream desktop app (Tauri shell around the JetStream server)",
   "scripts": {
     "dev:ui": "vite",

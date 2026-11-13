@@ -111,6 +111,27 @@ fn set_status(app: &AppHandle, phase: Phase, message: Option<String>) {
     let _ = app.emit("server-status", status);
 }
 
+/// Versions of the desktop app and its upload engine, with the CI build number and commit.
+#[derive(Serialize)]
+struct AppInfo {
+    version: String,
+    build: String,
+    commit: String,
+    engine: String,
+    portable: bool,
+}
+
+#[tauri::command]
+fn app_info(app: AppHandle) -> AppInfo {
+    AppInfo {
+        version: app.package_info().version.to_string(),
+        build: jetstream_transfer::BUILD_NUMBER.to_string(),
+        commit: jetstream_transfer::COMMIT.to_string(),
+        engine: jetstream_transfer::VERSION_TEXT.to_string(),
+        portable: portable_data_dir().is_some(),
+    }
+}
+
 /// Current server status, polled by the UI on load (events cover later changes).
 #[tauri::command]
 fn server_status(app: AppHandle) -> ServerStatus {
@@ -795,9 +816,19 @@ fn show_main_window(app: &AppHandle) {
 fn start_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let port = free_port()?;
     let cors = format!("{APP_ORIGINS},http://127.0.0.1:{port}");
-    let mut command = app
-        .shell()
-        .sidecar("jetstream-server")?
+    // The portable build ships the server as a folder (server/) next to the program; the
+    // installers bundle it as a single sidecar program.
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let exe = if cfg!(windows) { ".exe" } else { "" };
+    let folder_server = exe_dir.as_ref().map(|d| d.join("server").join(format!("jetstream-server{exe}"))).filter(|p| p.is_file());
+    let base = match &folder_server {
+        Some(path) => {
+            app.state::<Server>().push_log(format!("Starting the server from {}", path.display()));
+            app.shell().command(path)
+        }
+        None => app.shell().sidecar("jetstream-server")?,
+    };
+    let mut command = base
         .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--no-browser"])
         .env("AUTO_OPEN_BROWSER", "false")
         .env("CORS_ALLOW_ORIGINS", cors)
@@ -806,6 +837,10 @@ fn start_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         // Output comes through a pipe: make it UTF-8 rather than the Windows code page.
         .env("PYTHONIOENCODING", "utf-8:replace")
         .env("PYTHONUTF8", "1");
+    // The upload engine sits next to this program (the server may be in a subfolder).
+    if let Some(engine) = exe_dir.as_ref().map(|d| d.join(format!("jetstream-transfer{exe}"))).filter(|p| p.is_file()) {
+        command = command.env("JETSTREAM_TRANSFER_BIN", engine);
+    }
     if let Some(dir) = portable_data_dir() {
         app.state::<Server>().push_log(format!("Portable mode: data in {}", dir.display()));
         command = command.env("JETSTREAM_DATA_DIR", dir);
@@ -923,6 +958,7 @@ fn main() {
             classify_paths,
             list_subfolders,
             watch_folders,
+            app_info,
             make_receipt,
             list_receipts
         ])

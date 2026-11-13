@@ -23,7 +23,7 @@ use jetstream_transfer::throttle::{mbps_to_bytes, Throttle};
 use jetstream_transfer::{audit, browse, scan};
 
 #[derive(Parser)]
-#[command(version, about = "JetStream upload engine for Google Cloud Storage")]
+#[command(version = jetstream_transfer::VERSION_TEXT, about = "JetStream upload engine for Google Cloud Storage")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

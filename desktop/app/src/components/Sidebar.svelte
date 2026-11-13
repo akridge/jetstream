@@ -90,7 +90,7 @@
     </button>
     <div class="meta">
       <span class="live" class:on={app.live} title={app.live ? 'Live updates connected' : 'Reconnecting…'}></span>
-      {app.live ? 'Live' : 'Offline'}{app.version ? ` · v${app.version}` : ''}
+      {app.live ? 'Live' : 'Offline'}{app.desktop ? ` · v${app.desktop.version}${app.desktop.build ? ` · build ${app.desktop.build}` : ''}` : app.version ? ` · v${app.version}` : ''}
     </div>
   </div>
 </aside>
