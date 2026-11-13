@@ -37,8 +37,11 @@ pub fn crc32c_b64(crc: u32) -> String {
 
 /// Upload metadata: name, checksum (verified by Cloud Storage) and, when known, the source
 /// file's modified time the way `gcloud storage rsync` records it.
-fn object_metadata(name: &str, crc: u32, mtime_secs: Option<i64>) -> serde_json::Value {
-    let mut metadata = serde_json::json!({ "name": name, "crc32c": crc32c_b64(crc) });
+fn object_metadata(name: &str, crc: impl Into<Option<u32>>, mtime_secs: Option<i64>) -> serde_json::Value {
+    let mut metadata = serde_json::json!({ "name": name });
+    if let Some(crc) = crc.into() {
+        metadata["crc32c"] = serde_json::json!(crc32c_b64(crc));
+    }
     if let Some(mtime) = mtime_secs {
         metadata["metadata"] = serde_json::json!({ FILE_MTIME_KEY: mtime.to_string() });
     }
@@ -176,6 +179,8 @@ pub struct BucketInfo {
     pub hierarchical_namespace: bool,
     /// Autoclass manages storage classes and charges no early-deletion fees.
     pub autoclass: bool,
+    /// Retention policy period (objects can't be deleted before it ends); 0 when none.
+    pub retention_seconds: u64,
 }
 
 /// Metadata kept when an object is copied with `rewrite` (a rewrite with a request body uses
@@ -446,6 +451,20 @@ impl GcsClient {
         no_clobber: bool,
         mtime_secs: Option<i64>,
     ) -> Result<String, GcsError> {
+        self.start_resumable_opt(bucket, name, size, Some(crc), no_clobber, mtime_secs).await
+    }
+
+    /// Start a resumable upload; without `crc` the server doesn't check the content (used for
+    /// the parts of a composite upload, whose result is checked as a whole).
+    pub async fn start_resumable_opt(
+        &self,
+        bucket: &str,
+        name: &str,
+        size: u64,
+        crc: Option<u32>,
+        no_clobber: bool,
+        mtime_secs: Option<i64>,
+    ) -> Result<String, GcsError> {
         let mut url = format!(
             "{}/upload/storage/v1/b/{}/o?uploadType=resumable&name={}",
             self.base,
@@ -478,7 +497,7 @@ impl GcsClient {
             .ok_or_else(|| GcsError::Retryable("resumable upload response had no session URI".into()))
     }
 
-    async fn resumable_response(response: Response, size: u64, crc: u32) -> Result<ResumableStatus, GcsError> {
+    async fn resumable_response(response: Response, size: u64, crc: Option<u32>) -> Result<ResumableStatus, GcsError> {
         let status = response.status();
         if status.as_u16() == 308 {
             // "Range: bytes=0-N" means the server has N+1 bytes; no header means none.
@@ -500,7 +519,9 @@ impl GcsClient {
                     info.name, info.size
                 )));
             }
-            GcsClient::check_crc(&info, crc)?;
+            if let Some(crc) = crc {
+                GcsClient::check_crc(&info, crc)?;
+            }
             return Ok(ResumableStatus::Complete(info));
         }
         if status == StatusCode::NOT_FOUND || status == StatusCode::GONE {
@@ -511,6 +532,10 @@ impl GcsClient {
 
     /// Ask how much of a resumable upload the server already has.
     pub async fn query_resumable(&self, session: &str, size: u64, crc: u32) -> Result<ResumableStatus, GcsError> {
+        self.query_resumable_opt(session, size, Some(crc)).await
+    }
+
+    pub async fn query_resumable_opt(&self, session: &str, size: u64, crc: Option<u32>) -> Result<ResumableStatus, GcsError> {
         let response = self
             .send(
                 self.http
@@ -542,6 +567,18 @@ impl GcsClient {
         data: Vec<u8>,
         size: u64,
         crc: u32,
+        extras: &UploadExtras,
+    ) -> Result<ResumableStatus, GcsError> {
+        self.put_chunk_opt(session, offset, data, size, Some(crc), extras).await
+    }
+
+    pub async fn put_chunk_opt(
+        &self,
+        session: &str,
+        offset: u64,
+        data: Vec<u8>,
+        size: u64,
+        crc: Option<u32>,
         extras: &UploadExtras,
     ) -> Result<ResumableStatus, GcsError> {
         let end = offset + data.len() as u64 - 1;
@@ -808,7 +845,7 @@ impl GcsClient {
 
     pub async fn get_bucket(&self, bucket: &str) -> Result<BucketInfo> {
         let url = format!(
-            "{}/storage/v1/b/{}?fields=name,location,storageClass,versioning,softDeletePolicy,hierarchicalNamespace,autoclass",
+            "{}/storage/v1/b/{}?fields=name,location,storageClass,versioning,softDeletePolicy,hierarchicalNamespace,autoclass,retentionPolicy",
             self.base,
             encode(bucket)
         );
@@ -828,6 +865,10 @@ impl GcsClient {
             },
             hierarchical_namespace: raw["hierarchicalNamespace"]["enabled"].as_bool().unwrap_or(false),
             autoclass: raw["autoclass"]["enabled"].as_bool().unwrap_or(false),
+            retention_seconds: match &raw["retentionPolicy"]["retentionPeriod"] {
+                serde_json::Value::String(s) => s.parse().unwrap_or(0),
+                v => v.as_u64().unwrap_or(0),
+            },
         })
     }
 
@@ -910,6 +951,35 @@ impl GcsClient {
             }
         }
         Ok(folders)
+    }
+
+    /// Join `sources` (up to 32 objects in the bucket, in order) into `dest`, with the source
+    /// file's modified time as metadata. The result's crc32c covers the whole content.
+    pub async fn compose(
+        &self,
+        bucket: &str,
+        dest: &str,
+        sources: &[String],
+        no_clobber: bool,
+        mtime_secs: Option<i64>,
+    ) -> Result<ObjectInfo, GcsError> {
+        let mut url = format!("{}/storage/v1/b/{}/o/{}/compose", self.base, encode(bucket), encode(dest));
+        if no_clobber {
+            url.push_str("?ifGenerationMatch=0");
+        }
+        let mut destination = serde_json::json!({ "contentType": "application/octet-stream" });
+        if let Some(mtime) = mtime_secs {
+            destination["metadata"] = serde_json::json!({ FILE_MTIME_KEY: mtime.to_string() });
+        }
+        let body = serde_json::json!({
+            "sourceObjects": sources.iter().map(|name| serde_json::json!({ "name": name })).collect::<Vec<_>>(),
+            "destination": destination,
+        });
+        let response = self.send(self.http.post(url).timeout(Duration::from_secs(300)).json(&body)).await?;
+        if !response.status().is_success() {
+            return Err(Self::error_for(response).await);
+        }
+        response.json().await.map_err(|e| GcsError::Retryable(e.to_string()))
     }
 
     /// Delete an (empty) folder in a hierarchical-namespace bucket.

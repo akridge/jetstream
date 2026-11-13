@@ -131,7 +131,7 @@
               <li class:retrying={f.retry}>
                 <span class="mono truncate start" title={f.retry ? `${f.path}: ${f.retry.error}` : f.path}><bdi>{f.path}</bdi></span>
                 <span class="muted">
-                  {#if f.retry}retrying {f.retry.attempt}/{f.retry.max_attempts}{#if /stalled/.test(f.retry.error)} · connection stalled{/if}{:else}{f.bytes ? bytes(f.bytes) : ''}{f.seconds >= 5 ? ` · ${duration(f.seconds)}` : ''}{/if}
+                  {#if f.retry}retrying {f.retry.attempt}/{f.retry.max_attempts}{#if /stalled/.test(f.retry.error)} · connection stalled{/if}{:else}{f.bytes ? bytes(f.bytes) : ''}{f.parts ? ` · in ${f.parts} parallel parts` : ''}{f.seconds >= 5 ? ` · ${duration(f.seconds)}` : ''}{/if}
                 </span>
               </li>
             {/each}

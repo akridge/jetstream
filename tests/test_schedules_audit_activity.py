@@ -284,12 +284,13 @@ def test_transfer_settings_round_trip(tmp_path, monkeypatch):
     from jetstream import transfer_settings
 
     monkeypatch.setenv("JETSTREAM_DATA_DIR", str(tmp_path))
-    assert transfer_settings.load() == {"max_mbps": 0.0, "parallel_jobs": 1}
-    assert transfer_settings.save({"max_mbps": 25, "unknown": 1}) == {"max_mbps": 25.0, "parallel_jobs": 1}
+    defaults = {"max_mbps": 0.0, "parallel_jobs": 1, "parallel_parts": True}
+    assert transfer_settings.load() == defaults
+    assert transfer_settings.save({"max_mbps": 25, "unknown": 1}) == {**defaults, "max_mbps": 25.0}
     assert transfer_settings.save({"parallel_jobs": 9})["parallel_jobs"] == 4
-    assert transfer_settings.load() == {"max_mbps": 25.0, "parallel_jobs": 4}
+    assert transfer_settings.load() == {**defaults, "max_mbps": 25.0, "parallel_jobs": 4}
     (tmp_path / "transfer-settings.json").write_text("not json")
-    assert transfer_settings.load() == {"max_mbps": 0.0, "parallel_jobs": 1}
+    assert transfer_settings.load() == defaults
 
 
 def test_engine_jobs_can_be_paused_resumed_and_limited(tmp_path, monkeypatch):
@@ -537,3 +538,24 @@ def test_jobs_count_their_files_when_they_run(db_env):
     assert asyncio.run(services.count_job_files(job3))
     assert job3.total_files == 0
     db.close()
+
+
+
+def test_parallel_parts_setting_reaches_the_engine_and_the_summary(tmp_path, monkeypatch):
+    from jetstream import transfer_settings
+
+    monkeypatch.setenv("JETSTREAM_DATA_DIR", str(tmp_path))
+    assert transfer_settings.load()["parallel_parts"] is True, "on by default"
+    assert transfer_settings.save({"parallel_parts": False})["parallel_parts"] is False
+    assert transfer_settings.load()["parallel_parts"] is False
+
+    activity = services.start_job_activity("job-p", "jetstream")
+    state = services.EngineRunState()
+    state.activity = activity
+    state.handle('{"event":"file_started","path":"video/big.mov","bytes":900000000,"parts":27}', None)
+    assert services.job_activity("job-p")["in_flight"][0]["parts"] == 27
+    state.handle('{"event":"composite_off","reason":"the bucket has a retention policy"}', None)
+    state.handle('{"event":"done","uploaded":1,"failed":0,"composite_files":0,"parts_left":2,"elapsed_seconds":5}', None)
+    text = state.summary_text(0)
+    assert "one stream each: the bucket has a retention policy" in text
+    assert "2 temporary part(s)" in text

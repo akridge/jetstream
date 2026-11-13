@@ -6,7 +6,9 @@ from typing import Dict
 
 from .config import user_data_dir
 
-DEFAULTS: Dict = {"max_mbps": 0.0, "parallel_jobs": 1}
+#: parallel_parts: the JetStream engine uploads large files as parallel parts joined in the
+#: bucket (much faster on long-distance links; joined objects have a CRC32C but no MD5).
+DEFAULTS: Dict = {"max_mbps": 0.0, "parallel_jobs": 1, "parallel_parts": True}
 _lock = threading.Lock()
 
 
@@ -28,6 +30,7 @@ def load() -> Dict:
     except (TypeError, ValueError):
         merged["max_mbps"] = 0.0
     merged["parallel_jobs"] = _clamp_jobs(merged.get("parallel_jobs"))
+    merged["parallel_parts"] = merged.get("parallel_parts") is not False
     return merged
 
 
@@ -45,6 +48,7 @@ def save(changes: Dict) -> Dict:
         current.update({k: v for k, v in changes.items() if k in DEFAULTS})
         current["max_mbps"] = max(0.0, float(current["max_mbps"] or 0))
         current["parallel_jobs"] = _clamp_jobs(current.get("parallel_jobs"))
+        current["parallel_parts"] = current.get("parallel_parts") is not False
         path = _path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")

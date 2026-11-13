@@ -77,6 +77,7 @@ def test_engine_command_line_progress_and_summary(tmp_path, monkeypatch):
     args = json.loads(args_file.read_text())
     assert args[:3] == ["sync", str(tmp_path), "gs://bucket/surveys/2026"]
     assert "--no-recursive" in args and "--no-clobber" in args and "--dry-run" not in args
+    assert "--no-composite" not in args, "parallel parts for large files are on by default"
     excludes = [args[i + 1] for i, a in enumerate(args) if a == "--exclude"]
     assert excludes == [r".*\.tmp$", ".*/_archive/.*", "^_archive/.*"]
 

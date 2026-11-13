@@ -32,6 +32,15 @@
     }
   }
 
+  async function setParts(on) {
+    try {
+      await app.saveTransfer({ parallel_parts: on });
+      app.toast(on ? 'Large files upload in parallel parts' : 'Large files upload as one stream each (keeps MD5 checksums)', 'success', { timeout: 3500 });
+    } catch (err) {
+      app.toast(`Couldn't save: ${err.message}`, 'error');
+    }
+  }
+
   let checking = $state(false);
   let signingIn = $state(false);
   let auth = $derived(app.auth);
@@ -146,6 +155,21 @@
             <button class="chip" role="radio" aria-checked={app.transfer.parallel_jobs === n} class:on={app.transfer.parallel_jobs === n} onclick={() => setParallel(n)}>{n === 1 ? 'One at a time' : n}</button>
           {/each}
         </div>
+      </div>
+
+      <div class="limit">
+        <span class="label">Large files</span>
+        <label class="toggle">
+          <input type="checkbox" checked={app.transfer.parallel_parts !== false} onchange={(e) => setParts(e.currentTarget.checked)} />
+          <span>
+            <strong>Upload large files in parallel parts</strong>
+            <small>
+              With the JetStream engine, files over 256 MB go up as up to 32 parts at once and are joined in the bucket, often several times faster on long-distance
+              connections. The joined file is checked against the original by CRC32C; it has no MD5 checksum, so turn this off if your data needs MD5. Skipped
+              automatically for buckets with a retention policy or a Nearline/Coldline/Archive storage class.
+            </small>
+          </span>
+        </label>
       </div>
 
       <div class="limit">

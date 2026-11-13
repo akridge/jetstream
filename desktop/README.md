@@ -125,6 +125,7 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - default upload tool
   - **speed limit** for uploads and downloads (e.g. 20 Mbit/s on a shared ship or field-station connection). It changes running engine uploads too.
   - **uploads at once** (1–4), e.g. how many subfolders of a split upload run together
+  - **Upload large files in parallel parts** (on by default; JetStream engine): files over 256 MB go up as up to 32 parts at once and are joined in the bucket. This is often several times faster on long-distance connections. The joined file is verified by CRC32C but has no MD5 checksum, so turn it off if your data needs MD5. It's skipped automatically for buckets with a retention policy or a Nearline, Coldline or Archive storage class. The job details show "in 16 parallel parts".
   - light, dark or system theme
   - notifications
 - **More tools:** cloud audit history, the catalog tool, Drive upload, and the original pages. These open in a separate window.

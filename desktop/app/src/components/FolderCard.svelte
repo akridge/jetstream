@@ -54,7 +54,10 @@
     return pollActivity(id, (a) => {
       activity = a;
       const stuck = a.in_flight.find((f) => f.retry);
-      nowFile = stuck ? `${stuck.path} — retrying (${stuck.retry.attempt}/${stuck.retry.max_attempts})` : a.in_flight[0]?.path || a.recent[0]?.path || '';
+      const first = a.in_flight[0];
+      nowFile = stuck
+        ? `${stuck.path} — retrying (${stuck.retry.attempt}/${stuck.retry.max_attempts})`
+        : first ? `${first.path}${first.parts ? ` · in ${first.parts} parallel parts` : ''}` : a.recent[0]?.path || '';
       paused = !!a.paused;
     }, 2500);
   });

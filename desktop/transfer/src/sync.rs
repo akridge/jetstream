@@ -70,6 +70,15 @@ pub struct SyncOptions {
     pub auto_tune: bool,
     /// Files hashed at once.
     pub hash_concurrency: usize,
+    /// Upload large files as parts in parallel, then join them in the bucket (when the bucket
+    /// allows it: Standard storage class or Autoclass, no retention policy, delete permission).
+    pub composite: bool,
+    /// Files at least this big use parallel parts.
+    pub composite_threshold: u64,
+    /// Aim for parts of about this size (2 to 32 parts per file).
+    pub composite_part_size: u64,
+    /// Parts uploading at once across the sync.
+    pub composite_concurrency: usize,
 }
 
 impl SyncOptions {
@@ -93,6 +102,10 @@ impl SyncOptions {
             throttle: Arc::new(Throttle::default()),
             auto_tune: true,
             hash_concurrency: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 8),
+            composite: true,
+            composite_threshold: 256 * 1024 * 1024,
+            composite_part_size: 32 * 1024 * 1024,
+            composite_concurrency: 8,
         })
     }
 
@@ -134,6 +147,10 @@ pub struct Summary {
     pub hashed_files: u64,
     pub hashed_bytes: u64,
     pub listed_objects: Option<u64>,
+    /// Files uploaded as parallel parts joined in the bucket.
+    pub composite_files: u64,
+    /// Temporary parts that couldn't be deleted after joining (under `_jetstream/parts/`).
+    pub parts_left: u64,
     pub cancelled: bool,
     pub elapsed_seconds: f64,
 }
@@ -166,7 +183,15 @@ pub enum Event {
     /// Concurrency and chunk size chosen for this sync.
     Tuned { concurrency: usize, large_chunk_mib: usize },
     /// A large file started uploading; small files only report when done.
-    FileStarted { path: String, bytes: u64 },
+    FileStarted {
+        path: String,
+        bytes: u64,
+        /// Uploading as this many parallel parts.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parts: Option<u32>,
+    },
+    /// Large files go up as one stream in this sync, and why (bucket settings, permissions).
+    CompositeOff { reason: String },
     /// A request failed (or stalled) and is being tried again.
     FileRetrying { path: String, attempt: u32, max_attempts: u32, error: String },
     /// Cloud Storage can't be reached (the internet connection dropped): every upload waits,
@@ -266,6 +291,11 @@ struct Ctx {
     listed: Arc<AtomicU64>,
     phase: std::sync::Mutex<&'static str>,
     net: Net,
+    /// Why parallel parts aren't used in this sync (None: they are, for big files).
+    composite_off: std::sync::Mutex<Option<String>>,
+    part_slots: Semaphore,
+    composite_files: AtomicU64,
+    parts_left: AtomicU64,
 }
 
 /// Whether Cloud Storage is reachable, shared by every upload of a sync.
@@ -606,6 +636,20 @@ pub async fn sync(
         emit(Event::Tuned { concurrency, large_chunk_mib: chunk_size >> 20 });
     }
 
+    // Parallel parts for big files, if the bucket allows it (checked once, only when needed).
+    let composite_concurrency = opts.composite_concurrency.max(1);
+    let composite_off = if opts.dry_run || !candidates.iter().any(|c| c.file.size >= opts.composite_threshold) {
+        Some(String::new())
+    } else if !opts.composite {
+        Some("turned off".to_string())
+    } else {
+        let reason = composite_check(&client, &opts.bucket).await;
+        if let Some(reason) = &reason {
+            emit(Event::CompositeOff { reason: reason.clone() });
+        }
+        reason
+    };
+
     let ctx = Arc::new(Ctx {
         client,
         emit: emit.clone(),
@@ -626,6 +670,10 @@ pub async fn sync(
         listed,
         phase: std::sync::Mutex::new("uploading"),
         net: Net::default(),
+        composite_off: std::sync::Mutex::new(composite_off),
+        part_slots: Semaphore::new(composite_concurrency),
+        composite_files: AtomicU64::new(0),
+        parts_left: AtomicU64::new(0),
     });
     emit(Event::Phase { phase: "uploading" });
 
@@ -708,6 +756,8 @@ pub async fn sync(
     emit(progress(&ctx, false));
 
     summary.hashed_files = ctx.hashed_files.load(Ordering::Relaxed);
+    summary.composite_files = ctx.composite_files.load(Ordering::Relaxed);
+    summary.parts_left = ctx.parts_left.load(Ordering::Relaxed);
     summary.hashed_bytes = ctx.hashed_bytes.load(Ordering::Relaxed);
     summary.cancelled |= ctx.cancelled();
     summary.elapsed_seconds = (started.elapsed().as_secs_f64() * 100.0).round() / 100.0;
@@ -820,11 +870,22 @@ async fn upload(ctx: &Ctx, hashed: Hashed) -> Outcome {
         if ctx.cancelled() {
             return Outcome::Cancelled;
         }
-        (ctx.emit)(Event::FileStarted { path: file.rel.clone(), bytes: file.size });
-        upload_resumable(ctx, &file, &record, &name).await
+        let composite = if file.size >= ctx.opts.composite_threshold && ctx.composite_off.lock().unwrap().is_none() {
+            upload_composite(ctx, &file, &record, &name).await
+        } else {
+            Ok(None)
+        };
+        match composite {
+            Ok(Some(done)) => Ok(done),
+            Ok(None) => {
+                (ctx.emit)(Event::FileStarted { path: file.rel.clone(), bytes: file.size, parts: None });
+                upload_resumable(ctx, &file, &record, &name).await
+            }
+            Err(err) => Err(err),
+        }
     } else {
         if file.size >= REPORT_START {
-            (ctx.emit)(Event::FileStarted { path: file.rel.clone(), bytes: file.size });
+            (ctx.emit)(Event::FileStarted { path: file.rel.clone(), bytes: file.size, parts: None });
         }
         upload_small(ctx, &file, &record, &name, data).await.map(|info| (info, None))
     };
@@ -968,18 +1029,6 @@ async fn upload_small(
     }
 }
 
-/// Move `offset` to what Cloud Storage has kept of a resumable upload.
-async fn resync_offset(ctx: &Ctx, uri: &str, record: &FileRecord, offset: &mut u64) {
-    if let Ok(ResumableStatus::Incomplete { offset: have }) = ctx.client.query_resumable(uri, record.size, record.crc32c).await {
-        if have >= *offset {
-            ctx.bytes_done.fetch_add(have - *offset, Ordering::Relaxed);
-        } else {
-            ctx.bytes_done.fetch_sub((*offset - have).min(ctx.bytes_done.load(Ordering::Relaxed)), Ordering::Relaxed);
-        }
-        *offset = have;
-    }
-}
-
 async fn read_at(path: &Path, offset: u64, len: usize) -> Result<Vec<u8>, UploadError> {
     let io = |e: std::io::Error| UploadError::Io(format!("could not read file: {e}"));
     let mut file = tokio::fs::File::open(path).await.map_err(io)?;
@@ -996,14 +1045,49 @@ async fn upload_resumable(
     record: &FileRecord,
     name: &str,
 ) -> Result<(ObjectInfo, Option<u64>), UploadError> {
-    let chunk = ctx.chunk_size;
+    let range = Range {
+        name: name.to_string(),
+        start: 0,
+        len: record.size,
+        crc: Some(record.crc32c),
+        key: file.rel.clone(),
+        no_clobber: ctx.opts.no_clobber,
+        mtime_secs: Some(file.mtime_secs()),
+        chunk: ctx.chunk_size,
+    };
+    upload_range(ctx, file, record, &range).await
+}
+
+/// A chunk being read from disk in the background.
+type ReadAhead = tokio::task::JoinHandle<Result<Vec<u8>, UploadError>>;
+
+/// Part of a file to upload as one object (the whole file, or one part of a composite upload).
+struct Range {
+    name: String,
+    start: u64,
+    len: u64,
+    /// Checked by Cloud Storage when known (parts are checked as a whole after joining).
+    crc: Option<u32>,
+    /// Where its resumable session is saved in the manifest.
+    key: String,
+    no_clobber: bool,
+    mtime_secs: Option<i64>,
+    chunk: usize,
+}
+
+/// Upload `range` of `file` through a resumable session (continuing a saved one), reading the
+/// next chunk from disk while the current one is being sent.
+async fn upload_range(ctx: &Ctx, file: &LocalFile, record: &FileRecord, range: &Range) -> Result<(ObjectInfo, Option<u64>), UploadError> {
+    let chunk = range.chunk;
+    let size = range.len;
+    let session_record = FileRecord { size, mtime_ns: record.mtime_ns, crc32c: record.crc32c };
     let mut resumed_from = None;
     let mut session: Option<String> = None;
     let mut offset = 0u64;
 
-    if let Ok(Some(saved)) = ctx.manifest.session(&ctx.dest, &file.rel) {
-        if saved.size == record.size && saved.mtime_ns == record.mtime_ns && saved.crc32c == record.crc32c {
-            match ctx.client.query_resumable(&saved.session_uri, record.size, record.crc32c).await {
+    if let Ok(Some(saved)) = ctx.manifest.session(&ctx.dest, &range.key) {
+        if saved.size == size && saved.mtime_ns == record.mtime_ns && saved.crc32c == record.crc32c {
+            match ctx.client.query_resumable_opt(&saved.session_uri, size, range.crc).await {
                 Ok(ResumableStatus::Incomplete { offset: have }) => {
                     session = Some(saved.session_uri);
                     offset = have;
@@ -1011,20 +1095,22 @@ async fn upload_resumable(
                     ctx.bytes_done.fetch_add(have, Ordering::Relaxed);
                 }
                 Ok(ResumableStatus::Complete(info)) => {
-                    let _ = ctx.manifest.clear_session(&ctx.dest, &file.rel);
-                    ctx.bytes_done.fetch_add(record.size, Ordering::Relaxed);
-                    return Ok((info, Some(record.size)));
+                    let _ = ctx.manifest.clear_session(&ctx.dest, &range.key);
+                    ctx.bytes_done.fetch_add(size, Ordering::Relaxed);
+                    return Ok((info, Some(size)));
                 }
                 Err(_) => {}
             }
         }
         if session.is_none() {
-            let _ = ctx.manifest.clear_session(&ctx.dest, &file.rel);
+            let _ = ctx.manifest.clear_session(&ctx.dest, &range.key);
         }
     }
 
     let mut attempt = 0;
     let mut restarts = 0;
+    // The next chunk, being read while the current one is sent.
+    let mut ahead: Option<(u64, ReadAhead)> = None;
     loop {
         wait_ready(ctx).await;
         if ctx.cancelled() {
@@ -1033,13 +1119,9 @@ async fn upload_resumable(
         }
         let uri = match &session {
             Some(uri) => uri.clone(),
-            None => match ctx
-                .client
-                .start_resumable_with(&ctx.opts.bucket, name, record.size, record.crc32c, ctx.opts.no_clobber, Some(file.mtime_secs()))
-                .await
-            {
+            None => match ctx.client.start_resumable_opt(&ctx.opts.bucket, &range.name, size, range.crc, range.no_clobber, range.mtime_secs).await {
                 Ok(uri) => {
-                    let _ = ctx.manifest.save_session(&ctx.dest, &file.rel, record, &uri);
+                    let _ = ctx.manifest.save_session(&ctx.dest, &range.key, &session_record, &uri);
                     session = Some(uri.clone());
                     offset = 0;
                     uri
@@ -1055,21 +1137,34 @@ async fn upload_resumable(
             },
         };
 
-        let len = chunk.min((record.size - offset) as usize);
-        let data = read_at(&file.abs, offset, len).await?;
-        match ctx.client.put_chunk_with(&uri, offset, data, record.size, record.crc32c, &extras(ctx, file)).await {
+        let len = chunk.min((size - offset) as usize);
+        let data = match ahead.take() {
+            Some((at, handle)) if at == offset => handle.await.map_err(|e| UploadError::Io(format!("could not read file: {e}")))??,
+            other => {
+                if let Some((_, handle)) = other {
+                    handle.abort();
+                }
+                read_at(&file.abs, range.start + offset, len).await?
+            }
+        };
+        let next = offset + len as u64;
+        if next < size {
+            let (path, at, next_len) = (file.abs.clone(), range.start + next, chunk.min((size - next) as usize));
+            ahead = Some((next, tokio::spawn(async move { read_at(&path, at, next_len).await })));
+        }
+        match ctx.client.put_chunk_opt(&uri, offset, data, size, range.crc, &extras(ctx, file)).await {
             Ok(ResumableStatus::Incomplete { offset: have }) => {
                 ctx.bytes_done.fetch_add(have.saturating_sub(offset), Ordering::Relaxed);
                 offset = have;
                 attempt = 0;
             }
             Ok(ResumableStatus::Complete(info)) => {
-                ctx.bytes_done.fetch_add(record.size - offset, Ordering::Relaxed);
-                let _ = ctx.manifest.clear_session(&ctx.dest, &file.rel);
+                ctx.bytes_done.fetch_add(size - offset, Ordering::Relaxed);
+                let _ = ctx.manifest.clear_session(&ctx.dest, &range.key);
                 return Ok((info, resumed_from));
             }
             Err(GcsError::SessionExpired) if restarts < 2 => {
-                let _ = ctx.manifest.clear_session(&ctx.dest, &file.rel);
+                let _ = ctx.manifest.clear_session(&ctx.dest, &range.key);
                 ctx.bytes_done.fetch_sub(offset.min(ctx.bytes_done.load(Ordering::Relaxed)), Ordering::Relaxed);
                 session = None;
                 restarts += 1;
@@ -1079,31 +1174,197 @@ async fn upload_resumable(
             Err(GcsError::Interrupted) => {
                 wait_ready(ctx).await;
                 if !ctx.cancelled() {
-                    resync_offset(ctx, &uri, record, &mut offset).await;
+                    resync_offset(ctx, &uri, size, range.crc, &mut offset).await;
                 }
             }
             Err(GcsError::Network(error)) if wait_for_network(ctx, &error).await => {
-                resync_offset(ctx, &uri, record, &mut offset).await;
+                resync_offset(ctx, &uri, size, range.crc, &mut offset).await;
             }
             Err(GcsError::Retryable(error) | GcsError::Network(error)) if attempt + 1 < ctx.opts.max_attempts => {
                 retrying(ctx, file, attempt, &error);
                 tokio::time::sleep(backoff(ctx, attempt)).await;
                 attempt += 1;
                 // Ask the server how much it kept before sending more.
-                if let Ok(ResumableStatus::Incomplete { offset: have }) =
-                    ctx.client.query_resumable(&uri, record.size, record.crc32c).await
-                {
-                    ctx.bytes_done.fetch_add(have.saturating_sub(offset), Ordering::Relaxed);
-                    offset = have;
-                }
+                resync_offset(ctx, &uri, size, range.crc, &mut offset).await;
             }
             Err(err) => {
                 if matches!(err, GcsError::Fatal(_) | GcsError::AlreadyExists) {
-                    let _ = ctx.manifest.clear_session(&ctx.dest, &file.rel);
+                    let _ = ctx.manifest.clear_session(&ctx.dest, &range.key);
                 }
                 return Err(err.into());
             }
         }
+    }
+}
+
+/// Whether the bucket allows parallel parts; Some(reason) when it doesn't.
+async fn composite_check(client: &GcsClient, bucket: &str) -> Option<String> {
+    let info = match client.get_bucket(bucket).await {
+        Ok(info) => info,
+        Err(err) => return Some(format!("the bucket's settings couldn't be read ({err:#})")),
+    };
+    // A clear "no" turns it off; a check that can't run (e.g. an emulator) doesn't.
+    let granted = client.test_permissions(bucket, &["storage.objects.delete"]).await.ok();
+    composite_reason(&info, granted.as_deref())
+}
+
+/// The rules for parallel parts, given the bucket and the permissions granted (if known).
+pub(crate) fn composite_reason(info: &crate::gcs::BucketInfo, granted: Option<&[String]>) -> Option<String> {
+    if info.retention_seconds > 0 {
+        return Some("the bucket has a retention policy, so the temporary parts couldn't be deleted".into());
+    }
+    let class = info.storage_class.as_deref().unwrap_or("STANDARD").to_ascii_uppercase();
+    if !info.autoclass && !matches!(class.as_str(), "STANDARD" | "MULTI_REGIONAL" | "REGIONAL" | "") {
+        return Some(format!("the bucket's storage class is {class}, where the temporary parts would be charged for early deletion"));
+    }
+    if granted.is_some_and(|g| !g.iter().any(|p| p == "storage.objects.delete")) {
+        return Some("your account can't delete objects in this bucket, which removing the temporary parts needs".into());
+    }
+    None
+}
+
+/// Byte ranges of the parts: about `target` bytes each, 2 to 32 of them, aligned to 256 KiB.
+pub(crate) fn part_layout(size: u64, target: u64) -> Vec<(u64, u64)> {
+    let n = size.div_ceil(target.max(1)).clamp(2, 32);
+    let align = CHUNK_ALIGN as u64;
+    let part = size.div_ceil(n).div_ceil(align).max(1) * align;
+    (0..n).map(|i| i * part).take_while(|start| *start < size).map(|start| (start, part.min(size - start))).collect()
+}
+
+fn composite_off(ctx: &Ctx, reason: String) {
+    let mut off = ctx.composite_off.lock().unwrap();
+    if off.is_none() {
+        (ctx.emit)(Event::CompositeOff { reason: reason.clone() });
+        *off = Some(reason);
+    }
+}
+
+/// Upload a big file as parts in parallel, join them in the bucket and check the result's
+/// checksum against the file's. Ok(None): use a single stream instead (not allowed here, or
+/// the joined object didn't match). Parts already uploaded by an earlier run are reused.
+async fn upload_composite(ctx: &Ctx, file: &LocalFile, record: &FileRecord, name: &str) -> Result<Option<(ObjectInfo, Option<u64>)>, UploadError> {
+    let parts = part_layout(file.size, ctx.opts.composite_part_size);
+    let dir = format!(
+        "{}{}parts/{:08x}-{}-{:08x}/",
+        ctx.opts.prefix,
+        crate::receipt::JETSTREAM_PREFIX,
+        crc32c::crc32c(name.as_bytes()),
+        file.size,
+        record.crc32c
+    );
+    let names: Vec<String> = (0..parts.len()).map(|i| format!("{dir}{i:02}")).collect();
+    // Never overwriting, and the bucket listing shows it's there: nothing to send.
+    if ctx.opts.no_clobber && ctx.remote.as_ref().is_some_and(|r| r.contains_key(&file.rel)) {
+        return Err(GcsError::AlreadyExists.into());
+    }
+    // Parts an earlier run finished (same file: the folder name has its size and checksum).
+    let existing: HashMap<String, u64> = match ctx.client.list(&ctx.opts.bucket, &dir).await {
+        Ok(objects) => objects.into_iter().map(|o| (o.name, o.size)).collect(),
+        Err(_) => HashMap::new(),
+    };
+    (ctx.emit)(Event::FileStarted { path: file.rel.clone(), bytes: file.size, parts: Some(parts.len() as u32) });
+    let chunk = ctx.chunk_size.min(16 << 20);
+
+    // All parts at once; `part_slots` limits how many send at the same time.
+    let mut tasks = Vec::with_capacity(parts.len());
+    for (i, (&(start, len), part_name)) in parts.iter().zip(&names).enumerate() {
+        let reused = existing.get(part_name) == Some(&len);
+        tasks.push(async move {
+                if reused {
+                    ctx.bytes_done.fetch_add(len, Ordering::Relaxed);
+                    return Ok(len);
+                }
+                let _slot = ctx.part_slots.acquire().await.expect("semaphore");
+                let range = Range {
+                    name: part_name.clone(),
+                    start,
+                    len,
+                    crc: None,
+                    key: format!("{}#part{i}", file.rel),
+                    no_clobber: false,
+                    mtime_secs: None,
+                    chunk,
+                };
+                upload_range(ctx, file, record, &range).await.map(|_| 0)
+        });
+    }
+    let results: Vec<Result<u64, UploadError>> = futures::future::join_all(tasks).await;
+    let mut reused = 0;
+    for result in results {
+        match result {
+            Ok(n) => reused += n,
+            // A part the bucket won't take (e.g. no permission for _jetstream/): one stream.
+            Err(UploadError::Gcs(GcsError::Fatal(error))) => {
+                composite_off(ctx, format!("a part couldn't be uploaded ({error})"));
+                ctx.bytes_done.fetch_sub(file.size.min(ctx.bytes_done.load(Ordering::Relaxed)), Ordering::Relaxed);
+                return Ok(None);
+            }
+            // Stopped, unreadable, or out of retries: the parts that finished are reused next time.
+            Err(err) => return Err(err),
+        }
+    }
+
+    // Join them (retrying a dropped connection), then check the whole file's checksum.
+    let mut attempt = 0;
+    let info = loop {
+        wait_ready(ctx).await;
+        if ctx.cancelled() {
+            return Err(UploadError::Cancelled);
+        }
+        match ctx.client.compose(&ctx.opts.bucket, name, &names, ctx.opts.no_clobber, Some(file.mtime_secs())).await {
+            Ok(info) => break info,
+            Err(GcsError::AlreadyExists) => {
+                delete_parts(ctx, &names).await;
+                return Err(GcsError::AlreadyExists.into());
+            }
+            Err(GcsError::Network(error)) if wait_for_network(ctx, &error).await => {}
+            Err(GcsError::Retryable(error) | GcsError::Network(error)) if attempt + 1 < ctx.opts.max_attempts => {
+                retrying(ctx, file, attempt, &error);
+                tokio::time::sleep(backoff(ctx, attempt)).await;
+                attempt += 1;
+            }
+            Err(GcsError::Fatal(error)) => {
+                composite_off(ctx, format!("joining the parts failed ({error})"));
+                ctx.bytes_done.fetch_sub(file.size.min(ctx.bytes_done.load(Ordering::Relaxed)), Ordering::Relaxed);
+                return Ok(None);
+            }
+            Err(err) => return Err(err.into()),
+        }
+    };
+    let matches = info.size == file.size && info.crc32c.as_deref().and_then(crate::gcs::parse_crc32c_b64) == Some(record.crc32c);
+    delete_parts(ctx, &names).await;
+    if !matches {
+        // Never keep a joined object that isn't exactly the file: upload it again in one stream.
+        let _ = ctx.client.delete_object(&ctx.opts.bucket, name, info.generation.as_deref()).await;
+        (ctx.emit)(Event::FileRetrying {
+            path: file.rel.clone(),
+            attempt: 1,
+            max_attempts: ctx.opts.max_attempts,
+            error: "the joined parts didn't match the file's checksum; uploading it again as one stream".into(),
+        });
+        ctx.bytes_done.fetch_sub(file.size.min(ctx.bytes_done.load(Ordering::Relaxed)), Ordering::Relaxed);
+        return Ok(None);
+    }
+    ctx.composite_files.fetch_add(1, Ordering::Relaxed);
+    Ok(Some((info, (reused > 0).then_some(reused))))
+}
+
+/// Remove a composite upload's temporary parts (best effort; leftovers are counted).
+async fn delete_parts(ctx: &Ctx, names: &[String]) {
+    let deletes = names.iter().map(|name| ctx.client.delete_object(&ctx.opts.bucket, name, None));
+    let failed = futures::future::join_all(deletes).await.iter().filter(|r| r.is_err()).count();
+    ctx.parts_left.fetch_add(failed as u64, Ordering::Relaxed);
+}
+
+/// Move `offset` to what Cloud Storage has kept of a resumable upload.
+async fn resync_offset(ctx: &Ctx, uri: &str, size: u64, crc: Option<u32>, offset: &mut u64) {
+    if let Ok(ResumableStatus::Incomplete { offset: have }) = ctx.client.query_resumable_opt(uri, size, crc).await {
+        if have >= *offset {
+            ctx.bytes_done.fetch_add(have - *offset, Ordering::Relaxed);
+        } else {
+            ctx.bytes_done.fetch_sub((*offset - have).min(ctx.bytes_done.load(Ordering::Relaxed)), Ordering::Relaxed);
+        }
+        *offset = have;
     }
 }
 
@@ -1136,6 +1397,38 @@ mod tests {
 
         let top_level = scan(dir.path(), &excludes, false).unwrap();
         assert_eq!(top_level.files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), ["a.jpg"]);
+    }
+
+    #[test]
+    fn part_layout_covers_the_file_in_aligned_parts() {
+        let mib = 1024 * 1024;
+        for (size, target) in [(300 * mib, 32 * mib), (256 * mib, 32 * mib), (50 * 1024 * mib, 32 * mib), (6 * mib + 123, mib), (3 * mib, 32 * mib)] {
+            let parts = part_layout(size, target);
+            assert!((2..=32).contains(&parts.len()), "{size}: {} parts", parts.len());
+            assert_eq!(parts[0].0, 0);
+            for pair in parts.windows(2) {
+                assert_eq!(pair[0].0 + pair[0].1, pair[1].0, "contiguous");
+                assert_eq!(pair[0].1 % CHUNK_ALIGN as u64, 0, "aligned");
+            }
+            let last = parts.last().unwrap();
+            assert_eq!(last.0 + last.1, size, "covers the whole file");
+        }
+        assert_eq!(part_layout(300 * mib, 32 * mib).len(), 10);
+        assert_eq!(part_layout(50 * 1024 * mib, 32 * mib).len(), 32, "at most 32 (one compose)");
+    }
+
+    #[test]
+    fn parallel_parts_only_where_the_bucket_allows_them() {
+        use crate::gcs::BucketInfo;
+        let standard = BucketInfo { storage_class: Some("STANDARD".into()), ..Default::default() };
+        assert_eq!(composite_reason(&standard, None), None);
+        assert_eq!(composite_reason(&standard, Some(&["storage.objects.delete".to_string()])), None);
+        assert!(composite_reason(&standard, Some(&[])).unwrap().contains("can't delete"));
+        let cold = BucketInfo { storage_class: Some("NEARLINE".into()), ..Default::default() };
+        assert!(composite_reason(&cold, None).unwrap().contains("NEARLINE"));
+        assert_eq!(composite_reason(&BucketInfo { autoclass: true, ..cold }, None), None, "Autoclass charges no early deletion");
+        let locked = BucketInfo { retention_seconds: 86_400, ..standard };
+        assert!(composite_reason(&locked, None).unwrap().contains("retention"));
     }
 
     #[test]

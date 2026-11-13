@@ -113,7 +113,7 @@ class AppState {
   /** Add/edit folder dialog: { preset, previousName } or null. */
   folderDialog = $state(null);
   /** Upload speed limit (Mbit/s, 0 = none), shared with the server. */
-  transfer = $state({ max_mbps: 0, parallel_jobs: 1 });
+  transfer = $state({ max_mbps: 0, parallel_jobs: 1, parallel_parts: true });
   /** Paths dropped on the Cloud storage view, waiting to be uploaded there. */
   cloudDrop = $state(null);
   /** Latest receipt per synced folder (preset_id -> summary), and a counter to reload lists. */

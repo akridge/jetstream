@@ -75,6 +75,16 @@ enum Command {
         /// Resumable chunk size in MiB (rounded to 256 KiB).
         #[arg(long, default_value_t = 16)]
         chunk_mib: usize,
+        /// Upload large files as one stream instead of parallel parts joined in the bucket
+        /// (joined objects have a CRC32C checksum but no MD5).
+        #[arg(long)]
+        no_composite: bool,
+        /// Files at least this many MiB use parallel parts (when the bucket allows it).
+        #[arg(long, default_value_t = 256)]
+        composite_threshold_mib: u64,
+        /// Target size of each part in MiB (2 to 32 parts per file).
+        #[arg(long, default_value_t = 32)]
+        composite_part_mib: u64,
         /// Manifest database (default: <JetStream data folder>/transfer-manifest.db).
         #[arg(long)]
         manifest: Option<PathBuf>,
@@ -442,6 +452,9 @@ async fn run() -> Result<i32> {
         no_auto_tune,
         resumable_threshold_mib,
         chunk_mib,
+        no_composite,
+        composite_threshold_mib,
+        composite_part_mib,
         manifest,
     } = command
     else {
@@ -457,6 +470,9 @@ async fn run() -> Result<i32> {
     opts.verify = verify;
     opts.resumable_threshold = resumable_threshold_mib * 1024 * 1024;
     opts.chunk_size = chunk_mib * 1024 * 1024;
+    opts.composite = !no_composite;
+    opts.composite_threshold = composite_threshold_mib * 1024 * 1024;
+    opts.composite_part_size = composite_part_mib.max(1) * 1024 * 1024;
     opts.excludes = excludes
         .iter()
         .map(|pattern| Regex::new(pattern).with_context(|| format!("invalid --exclude regex: {pattern}")))

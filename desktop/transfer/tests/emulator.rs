@@ -823,6 +823,37 @@ mod pause_and_reconnect {
     }
 
     #[tokio::test]
+    async fn parallel_parts_wait_out_a_dropped_connection_and_a_pause() {
+        let Some(env) = Env::new().await else { return };
+        let proxy = Proxy::start(&env.emulator.base).await;
+        let http = GcsClient::http_client();
+        let client = GcsClient::with_base(http.clone(), &proxy.base, Arc::new(TokenProvider::none(http)));
+        let data = big(12 * 1024 * 1024, 5);
+        env.write("big.bin", &data);
+        let mut opts = env.options();
+        opts.composite_threshold = 4 * 1024 * 1024;
+        opts.composite_part_size = 1024 * 1024;
+        let throttle = Arc::new(Throttle::new(3_000_000)); // ~4 s
+        opts.throttle = throttle.clone();
+        let (handle, events) = spawn_sync(&env, client, opts, Arc::new(AtomicBool::new(false)));
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        proxy.unplug();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        proxy.plug();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        throttle.set_paused(true);
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let at_pause = proxy.sent.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(proxy.sent.load(Ordering::Relaxed) - at_pause < 64 * 1024, "no part sends while paused");
+        throttle.set_paused(false);
+        let summary = tokio::time::timeout(Duration::from_secs(60), handle).await.expect("finished").unwrap();
+        assert_eq!((summary.uploaded, summary.failed, summary.composite_files, summary.parts_left), (1, 0, 1, 0), "{summary:?}");
+        assert!(events.lock().unwrap().iter().any(|e| matches!(e, Event::Offline { .. })));
+        assert_eq!(env.object("data/big.bin").await.unwrap().1, data);
+    }
+
+    #[tokio::test]
     async fn stop_ends_a_long_request_at_once() {
         let Some(env) = Env::new().await else { return };
         env.write("video.bin", &big(8 * 1024 * 1024, 3));
@@ -859,4 +890,89 @@ async fn a_preview_reads_only_what_it_must_and_the_upload_after_it_reads_nothing
     let (sync, _) = env.run(env.options()).await;
     assert_eq!((sync.uploaded, sync.unchanged), (2, 1), "the preview recorded what it confirmed: {sync:?}");
     assert_eq!(sync.hashed_files, 2, "same.bin isn't read again");
+}
+
+/// Large files as parallel parts joined in the bucket.
+mod composite {
+    use super::*;
+
+    const MIB: usize = 1024 * 1024;
+
+    fn options(env: &Env) -> SyncOptions {
+        let mut opts = env.options();
+        opts.composite_threshold = 4 * MIB as u64;
+        opts.composite_part_size = MIB as u64;
+        opts
+    }
+
+    async fn names_under(env: &Env, prefix: &str) -> Vec<String> {
+        env.client.list("bucket", prefix).await.unwrap().into_iter().map(|o| o.name).collect()
+    }
+
+    fn parts_dir(name: &str, data: &[u8]) -> String {
+        format!("data/_jetstream/parts/{:08x}-{}-{:08x}/", crc32c::crc32c(name.as_bytes()), data.len(), crc32c::crc32c(data))
+    }
+
+    #[tokio::test]
+    async fn a_big_file_goes_up_in_parallel_parts_and_is_joined_exactly() {
+        let Some(env) = Env::new().await else { return };
+        let data = big(6 * MIB + 12_345, 4);
+        env.write("video/big.bin", &data);
+        env.write("small.txt", b"small");
+        let (summary, events) = env.run(options(&env)).await;
+        assert_eq!((summary.uploaded, summary.failed, summary.composite_files, summary.parts_left), (2, 0, 1, 0), "{summary:?}");
+        let parts = events.iter().find_map(|e| match e { Event::FileStarted { path, parts, .. } if path == "video/big.bin" => *parts, _ => None });
+        assert_eq!(parts, Some(7));
+        let (size, body) = env.object("data/video/big.bin").await.unwrap();
+        assert_eq!((size, body == data), (data.len() as u64, true));
+        let info = env.client.list("bucket", "data/video/").await.unwrap().remove(0);
+        assert_eq!(info.crc32c.as_deref().and_then(jetstream_transfer::gcs::parse_crc32c_b64), Some(crc32c::crc32c(&data)));
+        assert!(names_under(&env, "data/_jetstream/").await.is_empty(), "temporary parts removed");
+        // Recorded like any upload: the next sync has nothing to do.
+        let (again, _) = env.run(options(&env)).await;
+        assert_eq!((again.uploaded, again.unchanged), (0, 2));
+    }
+
+    #[tokio::test]
+    async fn parts_from_an_earlier_run_are_reused() {
+        let Some(env) = Env::new().await else { return };
+        let data = big(5 * MIB, 7);
+        env.write("big.bin", &data);
+        // A stopped run had finished the first three 1 MiB parts.
+        let dir = parts_dir("data/big.bin", &data);
+        for i in 0..3 {
+            let part = data[i * MIB..(i + 1) * MIB].to_vec();
+            env.client.upload_multipart("bucket", &format!("{dir}{i:02}"), part.clone(), crc32c::crc32c(&part), false).await.unwrap();
+        }
+        let (summary, _) = env.run(options(&env)).await;
+        assert_eq!((summary.uploaded, summary.resumed, summary.composite_files), (1, 1, 1), "{summary:?}");
+        assert_eq!(env.object("data/big.bin").await.unwrap().1, data);
+        assert!(names_under(&env, "data/_jetstream/").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_clobber_leaves_an_existing_object_and_cleans_up() {
+        let Some(env) = Env::new().await else { return };
+        env.write("big.bin", &big(5 * MIB, 1));
+        let original = b"already here".to_vec();
+        env.client.upload_multipart("bucket", "data/big.bin", original.clone(), crc32c::crc32c(&original), false).await.unwrap();
+        let mut opts = options(&env);
+        opts.no_clobber = true;
+        let (summary, _) = env.run(opts).await;
+        assert_eq!((summary.uploaded, summary.skipped_exists), (0, 1), "{summary:?}");
+        assert_eq!(env.object("data/big.bin").await.unwrap().1, original);
+        assert!(names_under(&env, "data/_jetstream/").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_off_switch_uses_one_stream() {
+        // (Which buckets can take parts is unit-tested: the emulator ignores storage classes.)
+        let Some(env) = Env::new().await else { return };
+        env.write("big.bin", &big(5 * MIB, 2));
+        let mut opts = options(&env);
+        opts.composite = false;
+        let (summary, events) = env.run(opts).await;
+        assert_eq!((summary.uploaded, summary.composite_files), (1, 0));
+        assert!(!events.iter().any(|e| matches!(e, Event::CompositeOff { .. })), "switched off by the user: nothing to report");
+    }
 }

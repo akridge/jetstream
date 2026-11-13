@@ -82,6 +82,8 @@ class TransferSettings(BaseModel):
     max_mbps: float = 0.0
     #: Uploads (e.g. subfolders of a split upload) running at once, 1–4.
     parallel_jobs: Optional[int] = None
+    #: Large files as parallel parts (JetStream engine); applies to uploads that start later.
+    parallel_parts: Optional[bool] = None
 
 
 @router.get("/transfer")
@@ -102,6 +104,8 @@ async def put_transfer_settings(body: TransferSettings) -> dict:
     changes = {"max_mbps": max(0.0, body.max_mbps)}
     if body.parallel_jobs is not None:
         changes["parallel_jobs"] = body.parallel_jobs
+    if body.parallel_parts is not None:
+        changes["parallel_parts"] = body.parallel_parts
     saved = save(changes)
     saved["applied_to_running"] = upload_service.apply_speed_limit(saved["max_mbps"])
     queue_manager.max_concurrent = saved["parallel_jobs"]

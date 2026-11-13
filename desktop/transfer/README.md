@@ -69,6 +69,8 @@ target/release/jetstream-transfer sync D:\Survey\2026 gs://my-bucket/surveys/202
 | `--max-mbps N` | Bandwidth limit in megabits per second (default: none) |
 | `--control-stdin` | Read `{"cmd":"pause"}`, `{"cmd":"resume"}`, `{"cmd":"limit","mbps":N}` and `{"cmd":"stop"}` lines from stdin while running (the JetStream server uses this for Pause, the speed limit and Cancel) |
 | `--no-auto-tune` | Keep `--concurrency` and `--chunk-mib` as given |
+| `--no-composite` | Upload large files as one stream each instead of parallel parts (keeps MD5 checksums on the objects) |
+| `--composite-threshold-mib N` | Files at least this big use parallel parts (default 256); `--composite-part-mib` sets the part size aimed for (default 32, giving 2 to 32 parts) |
 | `--manifest PATH` | Default: `<JetStream data folder>/transfer-manifest.db` |
 
 **Sign-in,** in order of preference:
@@ -83,6 +85,7 @@ target/release/jetstream-transfer sync D:\Survey\2026 gs://my-bucket/surveys/202
 - `start`, then `phase` (`scanning`, `listing`, `uploading`).
 - `plan`: counts of local, unchanged and to-check files; first an `estimate` from the manifest, then refined after listing.
 - `tuned`: the concurrency and chunk size chosen.
+- `file_started` has `parts` when a large file goes up as parallel parts; `composite_off` (with a `reason`) says why large files go up as one stream in this sync. `done` counts `composite_files` and `parts_left` (temporary parts that couldn't be deleted).
 - `file_started` (files ≥ 4 MiB), `file_retrying` (with the attempt and reason, e.g. a stalled connection).
 - `offline` / `online` (with `offline_seconds`): Cloud Storage couldn't be reached, so every upload waited without using up its retries, then carried on. `progress` also carries `offline` while it lasts.
 - `file_uploaded`: includes `resumed_from` when a saved session was continued.
@@ -108,6 +111,10 @@ target/release/jetstream-transfer sync D:\Survey\2026 gs://my-bucket/surveys/202
    - Larger files use a resumable session whose URI is saved in the manifest. After a restart, the engine asks Cloud Storage how much it already has and sends only the rest.
    - **Auto-tuning:** many small files raise concurrency to 64; files over 1 GiB / 8 GiB use 32 / 64 MiB chunks (`--no-auto-tune` keeps your settings).
    - **No stuck uploads:** request bodies go out in 256 KiB pieces, and if none moves for 60 s (a dead connection) the request is abandoned and retried from the server's confirmed offset. TCP keepalive notices dead connections too. Each retry is reported (`file_retrying`).
+   - **Large files in parallel parts:** a file of 256 MiB or more is split into 2 to 32 parts (about 32 MiB each) that upload at once, up to 8 at a time, as temporary objects under `<destination>/_jetstream/parts/`. They are then joined with Cloud Storage's compose, and the joined object's CRC32C is checked against the whole file's. A mismatch deletes it and uploads the file again as one stream. The parts are deleted afterwards. Parts finished by a stopped run are reused. On a link where each connection is limited (simulated at 4 MB/s per connection), a 128 MiB file took 5.7 s instead of 38.3 s.
+     - Used only where it's safe: the bucket's storage class is Standard (or Autoclass is on), there's no retention policy, and the account can delete objects. Otherwise `composite_off` explains, and files go up as one stream.
+     - The joined object has a CRC32C but no MD5 checksum (Cloud Storage doesn't compute MD5 for composed objects). Buckets with soft delete keep the deleted parts for the soft-delete period. Use `--no-composite` (or the desktop app's Settings switch) where MD5 matters.
+   - **Reading ahead:** the next chunk is read from disk while the current one is sent, so slow disks and network shares don't add their read time to the upload.
    - **Pause and stop act at once:** a request whose body is going out is dropped within half a second (not left to finish its chunk); large files continue from what Cloud Storage kept. The speed limit applies per 256 KiB piece, so the rate is smooth.
    - **Lost internet connection:** after a network error the engine checks whether Cloud Storage is reachable. If not, all uploads wait (checking every few seconds, up to every 10 s) and continue when it's back, however long that takes, without failing files. An access token that can't be refreshed while offline is treated the same way.
    - **Locked files** (open in another program) are tried once more at the end.

@@ -1018,9 +1018,9 @@ class JobActivity:
         self.retrying: Dict[str, Dict] = {}
         self._lock = threading.Lock()
 
-    def started(self, path: str, size: Optional[int] = None) -> None:
+    def started(self, path: str, size: Optional[int] = None, parts: Optional[int] = None) -> None:
         with self._lock:
-            self.in_flight[path] = {"path": path, "bytes": size, "started_at": time.time()}
+            self.in_flight[path] = {"path": path, "bytes": size, "started_at": time.time(), "parts": parts}
 
     def retry(self, path: str, attempt: int, max_attempts: int, error: str) -> None:
         with self._lock:
@@ -1152,6 +1152,7 @@ class EngineRunState:
         self.online_only: List[str] = []
         self.offline_events = 0
         self.offline_seconds = 0
+        self.composite_off: Optional[str] = None
 
     def handle(self, line: str, progress_callback: Optional[Callable]) -> None:
         import json
@@ -1165,6 +1166,8 @@ class EngineRunState:
         elif kind == "phase":
             if self.activity is not None:
                 self.activity.phase = event.get("phase")
+        elif kind == "composite_off":
+            self.composite_off = event.get("reason") or ""
         elif kind == "offline":
             if self.activity is not None and self.activity.offline_since is None:
                 self.activity.offline_since = time.time()
@@ -1210,7 +1213,7 @@ class EngineRunState:
             )
         elif kind == "file_started":
             if self.activity:
-                self.activity.started(event.get("path"), event.get("bytes"))
+                self.activity.started(event.get("path"), event.get("bytes"), event.get("parts"))
         elif kind in ("file_uploaded", "file_would_upload"):
             if self.activity:
                 self.activity.finished(event.get("path"), event.get("bytes"))
@@ -1255,6 +1258,15 @@ class EngineRunState:
                 "this computer. Right-click the folder and choose \"Always keep on this device\", then sync again."
             )
             lines.extend(f"  {p}" for p in self.online_only[:10])
+        if s.get("composite_files"):
+            lines.append(f"Large files uploaded as parallel parts and joined in the bucket: {s['composite_files']}")
+        if s.get("parts_left"):
+            lines.append(
+                f"{s['parts_left']} temporary part(s) couldn't be deleted after joining; they're under "
+                "_jetstream/parts/ in the destination and can be deleted."
+            )
+        if self.composite_off:
+            lines.append(f"Large files went up as one stream each: {self.composite_off}.")
         if self.offline_events:
             lines.append(
                 f"The internet connection dropped {self.offline_events} time(s) ({self.offline_seconds} s in all); "
@@ -1621,7 +1633,10 @@ class UploadService:
         from .transfer_settings import load as load_transfer_settings
 
         cmd = [engine, "sync", source_path, gcs_path, "--control-stdin"]
-        max_mbps = load_transfer_settings()["max_mbps"]
+        transfer_settings = load_transfer_settings()
+        max_mbps = transfer_settings["max_mbps"]
+        if not transfer_settings["parallel_parts"]:
+            cmd.append("--no-composite")
         if max_mbps > 0:
             cmd.extend(["--max-mbps", f"{max_mbps:g}"])
         if dry_run:
