@@ -11,6 +11,8 @@ pub const COMMIT: &str = env!("JETSTREAM_COMMIT_SHORT");
 pub mod audit;
 pub mod auth;
 pub mod browse;
+pub mod catalog;
+pub mod catalog_meta;
 pub mod compare;
 pub mod details;
 pub mod fileops;

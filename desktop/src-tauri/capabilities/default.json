@@ -1,13 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The JetStream desktop UI: folder picker, notifications, drag-and-drop, opening files and links, and the app's own commands.",
+  "description": "The JetStream desktop UI: folder and file pickers, save dialogs, notifications, drag-and-drop, opening files and links, and the app's own commands.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
     "dialog:allow-open",
+    "dialog:allow-save",
     "notification:default",
     "opener:allow-open-url",
     "opener:allow-reveal-item-in-dir",

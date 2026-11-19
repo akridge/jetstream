@@ -11,7 +11,7 @@
 
   const tools = [
     { path: 'static/cloud-audit.html', title: 'Cloud audit history', text: 'Earlier audit runs and quarantine results (classic view).', icon: Brush },
-    { path: 'static/dataset-creator.html', title: 'Cloud catalog tool', text: 'Build browsable catalogs of images and media in a bucket.', icon: LibraryBig },
+    { path: 'static/dataset-creator.html', title: 'Classic catalog tool', text: 'The original catalog page. Catalogs (under Cloud) now builds the same catalogs faster, for any kind of file.', icon: LibraryBig },
     { path: 'static/gdrive.html', title: 'Google Drive upload', text: 'Upload or sync folders to Google Drive.', icon: FolderUp },
     { path: 'static/local-audit.html', title: 'Local audit reports', text: 'Saved local audit runs with per-file detail and CSV export.', icon: HardDrive },
     { path: 'static/uploads.html', title: 'Classic uploads page', text: 'The original upload form, with scheduling and split-by-subfolder.', icon: Upload },

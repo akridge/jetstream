@@ -40,6 +40,9 @@ async function request(method, path, body) {
 
 export const api = {
   version: () => request('GET', '/api/version'),
+  savedCatalogs: (limit = 100) => request('GET', `/api/dataset-creator/catalogs?limit=${limit}`),
+  savedCatalog: (id) => request('GET', `/api/dataset-creator/catalogs/${encodeURIComponent(id)}`),
+  deleteSavedCatalog: (id) => request('DELETE', `/api/dataset-creator/catalogs/${encodeURIComponent(id)}`),
   jobs: (limit = 200) => request('GET', `/api/uploads/?limit=${limit}&include_cleared=true`),
   job: (id) => request('GET', `/api/uploads/${encodeURIComponent(id)}`),
   createUpload: (payload) => request('POST', '/api/uploads/', payload),

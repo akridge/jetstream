@@ -20,6 +20,7 @@ use jetstream_transfer::audit::{self, AuditProgress, AuditReport};
 use jetstream_transfer::auth::TokenProvider;
 use jetstream_transfer::browse::{self, FolderTotals, Listing};
 use jetstream_transfer::compare::{self, CompareReport};
+use jetstream_transfer::catalog;
 use jetstream_transfer::details;
 use jetstream_transfer::localops;
 use jetstream_transfer::receipt;
@@ -200,7 +201,13 @@ struct Core {
     thumbs: std::sync::OnceLock<Arc<thumbs::ThumbCache>>,
     /// Thumbnails made at once, whatever the UI asks for.
     thumb_slots: ThumbSlots,
+    /// Catalog listings (and their latest grouping) by operation id, newest last; a few are
+    /// kept so regrouping and exporting don't list the bucket again.
+    catalogs: Mutex<Vec<KeptCatalog>>,
 }
+
+/// A catalog's operation id, its listing, and its latest grouping.
+type KeptCatalog = (String, Arc<catalog::Listing>, Option<catalog::Catalog>);
 
 struct ThumbSlots(Arc<tokio::sync::Semaphore>);
 
@@ -775,6 +782,129 @@ async fn speed_check(
     .await
 }
 
+// ----- Catalogs (the Cloud Catalog Tool, native) -----------------------------------------------
+
+/// Listings kept at once (each can hold up to a million files).
+const CATALOGS_KEPT: usize = 3;
+
+fn now_iso() -> String {
+    catalog::iso_utc(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0))
+}
+
+fn catalog_listing(core: &Core, op_id: &str) -> Result<Arc<catalog::Listing>, String> {
+    core.catalogs.lock().unwrap().iter().find(|(id, ..)| id == op_id).map(|(_, l, _)| l.clone()).ok_or_else(|| "This catalog's listing has expired; scan again.".to_string())
+}
+
+fn catalog_latest(core: &Core, op_id: &str) -> Result<(Arc<catalog::Listing>, catalog::Catalog), String> {
+    let catalogs = core.catalogs.lock().unwrap();
+    let (_, listing, built) = catalogs.iter().find(|(id, ..)| id == op_id).ok_or("This catalog's listing has expired; scan again.")?;
+    Ok((listing.clone(), built.clone().ok_or("Group the catalog first.")?))
+}
+
+/// Kinds of files the catalog tool offers: [{ id, label, extensions }].
+#[tauri::command]
+fn catalog_kinds() -> Vec<serde_json::Value> {
+    catalog::KINDS.iter().map(|(id, label, exts)| serde_json::json!({ "id": id, "label": label, "extensions": exts })).collect()
+}
+
+/// List gs://prefix with the request's filters and group it; emits "cloud-op-progress"
+/// (`done` objects looked at, `skipped` filtered out, `bytes` kept).
+#[tauri::command]
+async fn catalog_scan(app: AppHandle, core: tauri::State<'_, Core>, op_id: String, request: serde_json::Value) -> Result<catalog::Summary, String> {
+    let request: catalog::CatalogRequest = serde_json::from_value(request).map_err(|e| format!("Invalid catalog options: {e}"))?;
+    let client = core.client()?;
+    let listing = track(&app, &core, &op_id, |progress| async move { catalog::scan(&client, &request, &progress).await.map_err(|e| format!("{e:#}")) }).await?;
+    let (built, full) = catalog::build_with_table(&listing, &listing.request.grouping, &now_iso()).map_err(|e| format!("{e:#}"))?;
+    let summary = catalog::summary(&listing, &built, full.as_ref());
+    let mut catalogs = core.catalogs.lock().unwrap();
+    catalogs.retain(|(id, ..)| id != &op_id);
+    catalogs.push((op_id, Arc::new(listing), Some(built)));
+    let excess = catalogs.len().saturating_sub(CATALOGS_KEPT);
+    catalogs.drain(..excess);
+    Ok(summary)
+}
+
+/// Group a listed catalog again with new options (no listing).
+#[tauri::command]
+async fn catalog_regroup(core: tauri::State<'_, Core>, op_id: String, grouping: serde_json::Value) -> Result<catalog::Summary, String> {
+    let grouping: catalog::Grouping = serde_json::from_value(grouping).map_err(|e| format!("Invalid grouping: {e}"))?;
+    let listing = catalog_listing(&core, &op_id)?;
+    let (summary, built) = tauri::async_runtime::spawn_blocking(move || {
+        let (built, full) = catalog::build_with_table(&listing, &grouping, &now_iso()).map_err(|e| format!("{e:#}"))?;
+        Ok::<_, String>((catalog::summary(&listing, &built, full.as_ref()), built))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if let Some(slot) = core.catalogs.lock().unwrap().iter_mut().find(|(id, ..)| id == &op_id) {
+        slot.2 = Some(built);
+    }
+    Ok(summary)
+}
+
+/// One page of a group's files (all files with `group` null), for the gallery.
+#[tauri::command]
+fn catalog_group_files(core: tauri::State<'_, Core>, op_id: String, group: Option<String>, offset: usize, limit: usize) -> Result<serde_json::Value, String> {
+    let (listing, built) = catalog_latest(&core, &op_id)?;
+    let (total, entries) = catalog::group_page(&listing, &built, group.as_deref(), offset, limit.min(1000)).map_err(|e| format!("{e:#}"))?;
+    Ok(serde_json::json!({ "total": total, "entries": entries }))
+}
+
+/// Write the catalog to `path`: "oasis" (the OASIS JSON, exactly as the classic tool writes
+/// it), "detailed-csv" or "detailed-json". With `dataset_sidecar`, an OASIS export also writes
+/// the dataset information next to it (<name>.dataset.json); the OASIS file never includes it.
+#[tauri::command]
+async fn catalog_export(core: tauri::State<'_, Core>, op_id: String, format: String, path: String, dataset: Option<serde_json::Value>, dataset_sidecar: Option<bool>) -> Result<Vec<String>, String> {
+    let (listing, built) = catalog_latest(&core, &op_id)?;
+    let path = std::path::PathBuf::from(path);
+    let text = match format.as_str() {
+        "oasis" => catalog::oasis_json(&built),
+        "detailed-csv" => catalog::detailed_csv(&listing, &built),
+        "detailed-json" => serde_json::to_string_pretty(&catalog::detailed_json(&listing, &built, dataset.as_ref())).map_err(|e| e.to_string())?,
+        other => return Err(format!("Unknown export format {other}")),
+    };
+    std::fs::write(&path, text).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+    let mut written = vec![path.display().to_string()];
+    if format == "oasis" && dataset_sidecar.unwrap_or(false) {
+        if let Some(info) = &dataset {
+            let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "catalog".into());
+            let sidecar = path.with_file_name(format!("{stem}.dataset.json"));
+            std::fs::write(&sidecar, serde_json::to_string_pretty(info).map_err(|e| e.to_string())?).map_err(|e| format!("Couldn't write {}: {e}", sidecar.display()))?;
+            written.push(sidecar.display().to_string());
+        }
+    }
+    Ok(written)
+}
+
+/// Save the catalog with the JetStream server (listed on the classic catalog page too), with
+/// the request (to rebuild it) and dataset information in its metadata.
+#[tauri::command]
+async fn catalog_save(app: AppHandle, core: tauri::State<'_, Core>, op_id: String, name: Option<String>, dataset: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+    let (listing, mut built) = catalog_latest(&core, &op_id)?;
+    let port = app.state::<Server>().port().ok_or("JetStream is still starting")?;
+    let mut request = listing.request.clone();
+    request.grouping = built.grouping.clone().unwrap_or_else(|| listing.request.grouping.clone());
+    built.metadata.jetstream_request = Some(request);
+    built.metadata.dataset = dataset;
+    catalog::save_to_server(&format!("http://127.0.0.1:{port}"), name.as_deref().filter(|n| !n.trim().is_empty()), &built).await.map_err(|e| format!("{e:#}"))
+}
+
+/// Dataset information from NOAA InPort (an item number or page), an ISO 19115 record URL,
+/// or an XML file on this computer.
+#[tauri::command]
+async fn catalog_dataset_info(source: String) -> Result<jetstream_transfer::catalog_meta::DatasetInfo, String> {
+    let path = std::path::PathBuf::from(source.trim());
+    if path.is_file() {
+        return tauri::async_runtime::spawn_blocking(move || jetstream_transfer::catalog_meta::read_file(&path)).await.map_err(|e| e.to_string())?.map_err(|e| format!("{e:#}"));
+    }
+    jetstream_transfer::catalog_meta::fetch(&source).await.map_err(|e| format!("{e:#}"))
+}
+
+/// Forget a catalog's listing (leaving the view).
+#[tauri::command]
+fn catalog_discard(core: tauri::State<'_, Core>, op_id: String) {
+    core.catalogs.lock().unwrap().retain(|(id, ..)| id != &op_id);
+}
+
 // ----- Thumbnails for the cloud browser --------------------------------------------------------
 
 /// Default thumbnail cache limit; the app sets the user's choice at start.
@@ -1148,6 +1278,14 @@ fn main() {
             watch_folders,
             app_info,
             check_update,
+            catalog_kinds,
+            catalog_scan,
+            catalog_regroup,
+            catalog_group_files,
+            catalog_export,
+            catalog_save,
+            catalog_dataset_info,
+            catalog_discard,
             speed_check,
             thumbnail,
             object_details,

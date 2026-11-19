@@ -28,6 +28,7 @@ upload engine, in one window.
 
 ### Cloud storage
 - A file manager for buckets: rename, move, copy, delete and restore.
+- **Catalogs:** the catalog tool, rebuilt in the app. Images by default and any other kind of file as an option, grouping that updates as you change it, group thumbnails and a gallery, and no 50,000-file limit. The OASIS JSON is identical to the classic tool's; detailed CSV/JSON exports and NOAA InPort / ISO 19115 dataset information are new.
 - **Thumbnails** for images (optional), with a size-limited cache.
 - **Preview pane:** a larger image, the start of CSV and text files, and every detail of the selected file (original dates, checksums, storage class, custom metadata). Reads only the first 64 KB of big files.
 - **Fix file details** adds file types and original dates to files uploaded by older versions, without uploading them again.

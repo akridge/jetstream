@@ -7,6 +7,7 @@
   import FolderSearch from '@lucide/svelte/icons/folder-search';
   import ChartColumn from '@lucide/svelte/icons/chart-column';
   import Brush from '@lucide/svelte/icons/brush';
+  import LibraryBig from '@lucide/svelte/icons/library-big';
   import ArrowUpCircle from '@lucide/svelte/icons/circle-arrow-up';
   import X from '@lucide/svelte/icons/x';
   import { app } from '../lib/state.svelte.js';
@@ -24,6 +25,7 @@
       title: 'Cloud',
       items: [
         { id: 'cloud', label: 'Cloud storage', icon: Cloud },
+        { id: 'catalogs', label: 'Catalogs', icon: LibraryBig },
         { id: 'audit', label: 'Cloud cleanup', icon: Brush },
       ],
     },

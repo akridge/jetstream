@@ -35,6 +35,7 @@
   import PanelRight from '@lucide/svelte/icons/panel-right';
   import FileCheck from '@lucide/svelte/icons/file-check';
   import LayoutGrid from '@lucide/svelte/icons/layout-grid';
+  import LibraryBig from '@lucide/svelte/icons/library-big';
   import { thumbLoader } from '../lib/thumbs.svelte.js';
   import { app } from '../lib/state.svelte.js';
   import { cloudOps } from '../lib/cloudops.svelte.js';
@@ -314,7 +315,7 @@
       { label: 'Move or copy to…', icon: ArrowRightLeft, disabled: !can('storage.objects.get'), run: () => (fileOp = { kind: 'transfer', paths: selectedPaths() }) },
       ...(one?.is_folder ? [{ label: 'Sync to… (gcloud rsync)', icon: FolderSync, run: () => (syncDialog = itemFor(one)) }] : []),
       ...(one?.is_folder ? [{ label: 'Total size', icon: Sigma, run: () => computeTotals(one.path) }] : []),
-      ...(one?.is_folder ? [fixDetailsItem(one.path)] : []),
+      ...(one?.is_folder ? [fixDetailsItem(one.path), catalogItem(one.path)] : []),
       'separator',
       {
         label: n > 1 ? `Delete ${n} items` : 'Delete',
@@ -337,8 +338,21 @@
       { label: 'Copy path of this folder', icon: Copy, run: () => copyText(gsPath(prefix), 'Path copied') },
       { label: 'Total size of this folder', icon: Sigma, run: () => computeTotals(prefix) },
       fixDetailsItem(prefix),
+      catalogItem(prefix),
       ...(keepsDeleted ? [{ label: 'Recently deleted', icon: History, run: loadTrash }] : []),
     ];
+  }
+
+  /** Open the Catalogs view on this folder. */
+  function catalogItem(path) {
+    return {
+      label: 'Make a catalog…',
+      icon: LibraryBig,
+      run: () => {
+        app.catalogPrefill = gsPath(path);
+        app.view = 'catalogs';
+      },
+    };
   }
 
   /** "Fix file details…" for a folder: with dates from this computer when it's a synced folder. */

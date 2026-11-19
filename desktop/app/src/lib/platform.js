@@ -4,7 +4,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { openUrl as tauriOpenUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
 
@@ -309,6 +309,58 @@ export async function appInfo() {
 export async function checkUpdate() {
   if (!isDesktop) return null;
   return invoke('check_update');
+}
+
+// ----- Catalogs -----
+
+/** Kind presets: [{ id, label, extensions }]. */
+export async function catalogKinds() {
+  if (!isDesktop) return [];
+  return invoke('catalog_kinds');
+}
+
+/** List and group gs://prefix; onProgress({ done: looked at, skipped: filtered out, bytes: kept }). */
+export function catalogScan(opId, request, onProgress) {
+  if (!isDesktop) return Promise.reject(desktopOnly());
+  return withOpProgress(opId, onProgress, () => invoke('catalog_scan', { opId, request }));
+}
+
+export async function catalogRegroup(opId, grouping) {
+  return invoke('catalog_regroup', { opId, grouping });
+}
+
+/** { total, entries } of a group's files (all files when group is null). */
+export async function catalogGroupFiles(opId, group, offset = 0, limit = 120) {
+  return invoke('catalog_group_files', { opId, group, offset, limit });
+}
+
+/** Ask where to save (a save dialog), then write; resolves to the paths written, or null if cancelled. */
+export async function catalogExport(opId, format, defaultName, { dataset = null, datasetSidecar = false } = {}) {
+  if (!isDesktop) throw desktopOnly();
+  const filters = format === 'detailed-csv' ? [{ name: 'CSV', extensions: ['csv'] }] : [{ name: 'JSON', extensions: ['json'] }];
+  const path = await saveDialog({ defaultPath: defaultName, filters, title: 'Save catalog' });
+  if (!path) return null;
+  return invoke('catalog_export', { opId, format, path, dataset, datasetSidecar });
+}
+
+export async function catalogSave(opId, name, dataset) {
+  return invoke('catalog_save', { opId, name, dataset });
+}
+
+/** Dataset information from an InPort item number, an ISO 19115 URL, or an XML file path. */
+export async function catalogDatasetInfo(source) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('catalog_dataset_info', { source });
+}
+
+/** Pick an ISO XML file. */
+export async function pickXmlFile() {
+  if (!isDesktop) return null;
+  return openDialog({ multiple: false, directory: false, filters: [{ name: 'ISO metadata (XML)', extensions: ['xml'] }], title: 'Choose an ISO 19115 metadata file' });
+}
+
+export function catalogDiscard(opId) {
+  if (isDesktop && opId) invoke('catalog_discard', { opId }).catch(() => {});
 }
 
 /** A thumbnail of an image in a bucket: { data_url, source } or { skip, ... } (see thumbs.rs). */

@@ -1250,3 +1250,40 @@ async fn speed_check_measures_without_storing_anything() {
     let report = jetstream_transfer::speedcheck::speed_check(&env.client, "gs://bucket/data", None, &stopped).await.unwrap();
     assert!(report.cancelled);
 }
+
+#[tokio::test]
+async fn catalog_lists_the_bucket_with_file_details() {
+    use jetstream_transfer::catalog::{self, CatalogRequest};
+    use jetstream_transfer::fileops::OpProgress;
+    let Some(env) = Env::new().await else { return };
+    for name in ["reef/site_A_001.jpg", "reef/site_A_002.JPG", "reef/site_B_001.png", "reef/thumbs/site_B_001.png", "reef/ctd.csv", "reef/sst.nc"] {
+        env.write(name, name.as_bytes());
+    }
+    let (summary, _) = env.run(env.options()).await;
+    assert_eq!(summary.uploaded, 6);
+
+    let request: CatalogRequest = serde_json::from_value(serde_json::json!({ "gcs_prefix": "gs://bucket/data/reef", "kinds": ["images"], "ignore_folder_names": ["thumbs"], "filename_token_count": 2 })).unwrap();
+    let progress = OpProgress::default();
+    let listing = catalog::scan(&env.client, &request, &progress).await.unwrap();
+    assert_eq!(listing.files.len(), 3);
+    assert_eq!((progress.done.load(std::sync::atomic::Ordering::Relaxed), progress.skipped.load(std::sync::atomic::Ordering::Relaxed)), (6, 3));
+    let file = &listing.files[0];
+    assert_eq!(file.content_type.as_deref(), Some("image/jpeg"));
+    assert!(file.modified.is_some() && file.crc32c.is_some() && file.uploaded.is_some(), "{file:?}");
+
+    let built = catalog::build(&listing, &request.grouping, "now").unwrap();
+    assert_eq!(built.grouped_instances.keys().collect::<Vec<_>>(), vec!["site_A", "site_B"]);
+    assert!(catalog::oasis_json(&built).contains("\"gs://bucket/data/reef/site_A_001.jpg\""));
+    let csv = catalog::detailed_csv(&listing, &built);
+    assert_eq!(csv.lines().count(), 4);
+    assert!(csv.lines().nth(1).unwrap().contains(",image/jpeg,STANDARD,"), "{csv}");
+
+    // Everything, capped at 2.
+    let all: CatalogRequest = serde_json::from_value(serde_json::json!({ "gcs_prefix": "gs://bucket/data/reef/", "kinds": ["all"], "max_results": 2 })).unwrap();
+    let capped = catalog::scan(&env.client, &all, &OpProgress::default()).await.unwrap();
+    assert_eq!((capped.files.len(), capped.truncated), (2, true));
+    // Stopped.
+    let stopped = OpProgress::default();
+    stopped.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(catalog::scan(&env.client, &all, &stopped).await.is_err());
+}

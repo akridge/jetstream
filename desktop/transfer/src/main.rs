@@ -189,6 +189,52 @@ enum Command {
     },
     /// Measure what limits uploads: the folder (list and read speed), the network (one
     /// connection and 8 at once) and request time. Nothing is stored in the bucket.
+    /// Build a catalog of files under gs://bucket/prefix (the Cloud Catalog Tool): images by
+    /// default, grouped by filename token. Prints the OASIS JSON unless --format says otherwise.
+    Catalog {
+        /// gs://bucket/prefix
+        prefix: String,
+        /// The full request as JSON (or @file.json), as the catalog tool sends it; the options
+        /// below override it.
+        #[arg(long)]
+        request: Option<String>,
+        /// Kinds of files: images, raw, video, science, tables, documents, audio, all.
+        #[arg(long, value_delimiter = ',')]
+        kinds: Vec<String>,
+        /// Extra extensions (".nc,.csv").
+        #[arg(long = "ext", value_delimiter = ',')]
+        extensions: Vec<String>,
+        /// none, filename_token, folder_segment, regex, manual.
+        #[arg(long)]
+        group_by: Option<String>,
+        /// oasis (default), detailed-csv, detailed-json, catalog (the full catalog as the app saves it).
+        #[arg(long, default_value = "oasis")]
+        format: String,
+        /// Dataset information: an InPort item number, an ISO 19115 record URL, or an XML file.
+        #[arg(long)]
+        dataset: Option<String>,
+        /// Write here instead of printing.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Use these object names (one per line) instead of listing the bucket (for testing).
+        #[arg(long, hide = true)]
+        names: Option<PathBuf>,
+        /// Keep the listing in this file: list once, then regroup from it (for testing the app).
+        #[arg(long, hide = true)]
+        listing: Option<PathBuf>,
+        /// Dataset information as JSON (as the app passes it).
+        #[arg(long, hide = true)]
+        dataset_json: Option<String>,
+        /// With --format group-files: the group (all files when absent), offset and count.
+        #[arg(long, hide = true)]
+        group: Option<String>,
+        #[arg(long, hide = true, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, hide = true, default_value_t = 120)]
+        limit: usize,
+    },
+    /// Read dataset information from NOAA InPort (an item number) or an ISO 19115 record (URL or file).
+    DatasetInfo { source: String },
     SpeedCheck {
         /// gs://bucket/prefix to test against.
         destination: String,
@@ -348,6 +394,15 @@ fn cloud_client() -> Result<GcsClient> {
     Ok(GcsClient::new(http, auth))
 }
 
+/// An InPort item number or ISO record URL (fetched), or an XML file.
+async fn dataset_info(source: &str) -> Result<jetstream_transfer::catalog_meta::DatasetInfo> {
+    let path = std::path::Path::new(source);
+    if path.is_file() {
+        return jetstream_transfer::catalog_meta::read_file(path);
+    }
+    jetstream_transfer::catalog_meta::fetch(source).await
+}
+
 fn print_json<T: serde::Serialize>(value: &T) -> Result<i32> {
     println!("{}", serde_json::to_string(value)?);
     Ok(0)
@@ -430,6 +485,67 @@ async fn run() -> Result<i32> {
             let result = jetstream_transfer::details::apply_fix(&client, &plan, &OpProgress::default()).await;
             print_json(&serde_json::json!({ "plan": plan, "result": result }))?;
             return Ok(if result.failed > 0 { 2 } else { 0 });
+        }
+        Command::Catalog { prefix, request, kinds, extensions, group_by, format, dataset, out, names, listing: listing_file, dataset_json, group, offset, limit } => {
+            use jetstream_transfer::catalog;
+            let mut value: serde_json::Value = match request.as_deref() {
+                Some(text) if text.starts_with('@') => serde_json::from_str(&std::fs::read_to_string(&text[1..])?)?,
+                Some(text) => serde_json::from_str(text)?,
+                None => serde_json::json!({}),
+            };
+            value["gcs_prefix"] = prefix.clone().into();
+            if !kinds.is_empty() {
+                value["kinds"] = serde_json::json!(kinds);
+            }
+            if !extensions.is_empty() {
+                value["extensions"] = serde_json::json!(extensions);
+            }
+            if let Some(mode) = group_by {
+                value["group_by_mode"] = mode.replace('-', "_").into();
+            }
+            let request: catalog::CatalogRequest = serde_json::from_value(value)?;
+            let listing = match (names, &listing_file) {
+                (Some(file), _) => catalog::listing_from_names(&request, &std::fs::read_to_string(file)?.lines().collect::<Vec<_>>())?,
+                (None, Some(path)) if path.exists() => serde_json::from_str::<catalog::Listing>(&std::fs::read_to_string(path)?)?,
+                (None, _) => catalog::scan(&cloud_client()?, &request, &OpProgress::default()).await?,
+            };
+            if let Some(path) = &listing_file {
+                if !path.exists() {
+                    std::fs::write(path, serde_json::to_string(&listing)?)?;
+                }
+            }
+            let now = catalog::iso_utc(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64);
+            let (mut built, full) = catalog::build_with_table(&listing, &request.grouping, &now)?;
+            for warning in &built.warnings {
+                eprintln!("warning: {warning}");
+            }
+            let info = match (dataset, dataset_json) {
+                (Some(source), _) => Some(serde_json::to_value(dataset_info(&source).await?)?),
+                (None, Some(text)) => serde_json::from_str::<Option<serde_json::Value>>(&text)?,
+                (None, None) => None,
+            };
+            built.metadata.jetstream_request = Some(request.clone());
+            built.metadata.dataset = info.clone();
+            let text = match format.as_str() {
+                "oasis" => catalog::oasis_json(&built),
+                "detailed-csv" => catalog::detailed_csv(&listing, &built),
+                "detailed-json" => serde_json::to_string_pretty(&catalog::detailed_json(&listing, &built, info.as_ref()))?,
+                "catalog" => serde_json::to_string_pretty(&built)?,
+                "summary" => serde_json::to_string(&catalog::summary(&listing, &built, full.as_ref()))?,
+                "group-files" => {
+                    let (total, entries) = catalog::group_page(&listing, &built, group.as_deref(), offset, limit)?;
+                    serde_json::to_string(&serde_json::json!({ "total": total, "entries": entries }))?
+                }
+                other => anyhow::bail!("unknown format {other:?}: use oasis, detailed-csv, detailed-json or catalog"),
+            };
+            match out {
+                Some(path) => std::fs::write(path, text)?,
+                None => print!("{text}"),
+            }
+            return Ok(0);
+        }
+        Command::DatasetInfo { source } => {
+            return print_json(&dataset_info(&source).await?);
         }
         Command::SpeedCheck { destination, local } => {
             let client = cloud_client()?;

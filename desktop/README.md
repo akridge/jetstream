@@ -121,6 +121,14 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   There's a per-folder breakdown and a button for each file to show it on this computer or in the cloud. The folder's skip filters are applied. **Upload N files** starts the sync right there: its progress shows at the top, and the comparison refreshes when it finishes.
 
   Compare is the quick look (sizes only). **Preview** goes further and confirms same-size files by checksum, but only reads those: files not in the cloud, or with another size, are listed without being read. What a preview confirms is remembered, so the upload after it doesn't read those files again.
+- **Catalogs:** build a catalog of the images (or any files) in a bucket folder, grouped by site, without the 50,000-file limit of the classic tool. Open it from the sidebar, or right-click a folder in Cloud storage → **Make a catalog…**.
+  - **Files:** **Images** by default (JPEG, PNG, TIFF, BMP, WebP). Add Camera RAW, Video, Science data (NetCDF, HDF5, Zarr, Parquet, GRIB, …), Tables and text, Documents or Audio and sonar, choose **All files**, or list your own extensions. **More filters:** file name (a word or a pattern like `*_00?_*.jpg`), path, folders to skip (e.g. `thumbs`), folder depth and a file limit.
+  - **Groups:** by the start of the file name, by folder level, by a regular expression, or by your own group list. Site instances can be groups with at least N files, groups that are a folder, groups with a file matching a pattern, or groups you tick. The bucket is listed once, so changing any of this updates the result straight away. Each group shows its file count, size and sample thumbnails; click one to browse its files with the preview pane, and untick a group to leave it out.
+  - **Export:**
+    - **Save OASIS JSON** writes exactly the file the classic catalog tool writes for the same options (`instances`, `instances_grouped`, `site_instances`), byte for byte.
+    - **Detailed CSV / JSON** list every file with its group, size, type, original created and modified dates, upload time, CRC32C, MD5, generation and storage class.
+    - **Save to my catalogs** keeps the catalog with JetStream (shared with the classic page). Opening it later builds it again from the bucket with the same options.
+  - **Dataset information (optional):** enter a NOAA InPort catalog item number (JetStream reads its ISO record from `fisheries.noaa.gov/inport/item/<number>/iso19115`), any ISO 19115 record address, or an ISO XML file. Its title, abstract, time period, area, contacts, keywords, use constraints and DOI go into detailed exports and saved catalogs, and can be saved next to the OASIS JSON as `<name>.dataset.json`. The OASIS JSON itself never changes.
 - **Cloud cleanup:** scan a bucket or folder for junk: unfinished uploads (`.gstmp`), NAS thumbnail folders, `Thumbs.db`, `.DS_Store`, Office lock files and temporary files. You can add your own patterns. The Rust core does the scan (read-only, tens of thousands of objects a second), then shows:
   - totals and a breakdown by kind, which you can click to filter
   - the matching objects, largest first
@@ -146,7 +154,7 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - **Upload large files in parallel parts** (on by default; JetStream engine): files over 256 MB go up as up to 32 parts at once and are joined in the bucket. This is often several times faster on long-distance connections. The joined file is verified by CRC32C but has no MD5 checksum, so turn it off if your data needs MD5. It's skipped automatically for buckets with a retention policy or a Nearline, Coldline or Archive storage class. The job details show "in 16 parallel parts".
   - light, dark or system theme
   - notifications
-- **More tools:** cloud audit history, the catalog tool, Drive upload, and the original pages. These open in a separate window.
+- **More tools:** cloud audit history, the classic catalog tool, Drive upload, and the original pages. These open in a separate window.
 - **Desktop behaviour:**
   - notifications when jobs finish
   - closing the window keeps JetStream running in the tray, so uploads continue; **Quit** in the tray menu stops it
