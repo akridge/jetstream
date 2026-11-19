@@ -86,12 +86,27 @@ jobs:
         working-directory: desktop
         run: npm ci || npm install
 
+      - name: Release notes
+        # A release tag needs a section for its version in desktop/CHANGELOG.md; that section
+        # becomes the release's description.
+        id: notes
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        shell: bash
+        run: |
+          python desktop/scripts/release_notes.py "${{ github.ref_name }}" -o release-notes.md
+          {
+            echo "body<<JETSTREAM_NOTES_END"
+            cat release-notes.md
+            echo "JETSTREAM_NOTES_END"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build installers
         uses: tauri-apps/tauri-action@v0
         with:
           projectPath: desktop
           tagName: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && format('JetStream Desktop {0}', github.ref_name) || '' }}
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

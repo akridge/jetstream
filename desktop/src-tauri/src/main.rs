@@ -134,6 +134,14 @@ fn app_info(app: AppHandle) -> AppInfo {
     }
 }
 
+/// A newer JetStream Desktop on GitHub, if there is one (None when up to date, offline, or
+/// nothing is published). Never downloads anything.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Option<jetstream_transfer::update::UpdateInfo> {
+    let current = app.package_info().version.to_string();
+    jetstream_transfer::update::check(&current, None).await.ok().flatten()
+}
+
 /// Current server status, polled by the UI on load (events cover later changes).
 #[tauri::command]
 fn server_status(app: AppHandle) -> ServerStatus {
@@ -1093,6 +1101,7 @@ fn main() {
             list_subfolders,
             watch_folders,
             app_info,
+            check_update,
             thumbnail,
             plan_fix_details,
             run_fix_details,

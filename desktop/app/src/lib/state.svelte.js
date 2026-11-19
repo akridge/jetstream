@@ -2,11 +2,11 @@
 
 import { api, eventsUrl, setApiBase } from './api.js';
 import { jobDestination, normalizeDestination, basename } from './format.js';
-import { appInfo, ensureNotificationPermission, setThumbnailCacheLimit, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
+import { appInfo, checkUpdate, ensureNotificationPermission, setThumbnailCacheLimit, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
 import { cloudOps } from './cloudops.svelte.js';
 
 const PREFS_KEY = 'jetstreamDesktopPrefs';
-const DEFAULT_PREFS = { theme: 'system', notifications: true, default_upload_tool: 'gcloud', recent_buckets: [], recent_scans: [] };
+const DEFAULT_PREFS = { theme: 'system', notifications: true, default_upload_tool: 'gcloud', update_check: true, recent_buckets: [], recent_scans: [] };
 
 function loadPrefs() {
   try {
@@ -108,6 +108,9 @@ class AppState {
   version = $state('');
   /** The desktop app: { version, build, commit, engine, portable } (null in a browser). */
   desktop = $state(null);
+  /** A newer desktop release: { latest, url, notes, download } or null. */
+  update = $state(null);
+  #updateTimer = null;
   live = $state(false);
   prefs = $state(loadPrefs());
   toasts = $state([]);
@@ -183,7 +186,32 @@ class AppState {
 
   async #loadVersion() {
     this.desktop = await appInfo().catch(() => null);
+    this.scheduleUpdateChecks();
     this.version = (await api.version()).version || '';
+  }
+
+  /** Check GitHub for a newer version now and then once a day (unless turned off). */
+  scheduleUpdateChecks() {
+    clearInterval(this.#updateTimer);
+    this.#updateTimer = null;
+    if (!this.desktop || !this.prefs.update_check) {
+      this.update = null;
+      return;
+    }
+    this.checkForUpdates();
+    this.#updateTimer = setInterval(() => this.checkForUpdates(), 24 * 3600 * 1000);
+  }
+
+  /** Returns the update found (or null). Failures (offline, rate limited) count as none. */
+  async checkForUpdates() {
+    const found = await checkUpdate().catch(() => null);
+    this.update = found;
+    return found;
+  }
+
+  /** Hide the sidebar notice for this version (Settings still shows it). */
+  dismissUpdate() {
+    if (this.update) this.savePrefs({ update_dismissed: this.update.latest });
   }
 
   async refreshJobs() {

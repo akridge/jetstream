@@ -298,6 +298,12 @@ export async function appInfo() {
   return invoke('app_info');
 }
 
+/** A newer desktop release: { latest, url, notes, download } or null (up to date, offline, browser). */
+export async function checkUpdate() {
+  if (!isDesktop) return null;
+  return invoke('check_update');
+}
+
 /** A thumbnail of an image in a bucket: { data_url, source } or { skip, ... } (see thumbs.rs). */
 export async function thumbnail(request) {
   if (!isDesktop) throw desktopOnly();

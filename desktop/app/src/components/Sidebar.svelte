@@ -7,7 +7,10 @@
   import FolderSearch from '@lucide/svelte/icons/folder-search';
   import ChartColumn from '@lucide/svelte/icons/chart-column';
   import Brush from '@lucide/svelte/icons/brush';
+  import ArrowUpCircle from '@lucide/svelte/icons/circle-arrow-up';
+  import X from '@lucide/svelte/icons/x';
   import { app } from '../lib/state.svelte.js';
+  import { openUrl } from '../lib/platform.js';
 
   const groups = [
     {
@@ -40,6 +43,7 @@
     },
   ];
 
+  let showUpdate = $derived(app.update && app.prefs.update_dismissed !== app.update.latest);
   let auth = $derived(app.auth);
   let authState = $derived(
     !auth ? 'unknown' : auth.gcloud_account && auth.adc_available ? 'ok' : auth.signed_in ? 'partial' : 'none',
@@ -76,6 +80,15 @@
   </nav>
 
   <div class="footer">
+    {#if showUpdate}
+      <div class="update">
+        <button class="update-open" onclick={() => openUrl(app.update.url)} title="Open the release page to download it">
+          <ArrowUpCircle size={16} />
+          <span>JetStream {app.update.latest} is available</span>
+        </button>
+        <button class="update-x" aria-label="Hide until the next version" title="Hide until the next version" onclick={() => app.dismissUpdate()}><X size={14} /></button>
+      </div>
+    {/if}
     <button class="account" onclick={() => (app.view = 'settings')} title="Google Cloud sign-in">
       <span class="dot {authState}"></span>
       <span class="truncate">
@@ -96,6 +109,43 @@
 </aside>
 
 <style>
+  .update {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-bottom: 8px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .update-open {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 4px 8px 10px;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .update-open:hover span {
+    text-decoration: underline;
+  }
+  .update-x {
+    border: none;
+    background: none;
+    color: inherit;
+    opacity: 0.7;
+    padding: 6px 8px;
+    cursor: pointer;
+  }
+  .update-x:hover {
+    opacity: 1;
+  }
   aside {
     width: 232px;
     flex-shrink: 0;

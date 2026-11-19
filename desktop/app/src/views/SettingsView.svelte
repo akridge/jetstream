@@ -88,6 +88,22 @@
     }
   }
 
+  let updateChecking = $state(false);
+  let updateChecked = $state('');
+  async function checkNow() {
+    updateChecking = true;
+    try {
+      const found = await app.checkForUpdates();
+      updateChecked = found ? '' : `You have the latest version (${app.desktop?.version}), or the check couldn't reach GitHub.`;
+    } finally {
+      updateChecking = false;
+    }
+  }
+  function setUpdateCheck(on) {
+    app.savePrefs({ update_check: on });
+    app.scheduleUpdateChecks();
+  }
+
   function setNotifications(on) {
     app.savePrefs({ notifications: on });
     if (on) ensureNotificationPermission();
@@ -276,6 +292,34 @@
         <dt>JetStream server</dt>
         <dd>{app.version || '…'} <span class="muted">(the Python package, versioned separately)</span></dd>
       </dl>
+      {#if isDesktop}
+        <div class="updates">
+          {#if app.update}
+            <p class="update-line">
+              <strong>JetStream {app.update.latest} is available.</strong>
+              {app.desktop?.portable ? 'Unzip the new portable version, then move the JetStreamData folder from this copy into it to keep your job history.' : 'Download and run the new installer.'}
+            </p>
+            <div class="btn-row">
+              <button class="btn primary" onclick={() => openUrl(app.update.url)}><ExternalLink size={15} /> Release page</button>
+              {#if app.update.download}
+                <button class="btn" onclick={() => openUrl(app.update.download)}>Download portable zip</button>
+              {/if}
+            </div>
+          {:else if updateChecked}
+            <p class="muted update-line">{updateChecked}</p>
+          {/if}
+          <div class="btn-row">
+            <button class="btn" disabled={updateChecking} onclick={checkNow}><RefreshCw size={15} /> {updateChecking ? 'Checking…' : 'Check for updates'}</button>
+          </div>
+          <label class="row toggle">
+            <span>
+              <span class="label">Check for new versions</span>
+              <small class="muted">Once a day, asks GitHub for the latest JetStream Desktop release. Nothing is downloaded or installed on its own.</small>
+            </span>
+            <input type="checkbox" checked={app.prefs.update_check} onchange={(e) => setUpdateCheck(e.currentTarget.checked)} />
+          </label>
+        </div>
+      {/if}
     </div>
 
     <div class="card panel">
@@ -287,6 +331,22 @@
 </section>
 
 <style>
+  .updates {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    display: grid;
+    gap: 10px;
+  }
+  .update-line {
+    margin: 0;
+    font-size: 13.5px;
+  }
+  .btn-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
   .about {
     display: grid;
     grid-template-columns: max-content 1fr;

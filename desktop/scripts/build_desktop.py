@@ -44,6 +44,8 @@ Run {app} to start JetStream. Nothing is installed.
 - Job history, logs and the upload manifest are kept in the JetStreamData folder next to
   the program, so you can carry this folder (for example on a USB drive).
 - To share history with an installed copy of JetStream instead, delete JetStreamData.
+- New version: unzip it, then move JetStreamData from this folder into the new one to keep
+  your history. The app says when a new version is out (Settings > About).
 - Keep everything in this folder together ({app}, jetstream-transfer{exe} and the
   JetStream server{server}).
 - Version: {version}

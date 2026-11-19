@@ -22,4 +22,5 @@ pub mod receipt;
 pub mod scan;
 pub mod sync;
 pub mod throttle;
+pub mod update;
 pub mod thumbs;
