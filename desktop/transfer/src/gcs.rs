@@ -599,7 +599,7 @@ impl GcsClient {
     ) -> Result<DirPage> {
         let mut url = format!(
             "{}/storage/v1/b/{}/o?prefix={}&delimiter=%2F&maxResults={max_results}\
-             &fields=items(name,size,updated,storageClass,contentType),prefixes,nextPageToken",
+             &fields=items(name,size,updated,storageClass,contentType,generation),prefixes,nextPageToken",
             self.base,
             encode(bucket),
             encode(prefix)
@@ -825,6 +825,31 @@ impl GcsClient {
             return Err(Self::error_for(response).await);
         }
         Ok(response)
+    }
+
+    /// Bytes `start..=end` of an object (fewer if it's shorter): e.g. the start of a JPEG,
+    /// where its embedded preview lives.
+    pub async fn download_range(&self, bucket: &str, name: &str, generation: Option<&str>, start: u64, end: u64) -> Result<Vec<u8>, GcsError> {
+        let mut url = format!("{}/storage/v1/b/{}/o/{}?alt=media", self.base, encode(bucket), encode(name));
+        if let Some(generation) = generation {
+            url.push_str(&format!("&generation={generation}"));
+        }
+        let response = self.send(self.http.get(url).header(RANGE, format!("bytes={start}-{end}"))).await?;
+        let status = response.status();
+        if status == StatusCode::RANGE_NOT_SATISFIABLE {
+            return Ok(Vec::new());
+        }
+        if !status.is_success() {
+            return Err(Self::error_for(response).await);
+        }
+        let limit = (end - start + 1) as usize;
+        let mut body = response.bytes().await.map_err(|e| GcsError::Network(format!("network error: {e}")))?.to_vec();
+        // A server that ignores Range sends everything: keep only what was asked for.
+        if status == StatusCode::OK && start > 0 {
+            body = body.into_iter().skip(start as usize).collect();
+        }
+        body.truncate(limit);
+        Ok(body)
     }
 
     /// Bring back a soft-deleted object. Fails with `AlreadyExists` rather than replacing a live

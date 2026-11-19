@@ -31,6 +31,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "signal", "process"] }
 walkdir = "2"
+# Thumbnails in the cloud browser (decoders only for common image formats).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+kamadak-exif = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

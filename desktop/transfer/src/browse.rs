@@ -18,6 +18,8 @@ pub struct Entry {
     pub updated: Option<String>,
     pub storage_class: Option<String>,
     pub content_type: Option<String>,
+    /// Changes whenever the object is replaced (thumbnail cache key).
+    pub generation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +62,7 @@ pub async fn list_folder(
             updated: None,
             storage_class: None,
             content_type: None,
+            generation: None,
         })
         .collect();
     entries.extend(
@@ -75,6 +78,7 @@ pub async fn list_folder(
                 updated: o.updated,
                 storage_class: o.storage_class,
                 content_type: o.content_type,
+                generation: o.generation,
             }),
     );
     Ok(Listing { bucket: bucket.to_string(), prefix, entries, next_page_token: page.next_page_token })

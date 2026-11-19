@@ -2,7 +2,7 @@
 
 import { api, eventsUrl, setApiBase } from './api.js';
 import { jobDestination, normalizeDestination, basename } from './format.js';
-import { appInfo, ensureNotificationPermission, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
+import { appInfo, ensureNotificationPermission, setThumbnailCacheLimit, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
 import { cloudOps } from './cloudops.svelte.js';
 
 const PREFS_KEY = 'jetstreamDesktopPrefs';
@@ -168,6 +168,7 @@ class AppState {
   }
 
   async #loadTransfer() {
+    setThumbnailCacheLimit(Number(this.prefs.thumb_cache_mb) || 250).catch(() => {});
     this.transfer = await api.transferSettings();
     await setTransferLimit(this.transfer.max_mbps);
   }

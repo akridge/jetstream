@@ -286,6 +286,28 @@ export async function appInfo() {
   return invoke('app_info');
 }
 
+/** A thumbnail of an image in a bucket: { data_url, source } or { skip, ... } (see thumbs.rs). */
+export async function thumbnail(request) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('thumbnail', { request });
+}
+
+/** The thumbnail cache: { dir, bytes, files, max_bytes }. */
+export async function thumbnailCacheInfo() {
+  if (!isDesktop) return null;
+  return invoke('thumbnail_cache_info');
+}
+
+export async function clearThumbnailCache() {
+  if (!isDesktop) return null;
+  return invoke('clear_thumbnail_cache');
+}
+
+export async function setThumbnailCacheLimit(mb) {
+  if (!isDesktop) return null;
+  return invoke('set_thumbnail_cache_limit', { mb: Number(mb) || 250 });
+}
+
 /** [[path, isFolder], ...] for dropped paths. */
 export async function classifyPaths(paths) {
   if (!isDesktop) return paths.map((p) => [p, true]);

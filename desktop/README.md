@@ -70,6 +70,12 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - cancel a job, run it again, or "upload for real" after a preview
   - show the job's log file
 - **Cloud storage:** a file manager for buckets. Browse folder by folder, with sizes, last-updated times and storage classes.
+  - **Thumbnails** (off until you turn it on with the toolbar button; remembered): images show as a grid of thumbnails. Selection, right-click, rename and the rest work the same. Designed not to waste downloads or disk:
+    - only the tiles on screen load, at most 4 at a time, and leaving the folder stops the rest
+    - camera JPEGs use the preview embedded in the file, so only their first 128 KB is downloaded
+    - other images download only if they're under the size cap (20 MB by default); bigger ones show "Too large · click to preview"
+    - Nearline, Coldline and Archive images wait for a click (retrieving them is charged)
+    - thumbnails (about 6 KB each) go in a cache with a size limit (250 MB by default; the oldest go first), in the system's cache folder, or in `JetStreamData` for the portable copy. A replaced file gets a new thumbnail. **Settings → Cloud storage thumbnails** shows the cache size, clears it, and sets the limits.
   - **Select like Explorer:** click; Ctrl/Shift+click for several; arrow keys; right-click for a menu.
   - **Rename** (F2), **New folder**, **Move or copy to…**, and **Delete** (Del). Each shows what it involves before running:
     - how many files and how much data

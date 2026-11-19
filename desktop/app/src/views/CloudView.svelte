@@ -30,6 +30,9 @@
   import Upload from '@lucide/svelte/icons/upload';
   import FileOpDialog from '../components/FileOpDialog.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
+  import ThumbTile from '../components/ThumbTile.svelte';
+  import LayoutGrid from '@lucide/svelte/icons/layout-grid';
+  import { thumbLoader } from '../lib/thumbs.svelte.js';
   import { app } from '../lib/state.svelte.js';
   import { cloudOps } from '../lib/cloudops.svelte.js';
   import { bytes, count, relativeTime, dateTime } from '../lib/format.js';
@@ -106,8 +109,25 @@
     return { bucket: b, prefix: p && !p.endsWith('/') ? `${p}/` : p };
   }
 
+  // Optional thumbnail view (off unless the user turns it on).
+  let thumbsOn = $derived(!!app.prefs.cloud_thumbnails);
+  function toggleThumbs() {
+    const on = !thumbsOn;
+    thumbLoader.reset();
+    app.savePrefs({ cloud_thumbnails: on });
+    if (on && !app.prefs.thumb_notice_seen) {
+      app.savePrefs({ thumb_notice_seen: true });
+      app.toast(
+        `Thumbnails download each image once (up to ${Number(app.prefs.thumb_max_mib) || 20} MB; camera JPEGs usually only their first 128 KB) and keep a small copy in a local cache (up to ${Number(app.prefs.thumb_cache_mb) || 250} MB, clear it in Settings). Nearline, Coldline and Archive images only load when clicked.`,
+        'info',
+        { timeout: 14000 },
+      );
+    }
+  }
+
   async function open(b, p = '', { remember = true, keepSelection = false } = {}) {
     if (!b) return;
+    if (b !== bucket || p !== prefix) thumbLoader.reset();
     if (b !== bucket) access = await bucketAccess(b).catch(() => null);
     bucket = b;
     prefix = p;
@@ -542,6 +562,9 @@
               <button class="btn ghost sm" title="Files deleted from this folder that can still be restored" onclick={() => loadTrash()}><History size={14} /> Recently deleted</button>
             {/if}
           {/if}
+          {#if !trash}
+            <button class="btn ghost sm" class:toggled={thumbsOn} aria-pressed={thumbsOn} title={thumbsOn ? 'Show as a list' : 'Show images as thumbnails'} onclick={toggleThumbs}><LayoutGrid size={14} /> Thumbnails</button>
+          {/if}
           <button class="btn ghost sm icon" aria-label="Refresh" title="Refresh" onclick={() => (trash ? loadTrash() : refresh())}><RefreshCw size={14} class={loading ? 'spin' : ''} /></button>
         </div>
       </div>
@@ -626,12 +649,14 @@
       {:else}
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div class="table" role="grid" aria-multiselectable="true" tabindex="0" bind:this={table} onkeydown={keydown} oncontextmenu={backgroundMenu}>
-          <div class="thead" role="row">
-            <span role="columnheader">Name</span>
-            <span role="columnheader" class="num">Size</span>
-            <span role="columnheader">Updated</span>
-            <span role="columnheader">Class</span>
-          </div>
+          {#if !thumbsOn}
+            <div class="thead" role="row">
+              <span role="columnheader">Name</span>
+              <span role="columnheader" class="num">Size</span>
+              <span role="columnheader">Updated</span>
+              <span role="columnheader">Class</span>
+            </div>
+          {/if}
           {#if creating}
             <div class="tr editing" role="row">
               <span class="name" role="cell">
@@ -647,6 +672,44 @@
               </span>
             </div>
           {/if}
+          {#if thumbsOn}
+            <div class="tiles">
+              {#each entries as entry, index (entry.path)}
+                <div
+                  class="tile"
+                  class:selected={selected.has(entry.path)}
+                  class:focused={focusIndex === index}
+                  role="row"
+                  aria-selected={selected.has(entry.path)}
+                  data-index={index}
+                  title={entry.name}
+                  onclick={(e) => rowClick(e, index)}
+                  ondblclick={() => entry.is_folder && open(bucket, entry.path, { remember: false })}
+                  oncontextmenu={(e) => rowMenu(e, index)}
+                >
+                  <ThumbTile {bucket} {entry} />
+                  {#if renaming === entry.path}
+                    <input
+                      class="input mono rename"
+                      aria-label="New name"
+                      bind:value={renameValue}
+                      disabled={renameBusy}
+                      onclick={(e) => e.stopPropagation()}
+                      onkeydown={(e) => renameKey(e, entry)}
+                      onblur={() => !renameBusy && renaming === entry.path && commitRename(entry)}
+                    />
+                  {:else}
+                    <span class="tile-name truncate" role="cell">{displayName(entry)}</span>
+                  {/if}
+                  <span class="tile-meta muted" role="cell">{entry.is_folder ? 'Folder' : entry.size !== null && entry.size !== undefined ? bytes(entry.size) : ''}</span>
+                </div>
+              {:else}
+                {#if !loading && !error && !creating}
+                  <div class="empty">This folder is empty.</div>
+                {/if}
+              {/each}
+            </div>
+          {:else}
           {#each entries as entry, index (entry.path)}
             {@const Icon = iconFor(entry)}
             <div
@@ -687,6 +750,7 @@
               <div class="empty">This folder is empty.{#if can('storage.objects.create')} Right-click to create a folder.{/if}</div>
             {/if}
           {/each}
+          {/if}
           {#if loading && !entries.length}
             <div class="empty">Loading…</div>
           {/if}
@@ -882,6 +946,48 @@
   }
   .table:focus {
     outline: none;
+  }
+  .toggled {
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px;
+    padding: 14px;
+  }
+  .tile {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    cursor: default;
+    min-width: 0;
+    user-select: none;
+  }
+  .tile:hover {
+    background: var(--surface-hover);
+  }
+  .tile.selected {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+  .table:focus-visible .tile.focused {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .tile-name {
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .tile-meta {
+    font-size: 11.5px;
+  }
+  .tiles .empty {
+    grid-column: 1 / -1;
   }
   .table:focus-visible .tr.focused {
     box-shadow: inset 2px 0 0 var(--accent);

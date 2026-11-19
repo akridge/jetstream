@@ -168,6 +168,26 @@ enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+    /// Make a thumbnail of an image in a bucket (cached), as the cloud browser does.
+    Thumbnail {
+        /// gs://bucket/path/to/image.jpg
+        object: String,
+        /// Thumbnail cache folder.
+        #[arg(long)]
+        cache: PathBuf,
+        /// Write the thumbnail (JPEG) here.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Preview Nearline/Coldline/Archive objects too (retrieval is charged).
+        #[arg(long)]
+        allow_cold: bool,
+        /// Don't download images bigger than this many MiB.
+        #[arg(long, default_value_t = 20)]
+        max_mib: u64,
+        /// Cache size limit in MiB.
+        #[arg(long, default_value_t = 250)]
+        cache_mib: u64,
+    },
     /// Bucket settings (soft delete, hierarchical namespace, Autoclass) and your permissions.
     Bucket { bucket: String },
     /// Copy objects or folders (gs://b/folder/ ends with "/") into a folder, server-side.
@@ -357,6 +377,31 @@ async fn run() -> Result<i32> {
                 "result": receipt.result, "totals": receipt.totals, "csv": csv, "json": json,
             }))?;
             return Ok(if receipt.result == "complete" { 0 } else { 2 });
+        }
+        Command::Thumbnail { object, cache, out, allow_cold, max_mib, cache_mib } => {
+            use jetstream_transfer::thumbs;
+            let (bucket, name) = split_gs(&object)?;
+            let client = cloud_client()?;
+            let info = client.get_object(&bucket, &name).await.map_err(|e| anyhow::anyhow!("{e}"))?.ok_or_else(|| anyhow::anyhow!("{object} not found"))?;
+            let object = thumbs::ObjectRef {
+                bucket,
+                name,
+                generation: info.generation,
+                size: info.size,
+                content_type: info.content_type,
+                storage_class: info.storage_class,
+            };
+            let cache = thumbs::ThumbCache::open(cache, cache_mib * 1024 * 1024)?;
+            let opts = thumbs::ThumbOptions { max_bytes: max_mib * 1024 * 1024, allow_cold };
+            return match thumbs::thumbnail(&client, &cache, &object, &opts).await {
+                Ok(thumb) => {
+                    if let Some(out) = out {
+                        std::fs::write(&out, &thumb.jpeg)?;
+                    }
+                    print_json(&serde_json::json!({ "bytes": thumb.jpeg.len(), "source": thumb.source }))
+                }
+                Err(skip) => print_json(&skip).map(|_| 2),
+            };
         }
         Command::Bucket { bucket } => {
             let bucket = bucket.trim_start_matches("gs://").trim_end_matches('/');

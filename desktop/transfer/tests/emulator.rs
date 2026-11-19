@@ -696,20 +696,23 @@ mod pause_and_reconnect {
 
     /// Forwards to the emulator; `unplug` drops every connection and refuses new ones, like a
     /// lost internet connection. Counts the bytes sent upstream.
-    struct Proxy {
-        base: String,
+    pub(super) struct Proxy {
+        pub(super) base: String,
         down: Arc<AtomicBool>,
-        sent: Arc<AtomicU64>,
+        pub(super) sent: Arc<AtomicU64>,
+        /// Bytes sent back by the server (downloads).
+        pub(super) received: Arc<AtomicU64>,
         conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     }
 
     impl Proxy {
-        async fn start(upstream: &str) -> Proxy {
+        pub(super) async fn start(upstream: &str) -> Proxy {
             let upstream = upstream.trim_start_matches("http://").to_string();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             let (down, sent, conns) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)), Arc::new(Mutex::new(Vec::new())));
-            let (d, s, c) = (down.clone(), sent.clone(), conns.clone());
+            let received = Arc::new(AtomicU64::new(0));
+            let (d, s, c, r) = (down.clone(), sent.clone(), conns.clone(), received.clone());
             tokio::spawn(async move {
                 loop {
                     let (client, _) = listener.accept().await.unwrap();
@@ -717,7 +720,7 @@ mod pause_and_reconnect {
                         drop(client);
                         continue;
                     }
-                    let (upstream, sent) = (upstream.clone(), s.clone());
+                    let (upstream, sent, received) = (upstream.clone(), s.clone(), r.clone());
                     let handle = tokio::spawn(async move {
                         let Ok(server) = tokio::net::TcpStream::connect(&upstream).await else { return };
                         let (mut cr, mut cw) = client.into_split();
@@ -732,7 +735,12 @@ mod pause_and_reconnect {
                             let _ = sw.shutdown().await;
                         };
                         let downstream = async {
-                            let _ = tokio::io::copy(&mut sr, &mut cw).await;
+                            let mut buf = vec![0u8; 64 * 1024];
+                            loop {
+                                let n = match sr.read(&mut buf).await { Ok(0) | Err(_) => break, Ok(n) => n };
+                                received.fetch_add(n as u64, Ordering::Relaxed);
+                                if cw.write_all(&buf[..n]).await.is_err() { break; }
+                            }
                             let _ = cw.shutdown().await;
                         };
                         tokio::join!(up, downstream);
@@ -740,7 +748,7 @@ mod pause_and_reconnect {
                     c.lock().unwrap().push(handle);
                 }
             });
-            Proxy { base, down, sent, conns }
+            Proxy { base, down, sent, received, conns }
         }
 
         fn unplug(&self) {
@@ -974,5 +982,85 @@ mod composite {
         let (summary, events) = env.run(opts).await;
         assert_eq!((summary.uploaded, summary.composite_files), (1, 0));
         assert!(!events.iter().any(|e| matches!(e, Event::CompositeOff { .. })), "switched off by the user: nothing to report");
+    }
+}
+
+
+/// Thumbnails for the cloud browser: small range reads for camera JPEGs, capped downloads, a cache.
+mod thumbnails {
+    use super::pause_and_reconnect::Proxy;
+    use super::*;
+    use jetstream_transfer::thumbs::{self, test_images, ObjectRef, Skip, Source, ThumbCache, ThumbOptions};
+    use std::sync::atomic::Ordering;
+
+    async fn put(env: &Env, name: &str, data: Vec<u8>, content_type: &str) -> ObjectRef {
+        let url = format!("{}/upload/storage/v1/b/bucket/o?uploadType=media&name={}", env.emulator.base, jetstream_transfer::gcs::encode(name));
+        env.http.post(url).header("Content-Type", content_type).body(data.clone()).send().await.unwrap().error_for_status().unwrap();
+        let info = env.client.get_object("bucket", name).await.unwrap().unwrap();
+        ObjectRef { bucket: "bucket".into(), name: name.into(), generation: info.generation, size: info.size, content_type: info.content_type, storage_class: info.storage_class }
+    }
+
+    #[tokio::test]
+    async fn camera_jpegs_use_their_embedded_preview_and_everything_is_cached() {
+        let Some(env) = Env::new().await else { return };
+        let proxy = Proxy::start(&env.emulator.base).await;
+        let http = GcsClient::http_client();
+        let client = GcsClient::with_base(http.clone(), &proxy.base, Arc::new(TokenProvider::none(http)));
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ThumbCache::open(dir.path(), 50 * 1024 * 1024).unwrap();
+        let opts = ThumbOptions::default();
+
+        // A 4000 x 3000 "camera" JPEG (several hundred KB) with an embedded 160 x 120 preview.
+        let photo = test_images::jpeg_with_exif(4000, 3000, &test_images::jpeg(160, 120), 1);
+        assert!(photo.len() > 300_000, "{}", photo.len());
+        let object = put(&env, "photos/IMG_0001.JPG", photo.clone(), "image/jpeg").await;
+        let before = proxy.received.load(Ordering::Relaxed);
+        let thumb = thumbs::thumbnail(&client, &cache, &object, &opts).await.unwrap();
+        let fetched = proxy.received.load(Ordering::Relaxed) - before;
+        assert_eq!(thumb.source, Source::Embedded);
+        assert!(fetched < 140 * 1024, "read only the start of the file: {fetched} of {} bytes", photo.len());
+
+        // The second time comes from the cache: nothing downloaded.
+        let before = proxy.received.load(Ordering::Relaxed);
+        let again = thumbs::thumbnail(&client, &cache, &object, &opts).await.unwrap();
+        assert_eq!((again.source, again.jpeg == thumb.jpeg), (Source::Cache, true));
+        assert_eq!(proxy.received.load(Ordering::Relaxed), before);
+
+        // A PNG is downloaded whole (it's under the cap) and scaled down.
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(800, 400, image::Rgb([10, 120, 200])))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let object = put(&env, "plots/map.png", png, "image/png").await;
+        let thumb = thumbs::thumbnail(&client, &cache, &object, &opts).await.unwrap();
+        assert_eq!(thumb.source, Source::Full);
+        assert_eq!(image::load_from_memory(&thumb.jpeg).unwrap().width(), 256);
+    }
+
+    #[tokio::test]
+    async fn big_cold_and_non_image_files_are_not_downloaded() {
+        let Some(env) = Env::new().await else { return };
+        let proxy = Proxy::start(&env.emulator.base).await;
+        let http = GcsClient::http_client();
+        let client = GcsClient::with_base(http.clone(), &proxy.base, Arc::new(TokenProvider::none(http)));
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ThumbCache::open(dir.path(), 50 * 1024 * 1024).unwrap();
+
+        let big = put(&env, "big.png", vec![7u8; 3 * 1024 * 1024], "image/png").await;
+        let before = proxy.received.load(Ordering::Relaxed);
+        let small_cap = ThumbOptions { max_bytes: 1024 * 1024, ..Default::default() };
+        assert_eq!(thumbs::thumbnail(&client, &cache, &big, &small_cap).await.unwrap_err(), Skip::TooLarge { size: 3 * 1024 * 1024 });
+        let cold = ObjectRef { storage_class: Some("COLDLINE".into()), ..big.clone() };
+        assert!(matches!(thumbs::thumbnail(&client, &cache, &cold, &ThumbOptions::default()).await, Err(Skip::Cold { .. })));
+        let csv = ObjectRef { name: "data.csv".into(), content_type: Some("text/csv".into()), ..big.clone() };
+        assert_eq!(thumbs::thumbnail(&client, &cache, &csv, &ThumbOptions::default()).await.unwrap_err(), Skip::NotImage);
+        assert_eq!(proxy.received.load(Ordering::Relaxed), before, "nothing downloaded");
+
+        // Not a real image: downloaded once, then remembered.
+        let broken = put(&env, "broken.jpg", b"not really a jpeg".to_vec(), "image/jpeg").await;
+        assert!(matches!(thumbs::thumbnail(&client, &cache, &broken, &ThumbOptions::default()).await, Err(Skip::Unreadable { .. })));
+        let before = proxy.received.load(Ordering::Relaxed);
+        assert!(matches!(thumbs::thumbnail(&client, &cache, &broken, &ThumbOptions::default()).await, Err(Skip::Unreadable { .. })));
+        assert_eq!(proxy.received.load(Ordering::Relaxed), before, "remembered, not downloaded again");
     }
 }

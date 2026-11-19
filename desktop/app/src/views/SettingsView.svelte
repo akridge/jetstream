@@ -7,7 +7,8 @@
   import Monitor from '@lucide/svelte/icons/monitor';
   import { app } from '../lib/state.svelte.js';
   import { api, apiBase } from '../lib/api.js';
-  import { ensureNotificationPermission, openClassic, openUrl } from '../lib/platform.js';
+  import { clearThumbnailCache, ensureNotificationPermission, isDesktop, openClassic, openUrl, setThumbnailCacheLimit, thumbnailCacheInfo } from '../lib/platform.js';
+  import { bytes, count } from '../lib/format.js';
 
   const LIMITS = [[0, 'No limit'], [5, '5 Mbit/s'], [20, '20 Mbit/s'], [50, '50 Mbit/s'], [100, '100 Mbit/s']];
   let custom = $state('');
@@ -30,6 +31,21 @@
     } catch (err) {
       app.toast(`Couldn't save: ${err.message}`, 'error');
     }
+  }
+
+  let thumbCache = $state(null);
+  let thumbCacheMb = $derived(Number(app.prefs.thumb_cache_mb) || 250);
+  let thumbMaxMib = $derived(Number(app.prefs.thumb_max_mib) || 20);
+  $effect(() => {
+    if (isDesktop) thumbnailCacheInfo().then((info) => (thumbCache = info)).catch(() => {});
+  });
+  async function clearThumbs() {
+    thumbCache = await clearThumbnailCache().catch(() => thumbCache);
+    app.toast('Thumbnail cache cleared', 'success', { timeout: 3000 });
+  }
+  async function setThumbLimit(mb) {
+    app.savePrefs({ thumb_cache_mb: mb });
+    thumbCache = await setThumbnailCacheLimit(mb).catch(() => thumbCache);
   }
 
   async function setParts(on) {
@@ -193,6 +209,41 @@
         </span>
       </div>
     </div>
+
+    {#if isDesktop}
+      <div class="card panel">
+        <h2>Cloud storage thumbnails</h2>
+        <p class="sub">
+          Turn thumbnails on with the <strong>Thumbnails</strong> button in Cloud storage. Small copies are kept in a cache on this computer
+          {thumbCache?.dir?.includes('JetStreamData') ? '(in the portable JetStreamData folder)' : ''} so folders open quickly the next time.
+        </p>
+        <div class="limit">
+          <span class="label">Cache</span>
+          <p class="sub">
+            {#if thumbCache}{bytes(thumbCache.bytes)} used by {count(thumbCache.files)} {thumbCache.files === 1 ? 'thumbnail' : 'thumbnails'}{:else}…{/if}
+            <button class="btn sm" disabled={!thumbCache?.bytes} onclick={clearThumbs}>Clear</button>
+          </p>
+          <div class="chips" role="radiogroup" aria-label="Cache size limit">
+            {#each [[100, '100 MB'], [250, '250 MB'], [1000, '1 GB']] as [mb, label] (mb)}
+              <button class="chip" role="radio" aria-checked={thumbCacheMb === mb} class:on={thumbCacheMb === mb} onclick={() => setThumbLimit(mb)}>{label}</button>
+            {/each}
+          </div>
+          <small class="muted">The oldest thumbnails are removed when the cache is full.</small>
+        </div>
+        <div class="limit">
+          <span class="label">Largest image to preview</span>
+          <div class="chips" role="radiogroup" aria-label="Largest image to preview">
+            {#each [10, 20, 50] as mib (mib)}
+              <button class="chip" role="radio" aria-checked={thumbMaxMib === mib} class:on={thumbMaxMib === mib} onclick={() => app.savePrefs({ thumb_max_mib: mib })}>{mib} MB</button>
+            {/each}
+          </div>
+          <small class="muted">
+            Bigger images show a "click to preview" button instead of downloading by themselves. Camera JPEGs usually need only their first 128 KB,
+            whatever their size. Nearline, Coldline and Archive images always wait for a click, because retrieving them is charged.
+          </small>
+        </div>
+      </div>
+    {/if}
 
     <div class="card panel">
       <h2>Appearance &amp; notifications</h2>

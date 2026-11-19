@@ -4,6 +4,7 @@ The Rust core of JetStream, used by the desktop app (as a library) and as a CLI:
 
 - **`sync`:** the upload engine, described below.
 - **`ls gs://bucket/folder/`:** one folder level, folders first, with size, updated time and storage class.
+- **`thumbnail gs://bucket/image.jpg --cache DIR [--out thumb.jpg] [--max-mib 20] [--allow-cold]`:** the cloud browser's thumbnails (JPEG, 256 px). Camera JPEGs use their embedded EXIF preview from a 128 KiB range read. Other images are downloaded only under the cap and decoded with size and memory limits. Nearline, Coldline and Archive objects are skipped unless `--allow-cold`. The cache is keyed by bucket, name and generation and keeps under its size limit by removing the oldest; files that aren't usable images are remembered.
 - **`du gs://bucket/folder/`:** total objects and bytes under a folder, broken down by storage class.
 - **`scan <folder>`:** fast local folder analysis. Subfolders are walked in parallel. It reports:
   - size by kind of file and by file type

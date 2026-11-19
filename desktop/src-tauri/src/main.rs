@@ -24,6 +24,7 @@ use jetstream_transfer::localops;
 use jetstream_transfer::receipt;
 use jetstream_transfer::manifest::{default_data_dir, Manifest};
 use jetstream_transfer::throttle::Throttle;
+use jetstream_transfer::thumbs;
 use jetstream_transfer::fileops::{self, BucketAccess, DeletedPage, Item, OpProgress, OpResult, Plan, PlanSummary, Undo};
 use jetstream_transfer::gcs::GcsClient;
 use jetstream_transfer::scan::{self, ScanOptions, ScanProgress, ScanReport};
@@ -184,6 +185,18 @@ struct Core {
     throttle: Arc<Throttle>,
     /// Watches synced folders for changes (see `watch_folders`).
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    /// Thumbnail cache for the cloud browser (opened on first use).
+    thumbs: std::sync::OnceLock<Arc<thumbs::ThumbCache>>,
+    /// Thumbnails made at once, whatever the UI asks for.
+    thumb_slots: ThumbSlots,
+}
+
+struct ThumbSlots(Arc<tokio::sync::Semaphore>);
+
+impl Default for ThumbSlots {
+    fn default() -> Self {
+        Self(Arc::new(tokio::sync::Semaphore::new(4)))
+    }
 }
 
 impl Core {
@@ -695,6 +708,87 @@ async fn compare_folder(
     Ok(report)
 }
 
+// ----- Thumbnails for the cloud browser --------------------------------------------------------
+
+/// Default thumbnail cache limit; the app sets the user's choice at start.
+const THUMB_CACHE_DEFAULT_MB: u64 = 250;
+
+/// The thumbnail cache: in the OS cache folder, or in JetStreamData for a portable copy (so it
+/// leaves nothing behind on the computer).
+fn thumb_cache(app: &AppHandle) -> Result<Arc<thumbs::ThumbCache>, String> {
+    let core = app.state::<Core>();
+    if let Some(cache) = core.thumbs.get() {
+        return Ok(cache.clone());
+    }
+    let dir = match portable_data_dir() {
+        Some(data) => data.join("cache").join("thumbnails"),
+        None => app.path().app_cache_dir().map_err(|e| e.to_string())?.join("thumbnails"),
+    };
+    let cache = Arc::new(thumbs::ThumbCache::open(dir, THUMB_CACHE_DEFAULT_MB * 1024 * 1024).map_err(|e| format!("{e:#}"))?);
+    Ok(core.thumbs.get_or_init(|| cache).clone())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbRequest {
+    bucket: String,
+    path: String,
+    generation: Option<String>,
+    size: u64,
+    content_type: Option<String>,
+    storage_class: Option<String>,
+    /// Preview cold-storage objects (the user clicked the tile).
+    #[serde(default)]
+    allow_cold: bool,
+    /// Download cap in MiB (default 20); a click on a too-large tile raises it.
+    max_mib: Option<u64>,
+}
+
+/// A thumbnail: `{ data_url, source }`, or why there isn't one (`{ skip: "too_large", size }`,
+/// "cold", "not_image", "unreadable", "error").
+#[tauri::command]
+async fn thumbnail(app: AppHandle, core: tauri::State<'_, Core>, request: ThumbRequest) -> Result<serde_json::Value, String> {
+    use base64::Engine;
+    let cache = thumb_cache(&app)?;
+    let client = core.client()?;
+    let _slot = core.thumb_slots.0.clone().acquire_owned().await.map_err(|e| e.to_string())?;
+    let object = thumbs::ObjectRef {
+        bucket: request.bucket,
+        name: request.path,
+        generation: request.generation,
+        size: request.size,
+        content_type: request.content_type,
+        storage_class: request.storage_class,
+    };
+    let opts = thumbs::ThumbOptions { max_bytes: request.max_mib.unwrap_or(20).max(1) * 1024 * 1024, allow_cold: request.allow_cold };
+    Ok(match thumbs::thumbnail(&client, &cache, &object, &opts).await {
+        Ok(thumb) => serde_json::json!({
+            "data_url": format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&thumb.jpeg)),
+            "source": thumb.source,
+        }),
+        Err(skip) => serde_json::to_value(&skip).map_err(|e| e.to_string())?,
+    })
+}
+
+#[tauri::command]
+fn thumbnail_cache_info(app: AppHandle) -> Result<thumbs::CacheInfo, String> {
+    Ok(thumb_cache(&app)?.info())
+}
+
+#[tauri::command]
+fn clear_thumbnail_cache(app: AppHandle) -> Result<thumbs::CacheInfo, String> {
+    let cache = thumb_cache(&app)?;
+    cache.clear().map_err(|e| format!("{e:#}"))?;
+    Ok(cache.info())
+}
+
+#[tauri::command]
+fn set_thumbnail_cache_limit(app: AppHandle, mb: u64) -> Result<thumbs::CacheInfo, String> {
+    let cache = thumb_cache(&app)?;
+    cache.set_max_bytes(mb.clamp(20, 10_000) * 1024 * 1024);
+    Ok(cache.info())
+}
+
 /// A synced folder to watch for changes.
 #[derive(Deserialize)]
 struct WatchFolder {
@@ -959,6 +1053,10 @@ fn main() {
             list_subfolders,
             watch_folders,
             app_info,
+            thumbnail,
+            thumbnail_cache_info,
+            clear_thumbnail_cache,
+            set_thumbnail_cache_limit,
             make_receipt,
             list_receipts
         ])
