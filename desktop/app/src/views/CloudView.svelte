@@ -31,6 +31,7 @@
   import FileOpDialog from '../components/FileOpDialog.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
   import ThumbTile from '../components/ThumbTile.svelte';
+  import FileCheck from '@lucide/svelte/icons/file-check';
   import LayoutGrid from '@lucide/svelte/icons/layout-grid';
   import { thumbLoader } from '../lib/thumbs.svelte.js';
   import { app } from '../lib/state.svelte.js';
@@ -307,6 +308,7 @@
       { label: 'Move or copy to…', icon: ArrowRightLeft, disabled: !can('storage.objects.get'), run: () => (fileOp = { kind: 'transfer', paths: selectedPaths() }) },
       ...(one?.is_folder ? [{ label: 'Sync to… (gcloud rsync)', icon: FolderSync, run: () => (syncDialog = itemFor(one)) }] : []),
       ...(one?.is_folder ? [{ label: 'Total size', icon: Sigma, run: () => computeTotals(one.path) }] : []),
+      ...(one?.is_folder ? [fixDetailsItem(one.path)] : []),
       'separator',
       {
         label: n > 1 ? `Delete ${n} items` : 'Delete',
@@ -328,9 +330,24 @@
       'separator',
       { label: 'Copy path of this folder', icon: Copy, run: () => copyText(gsPath(prefix), 'Path copied') },
       { label: 'Total size of this folder', icon: Sigma, run: () => computeTotals(prefix) },
+      fixDetailsItem(prefix),
       ...(keepsDeleted ? [{ label: 'Recently deleted', icon: History, run: loadTrash }] : []),
     ];
   }
+
+  /** "Fix file details…" for a folder: with dates from this computer when it's a synced folder. */
+  function fixDetailsItem(path) {
+    const synced = app.presetForCloudPath(bucket, path);
+    const exact = synced && normalizeDest(synced.destination) === normalizeDest(`${bucket}/${path}`);
+    return {
+      label: exact ? 'Fix file details…' : 'Fix file types…',
+      icon: FileCheck,
+      disabled: !can('storage.objects.update'),
+      title: noPermission('storage.objects.update') || "Add missing file types (and, for a synced folder, the original dates) without re-uploading",
+      run: () => (app.fixDetails = { destination: gsPath(path), preset: exact ? synced : null }),
+    };
+  }
+  const normalizeDest = (d) => d.replace(/^gs:\/\//, '').replace(/\/+$/, '');
 
   const selectedPaths = () => selectedEntries.map((e) => e.path);
   const itemFor = (entry) => ({ bucket, path: entry.path, isFolder: entry.is_folder, name: displayName(entry) });
@@ -495,6 +512,19 @@
     );
   }
 
+  const isoFromSecs = (secs) => new Date(secs * 1000).toISOString();
+  const shortDate = (secs) => new Date(secs * 1000).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+  /** "Created … · Modified … · Uploaded …": the original file's dates and the upload time. */
+  function datesTitle(entry) {
+    if (entry.is_folder) return '';
+    const parts = [];
+    if (entry.created) parts.push(`Created ${dateTime(isoFromSecs(entry.created))}`);
+    if (entry.modified) parts.push(`Modified ${dateTime(isoFromSecs(entry.modified))}`);
+    if (entry.updated) parts.push(`Uploaded ${dateTime(entry.updated)}`);
+    if (!entry.modified && entry.updated) parts.push('(the original dates weren\'t recorded when it was uploaded)');
+    return parts.join('\n');
+  }
+
   function iconFor(entry) {
     if (entry.is_folder) return Folder;
     const type = entry.content_type || '';
@@ -590,7 +620,8 @@
             {#each Object.entries(totals.by_storage_class) as [cls, b] (cls)}
               <span class="pill">{cls.toLowerCase()} · {bytes(b)}</span>
             {/each}
-            {#if totals.newest}<span class="muted">updated {relativeTime(totals.newest)}</span>{/if}
+            {#if totals.oldest_modified && totals.newest_modified}<span class="muted" title="Original modified dates of the files inside">files from {shortDate(totals.oldest_modified)}{totals.newest_modified - totals.oldest_modified > 86400 ? ` to ${shortDate(totals.newest_modified)}` : ''}</span>{/if}
+            {#if totals.newest}<span class="muted">uploaded up to {relativeTime(totals.newest)}</span>{/if}
             <button class="btn ghost sm icon" aria-label="Hide" onclick={() => (totals = null)}><X size={13} /></button>
           {/if}
         </div>
@@ -653,7 +684,7 @@
             <div class="thead" role="row">
               <span role="columnheader">Name</span>
               <span role="columnheader" class="num">Size</span>
-              <span role="columnheader">Updated</span>
+              <span role="columnheader" title="When the original file was last modified (from its upload details); otherwise when it was uploaded">Modified</span>
               <span role="columnheader">Class</span>
             </div>
           {/if}
@@ -682,7 +713,7 @@
                   role="row"
                   aria-selected={selected.has(entry.path)}
                   data-index={index}
-                  title={entry.name}
+                  title={[entry.name, datesTitle(entry)].filter(Boolean).join('\n')}
                   onclick={(e) => rowClick(e, index)}
                   ondblclick={() => entry.is_folder && open(bucket, entry.path, { remember: false })}
                   oncontextmenu={(e) => rowMenu(e, index)}
@@ -742,7 +773,7 @@
                 {/if}
               </span>
               <span class="num" role="cell">{entry.size !== null && entry.size !== undefined ? bytes(entry.size) : ''}</span>
-              <span class="muted" role="cell" title={entry.updated ? dateTime(entry.updated) : ''}>{entry.updated ? relativeTime(entry.updated) : ''}</span>
+              <span class="muted" role="cell" title={datesTitle(entry)}>{#if entry.modified}{relativeTime(isoFromSecs(entry.modified))}{:else if entry.updated}{relativeTime(entry.updated)} <span class="uploaded">(uploaded)</span>{/if}</span>
               <span class="muted" role="cell">{entry.storage_class ? entry.storage_class.toLowerCase() : ''}</span>
             </div>
           {:else}
@@ -946,6 +977,10 @@
   }
   .table:focus {
     outline: none;
+  }
+  .uploaded {
+    font-size: 11.5px;
+    opacity: 0.8;
   }
   .toggled {
     color: var(--accent);

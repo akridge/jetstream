@@ -34,6 +34,8 @@ walkdir = "2"
 # Thumbnails in the cloud browser (decoders only for common image formats).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 kamadak-exif = "0.6"
+# Content types for uploads, from file extensions (as gcloud does).
+mime_guess = "2"
 
 [dev-dependencies]
 tempfile = "3"

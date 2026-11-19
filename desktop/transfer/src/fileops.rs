@@ -36,6 +36,7 @@ pub const PERMISSIONS: &[&str] = &[
     "storage.objects.create",
     "storage.objects.delete",
     "storage.objects.restore",
+    "storage.objects.update",
 ];
 
 /// A selected file (`path` is the object name) or folder (`path` ends with "/").

@@ -20,6 +20,7 @@ use jetstream_transfer::audit::{self, AuditProgress, AuditReport};
 use jetstream_transfer::auth::TokenProvider;
 use jetstream_transfer::browse::{self, FolderTotals, Listing};
 use jetstream_transfer::compare::{self, CompareReport};
+use jetstream_transfer::details;
 use jetstream_transfer::localops;
 use jetstream_transfer::receipt;
 use jetstream_transfer::manifest::{default_data_dir, Manifest};
@@ -177,6 +178,8 @@ struct Core {
     audits: Mutex<HashMap<String, Arc<AuditProgress>>>,
     /// Planned (not yet run) file operations, by operation id.
     plans: Mutex<HashMap<String, (Plan, bool)>>,
+    /// Planned "Fix file details" runs, by operation id.
+    fix_plans: Mutex<HashMap<String, details::FixPlan>>,
     /// Running file operations, for cancelling.
     running: Mutex<HashMap<String, Arc<OpProgress>>>,
     /// How to undo finished operations (with the bucket's soft-delete setting).
@@ -708,6 +711,43 @@ async fn compare_folder(
     Ok(report)
 }
 
+// ----- Fix file details (types and original dates on objects already uploaded) ------------------
+
+/// Plan a fix of gs://destination: content types from file names, and (with `local_path`, the
+/// folder synced there) the original files' dates. Read-only; run it with `run_fix_details`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn plan_fix_details(
+    core: tauri::State<'_, Core>,
+    op_id: String,
+    destination: String,
+    local_path: Option<String>,
+    exclude_patterns: Vec<String>,
+    exclude_folders: Vec<String>,
+    recursive: Option<bool>,
+) -> Result<details::FixPlan, String> {
+    let client = core.client()?;
+    let excludes = compare::exclude_regexes(&exclude_patterns, &exclude_folders).map_err(|e| format!("{e:#}"))?;
+    let manifest_path = portable_data_dir().unwrap_or_else(default_data_dir).join("transfer-manifest.db");
+    let manifest = if manifest_path.exists() { Manifest::open(&manifest_path).ok() } else { None };
+    let local = local_path.as_deref().map(|p| (std::path::Path::new(p), excludes.as_slice(), recursive.unwrap_or(true)));
+    let plan = details::plan_fix(&client, &destination, local, manifest.as_ref(), &OpProgress::default())
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    core.fix_plans.lock().unwrap().insert(op_id, plan.clone());
+    let mut summary = plan;
+    summary.items.clear();
+    Ok(summary)
+}
+
+/// Apply a planned fix; emits "cloud-op-progress".
+#[tauri::command]
+async fn run_fix_details(app: AppHandle, core: tauri::State<'_, Core>, op_id: String) -> Result<OpResult, String> {
+    let plan = core.fix_plans.lock().unwrap().remove(&op_id).ok_or("This fix was already run or has expired; check again.")?;
+    let client = core.client()?;
+    track(&app, &core, &op_id, |progress| async move { Ok(details::apply_fix(&client, &plan, &progress).await) }).await
+}
+
 // ----- Thumbnails for the cloud browser --------------------------------------------------------
 
 /// Default thumbnail cache limit; the app sets the user's choice at start.
@@ -1054,6 +1094,8 @@ fn main() {
             watch_folders,
             app_info,
             thumbnail,
+            plan_fix_details,
+            run_fix_details,
             thumbnail_cache_info,
             clear_thumbnail_cache,
             set_thumbnail_cache_limit,

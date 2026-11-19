@@ -69,7 +69,11 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - read the job's output
   - cancel a job, run it again, or "upload for real" after a preview
   - show the job's log file
-- **Cloud storage:** a file manager for buckets. Browse folder by folder, with sizes, last-updated times and storage classes.
+- **Cloud storage:** a file manager for buckets. Browse folder by folder, with sizes, the original files' modified dates and storage classes.
+  - **File details:** each upload records its file type (from the extension, like gcloud) and the original file's modified and created dates (custom metadata `goog-reserved-file-mtime`, as gcloud uses, and `jetstream-file-created`).
+    - The **Modified** column shows the original modified date; hover for created, modified and uploaded. Files uploaded without one show their upload time, marked "(uploaded)". **Size** on a folder also shows the range of original dates inside it.
+    - Why the Cloud console looks different: its **Created** and **Last modified** are always when the file reached the bucket (or its details last changed). Cloud Storage sets those, and no uploader can change them. The original dates are under each object's **Custom metadata** in the console. Folders have no dates in normal buckets because they aren't real objects.
+    - **Fix file details in the cloud…** (folder card menu, or right-click a folder in Cloud storage) adds what older uploads are missing: the file type, and the original dates from the synced folder on this computer for files that are the same as their cloud copy (checked by checksum). It shows what will change first, then updates each file's details in place: nothing is re-uploaded, and files changed since the check are left alone. For a cloud folder that isn't synced, **Fix file types…** sets the types only. Needs permission to update objects (`storage.objects.update`).
   - **Thumbnails** (off until you turn it on with the toolbar button; remembered): images show as a grid of thumbnails. Selection, right-click, rename and the rest work the same. Designed not to waste downloads or disk:
     - only the tiles on screen load, at most 4 at a time, and leaving the folder stops the rest
     - camera JPEGs use the preview embedded in the file, so only their first 128 KB is downloaded

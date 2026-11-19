@@ -364,11 +364,13 @@ async fn upload_one(
         return Err("folders are uploaded as a sync job, not here".into());
     }
     let size = meta.len();
+    // The file's type and original dates go on the object.
+    let details = crate::gcs::UploadExtras::for_file(&meta, name);
     if size <= SINGLE_REQUEST_LIMIT {
         let data = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
         let crc = crc32c::crc32c(&data);
         throttle.take(size, cancelled).await;
-        return match retry(|| client.upload_multipart(bucket, name, data.clone(), crc, true)).await {
+        return match retry(|| client.upload_multipart_with(bucket, name, data.clone(), crc, true, &details)).await {
             Ok(_) => Ok(Some(size)),
             Err(GcsError::AlreadyExists) => Ok(None),
             Err(e) => Err(e.to_string()),
@@ -377,7 +379,7 @@ async fn upload_one(
 
     let owned = path.to_path_buf();
     let crc = tokio::task::spawn_blocking(move || file_crc(&owned)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-    let session = match retry(|| client.start_resumable(bucket, name, size, crc, true)).await {
+    let session = match retry(|| client.start_resumable_extras(bucket, name, size, Some(crc), true, &details)).await {
         Ok(uri) => uri,
         Err(GcsError::AlreadyExists) => return Ok(None),
         Err(e) => return Err(e.to_string()),

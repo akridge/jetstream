@@ -20,6 +20,10 @@ pub struct Entry {
     pub content_type: Option<String>,
     /// Changes whenever the object is replaced (thumbnail cache key).
     pub generation: Option<String>,
+    /// The original file's modified and created times (seconds), when the uploader recorded
+    /// them; `updated` is when it was uploaded.
+    pub modified: Option<i64>,
+    pub created: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +67,8 @@ pub async fn list_folder(
             storage_class: None,
             content_type: None,
             generation: None,
+            modified: None,
+            created: None,
         })
         .collect();
     entries.extend(
@@ -71,6 +77,8 @@ pub async fn list_folder(
             // The zero-byte "folder marker" some tools create for the folder itself.
             .filter(|o| o.name != prefix)
             .map(|o| Entry {
+                modified: o.file_mtime(),
+                created: o.file_created(),
                 name: o.name.strip_prefix(&prefix).unwrap_or(&o.name).to_string(),
                 path: o.name,
                 is_folder: false,
@@ -91,6 +99,9 @@ pub struct FolderTotals {
     /// Bytes per storage class (STANDARD, NEARLINE, ...).
     pub by_storage_class: BTreeMap<String, u64>,
     pub newest: Option<String>,
+    /// Oldest and newest original file modified times (seconds) among files that have one.
+    pub oldest_modified: Option<i64>,
+    pub newest_modified: Option<i64>,
     /// Stopped after `limit` objects.
     pub truncated: bool,
 }
@@ -106,6 +117,10 @@ pub async fn folder_totals(client: &GcsClient, bucket: &str, prefix: &str, limit
         for object in page.objects {
             totals.objects += 1;
             totals.bytes += object.size;
+            if let Some(m) = object.file_mtime() {
+                totals.oldest_modified = Some(totals.oldest_modified.map_or(m, |o| o.min(m)));
+                totals.newest_modified = Some(totals.newest_modified.map_or(m, |n| n.max(m)));
+            }
             *totals.by_storage_class.entry(object.storage_class.unwrap_or_else(|| "STANDARD".into())).or_default() += object.size;
             if object.updated > totals.newest {
                 totals.newest = object.updated;

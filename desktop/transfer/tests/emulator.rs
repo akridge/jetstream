@@ -1064,3 +1064,113 @@ mod thumbnails {
         assert_eq!(proxy.received.load(Ordering::Relaxed), before, "remembered, not downloaded again");
     }
 }
+
+/// What's recorded on each object: content type and the source file's dates.
+mod file_details {
+    use super::*;
+    use jetstream_transfer::fileops::OpProgress;
+    use jetstream_transfer::gcs::{FILE_CREATED_KEY, FILE_MTIME_KEY};
+    use jetstream_transfer::localops;
+    use jetstream_transfer::throttle::Throttle;
+
+    fn mtime_ns(path: &Path) -> i64 {
+        std::fs::metadata(path).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as i64
+    }
+
+    async fn raw(env: &Env, name: &str) -> serde_json::Value {
+        env.client.get_object_raw("bucket", name).await.unwrap().expect("object")
+    }
+
+    #[tokio::test]
+    async fn uploads_record_their_type_and_original_dates() {
+        let Some(env) = Env::new().await else { return };
+        env.write("photos/IMG_1.JPG", &big(5000, 1));
+        env.write("casts.csv", b"depth,temp\n1,20\n");
+        env.write("sst.nc", &big(3 * 1024 * 1024, 2)); // resumable
+        env.write("big.bin", &big(5 * 1024 * 1024, 3)); // parallel parts
+        env.write("notes.zzz", b"?");
+        set_mtime(&env.src().join("casts.csv"), 86_400 * 400);
+        let mut opts = env.options();
+        opts.composite_threshold = 4 * 1024 * 1024;
+        opts.composite_part_size = 1024 * 1024;
+        let (summary, _) = env.run(opts.clone()).await;
+        assert_eq!((summary.uploaded, summary.composite_files), (5, 1), "{summary:?}");
+
+        for (name, expected) in [
+            ("data/photos/IMG_1.JPG", "image/jpeg"),
+            ("data/casts.csv", "text/csv"),
+            ("data/sst.nc", "application/x-netcdf"),
+            ("data/big.bin", "application/octet-stream"),
+            ("data/notes.zzz", "application/octet-stream"),
+        ] {
+            let object = raw(&env, name).await;
+            assert_eq!(object["contentType"], expected, "{name}");
+            assert!(object["metadata"][FILE_MTIME_KEY].as_str().is_some(), "{name}: modified time");
+        }
+        let csv = raw(&env, "data/casts.csv").await;
+        let mtime: i64 = csv["metadata"][FILE_MTIME_KEY].as_str().unwrap().parse().unwrap();
+        let local = mtime_ns(&env.src().join("casts.csv")) / 1_000_000_000;
+        assert_eq!(mtime, local, "the original modified time, not the upload time");
+        // Created times where the file system records them (most do; some Linux ones don't).
+        if std::fs::metadata(env.src().join("casts.csv")).unwrap().created().is_ok() {
+            assert!(csv["metadata"][FILE_CREATED_KEY].as_str().is_some(), "created time recorded");
+            assert!(raw(&env, "data/big.bin").await["metadata"][FILE_CREATED_KEY].as_str().is_some(), "parallel parts too");
+        }
+        // Nothing to do on the next sync.
+        let (again, _) = env.run(opts).await;
+        assert_eq!(again.uploaded, 0);
+
+        // Files uploaded from the Cloud storage view too.
+        let up = localops::upload_files(&env.client, &[env.src().join("photos/IMG_1.JPG")], "bucket", "drop", &Throttle::default(), &OpProgress::default()).await.unwrap();
+        assert_eq!(up.done, 1);
+        let dropped = raw(&env, "drop/IMG_1.JPG").await;
+        assert_eq!(dropped["contentType"], "image/jpeg");
+        assert!(dropped["metadata"][FILE_MTIME_KEY].as_str().is_some());
+    }
+
+    /// Upload like older versions did: binary type, no dates.
+    async fn old_style_upload(env: &Env, name: &str, data: &[u8]) {
+        let url = format!("{}/upload/storage/v1/b/bucket/o?uploadType=media&name={}", env.emulator.base, jetstream_transfer::gcs::encode(name));
+        env.http.post(url).header("Content-Type", "application/octet-stream").body(data.to_vec()).send().await.unwrap().error_for_status().unwrap();
+    }
+
+    #[tokio::test]
+    async fn fix_details_adds_types_and_dates_without_re_uploading() {
+        let Some(env) = Env::new().await else { return };
+        use jetstream_transfer::details::{apply_fix, plan_fix};
+        let files = [("photos/a.jpg", big(4000, 1)), ("tables/casts.csv", b"d,t\n1,2\n".to_vec()), ("raw/blob.zzz", big(100, 2)), ("changed.png", big(300, 3))];
+        for (rel, data) in &files {
+            env.write(rel, data);
+            old_style_upload(&env, &format!("data/{rel}"), data).await;
+        }
+        env.write("changed.png", &big(301, 4)); // edited since: not the same file, so no dates
+        old_style_upload(&env, "data/only_in_cloud.tif", &big(50, 5)).await;
+        let generation_before = raw(&env, "data/photos/a.jpg").await["generation"].clone();
+
+        let local = (env.src(), Vec::new(), true);
+        let plan = plan_fix(&env.client, "gs://bucket/data", Some((local.0.as_path(), local.1.as_slice(), local.2)), None, &OpProgress::default()).await.unwrap();
+        assert_eq!(plan.objects, 5);
+        assert_eq!(plan.types, 4, "jpg, csv, png, tif get a type; .zzz stays binary: {plan:?}");
+        assert_eq!(plan.dates, 3, "the three files that are the same as on this computer");
+        assert_eq!((plan.not_local, plan.different, plan.read_files), (1, 1, 3));
+        assert_eq!(plan.by_type.get("image/jpeg"), Some(&1));
+
+        let result = apply_fix(&env.client, &plan, &OpProgress::default()).await;
+        assert_eq!((result.done, result.failed, result.skipped), (5, 0, 0), "{result:?}");
+        let fixed = raw(&env, "data/photos/a.jpg").await;
+        assert_eq!(fixed["contentType"], "image/jpeg");
+        assert_eq!(fixed["generation"], generation_before, "same content: not re-uploaded");
+        let mtime: i64 = fixed["metadata"][FILE_MTIME_KEY].as_str().unwrap().parse().unwrap();
+        assert_eq!(mtime, std::fs::metadata(env.src().join("photos/a.jpg")).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64);
+        assert_eq!(raw(&env, "data/only_in_cloud.tif").await["contentType"], "image/tiff");
+        assert!(raw(&env, "data/changed.png").await["metadata"][FILE_MTIME_KEY].is_null(), "no dates for a different file");
+        assert_eq!(env.object("data/photos/a.jpg").await.unwrap().1, files[0].1);
+
+        // Nothing left to do.
+        let again = plan_fix(&env.client, "gs://bucket/data", Some((local.0.as_path(), local.1.as_slice(), local.2)), None, &OpProgress::default()).await.unwrap();
+        assert!(again.items.is_empty(), "{again:?}");
+
+        // "Changed after planning: left alone" is checked in tests/stall.rs: fake-gcs-server
+        // reports metagenerations but doesn't enforce ifMetagenerationMatch.
+    }
+}

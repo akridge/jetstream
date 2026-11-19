@@ -230,6 +230,8 @@ pub(crate) struct LocalFile {
     pub(crate) rel: String,
     pub(crate) size: u64,
     pub(crate) mtime_ns: i64,
+    /// When the file was created (seconds), where the file system records it.
+    pub(crate) created_secs: Option<i64>,
 }
 
 impl LocalFile {
@@ -357,7 +359,8 @@ pub(crate) fn scan(source: &Path, excludes: &[Regex], recursive: bool) -> Result
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_nanos() as i64)
             .unwrap_or(0);
-        result.files.push(LocalFile { abs: entry.into_path(), rel, size: meta.len(), mtime_ns });
+        let created_secs = meta.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+        result.files.push(LocalFile { abs: entry.into_path(), rel, size: meta.len(), mtime_ns, created_secs });
     }
     Ok(result)
 }
@@ -930,9 +933,21 @@ fn retrying(ctx: &Ctx, file: &LocalFile, attempt: u32, error: &str) {
     });
 }
 
+/// The file's type and original dates, recorded on its object.
+fn details(file: &LocalFile) -> UploadExtras {
+    UploadExtras {
+        mtime_secs: Some(file.mtime_secs()),
+        created_secs: file.created_secs,
+        content_type: Some(crate::gcs::guess_content_type(&file.rel)),
+        ..Default::default()
+    }
+}
+
 fn extras(ctx: &Ctx, file: &LocalFile) -> UploadExtras {
     UploadExtras {
         mtime_secs: Some(file.mtime_secs()),
+        created_secs: file.created_secs,
+        content_type: Some(crate::gcs::guess_content_type(&file.rel)),
         live: Some(ctx.live_bytes.clone()),
         throttle: Some(ctx.opts.throttle.clone()),
         cancel: Some(ctx.cancel.clone()),
@@ -1052,7 +1067,7 @@ async fn upload_resumable(
         crc: Some(record.crc32c),
         key: file.rel.clone(),
         no_clobber: ctx.opts.no_clobber,
-        mtime_secs: Some(file.mtime_secs()),
+        details: details(file),
         chunk: ctx.chunk_size,
     };
     upload_range(ctx, file, record, &range).await
@@ -1071,7 +1086,7 @@ struct Range {
     /// Where its resumable session is saved in the manifest.
     key: String,
     no_clobber: bool,
-    mtime_secs: Option<i64>,
+    details: UploadExtras,
     chunk: usize,
 }
 
@@ -1119,7 +1134,7 @@ async fn upload_range(ctx: &Ctx, file: &LocalFile, record: &FileRecord, range: &
         }
         let uri = match &session {
             Some(uri) => uri.clone(),
-            None => match ctx.client.start_resumable_opt(&ctx.opts.bucket, &range.name, size, range.crc, range.no_clobber, range.mtime_secs).await {
+            None => match ctx.client.start_resumable_extras(&ctx.opts.bucket, &range.name, size, range.crc, range.no_clobber, &range.details).await {
                 Ok(uri) => {
                     let _ = ctx.manifest.save_session(&ctx.dest, &range.key, &session_record, &uri);
                     session = Some(uri.clone());
@@ -1282,7 +1297,7 @@ async fn upload_composite(ctx: &Ctx, file: &LocalFile, record: &FileRecord, name
                     crc: None,
                     key: format!("{}#part{i}", file.rel),
                     no_clobber: false,
-                    mtime_secs: None,
+                    details: UploadExtras { content_type: Some("application/octet-stream".into()), ..Default::default() },
                     chunk,
                 };
                 upload_range(ctx, file, record, &range).await.map(|_| 0)
@@ -1311,7 +1326,7 @@ async fn upload_composite(ctx: &Ctx, file: &LocalFile, record: &FileRecord, name
         if ctx.cancelled() {
             return Err(UploadError::Cancelled);
         }
-        match ctx.client.compose(&ctx.opts.bucket, name, &names, ctx.opts.no_clobber, Some(file.mtime_secs())).await {
+        match ctx.client.compose(&ctx.opts.bucket, name, &names, ctx.opts.no_clobber, &details(file)).await {
             Ok(info) => break info,
             Err(GcsError::AlreadyExists) => {
                 delete_parts(ctx, &names).await;
@@ -1437,7 +1452,7 @@ mod tests {
         assert_eq!(top_segment("top.txt"), "");
         assert!(is_locked_error("could not read file: The process cannot access the file because it is being used by another process. (os error 32)"));
         assert!(!is_locked_error("could not read file: permission denied (os error 13)"));
-        let f = LocalFile { abs: PathBuf::new(), rel: String::new(), size: 0, mtime_ns: 1_700_000_000_999_999_999 };
+        let f = LocalFile { abs: PathBuf::new(), rel: String::new(), size: 0, mtime_ns: 1_700_000_000_999_999_999, created_secs: None };
         assert_eq!(f.mtime_secs(), 1_700_000_000);
     }
 }

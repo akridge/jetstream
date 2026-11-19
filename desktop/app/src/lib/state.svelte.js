@@ -95,6 +95,8 @@ class AppState {
    * yet: their buttons stay disabled and the card says "Starting…", so a slow start never
    * invites a second click. */
   starting = $state({});
+  /** The "Fix file details" dialog: { destination, preset? } or null. */
+  fixDetails = $state(null);
   /** The "Add several folders" dialog: { parent?, paths? } or null. */
   addFoldersDialog = $state(null);
   /** Folders (by preset id) to upload as soon as their running preview finishes. */

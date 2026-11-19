@@ -159,6 +159,7 @@
           <button role="menuitem" onclick={() => app.editFolder(preset)}>Edit…</button>
           <button role="menuitem" onclick={() => app.compareFolder(preset)}>Compare with cloud</button>
           <button role="menuitem" onclick={() => { menuOpen = false; folderStatus.check(preset, { soon: true }); }}>Check for changes now</button>
+          <button role="menuitem" title="Add missing file types and the original files' dates to what's already uploaded (nothing is re-uploaded)" onclick={() => { menuOpen = false; app.fixDetails = { destination: `gs://${normalizeDestination(preset.destination)}/`, preset }; }}>Fix file details in the cloud…</button>
           <button role="menuitem" onclick={() => { menuOpen = false; app.createReceipt(preset); }}>Make a receipt now</button>
           <button role="menuitem" onclick={() => openCloud()}>Open in Cloud storage</button>
           {#if isDesktop}

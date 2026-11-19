@@ -198,6 +198,18 @@ async function withOpProgress(opId, onProgress, call) {
   }
 }
 
+/** Plan "Fix file details" for gs://destination (types; dates too with localPath). Read-only. */
+export async function planFixDetails(opId, destination, { localPath = null, excludePatterns = [], excludeFolders = [], recursive = true } = {}) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('plan_fix_details', { opId, destination, localPath, excludePatterns, excludeFolders, recursive });
+}
+
+/** Apply a planned fix; onProgress({ done, skipped, failed }). */
+export function runFixDetails(opId, onProgress) {
+  if (!isDesktop) return Promise.reject(desktopOnly());
+  return withOpProgress(opId, onProgress, () => invoke('run_fix_details', { opId }));
+}
+
 /** Run a planned operation; onProgress({done, skipped, failed, bytes}). */
 export function runCloudOp(opId, onProgress) {
   return withOpProgress(opId, onProgress, () => invoke('run_cloud_op', { opId }));

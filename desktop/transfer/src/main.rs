@@ -168,6 +168,25 @@ enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+    /// Add missing file types (and, with --local, the original files' dates) to objects already
+    /// in gs://bucket/prefix by updating their metadata. A plan unless --apply.
+    FixDetails {
+        destination: String,
+        /// The folder synced to it (for the original dates).
+        #[arg(long)]
+        local: Option<PathBuf>,
+        #[arg(long = "exclude")]
+        excludes: Vec<String>,
+        #[arg(long = "exclude-folder")]
+        exclude_folders: Vec<String>,
+        #[arg(long)]
+        no_recursive: bool,
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Make the changes (otherwise only report what would change).
+        #[arg(long)]
+        apply: bool,
+    },
     /// Make a thumbnail of an image in a bucket (cached), as the cloud browser does.
     Thumbnail {
         /// gs://bucket/path/to/image.jpg
@@ -377,6 +396,20 @@ async fn run() -> Result<i32> {
                 "result": receipt.result, "totals": receipt.totals, "csv": csv, "json": json,
             }))?;
             return Ok(if receipt.result == "complete" { 0 } else { 2 });
+        }
+        Command::FixDetails { destination, local, excludes, exclude_folders, no_recursive, manifest, apply } => {
+            let regexes = jetstream_transfer::compare::exclude_regexes(&excludes, &exclude_folders)?;
+            let path = manifest.unwrap_or_else(|| default_data_dir().join("transfer-manifest.db"));
+            let manifest = if path.exists() { Manifest::open(&path).ok() } else { None };
+            let client = cloud_client()?;
+            let local = local.as_deref().map(|dir| (dir, regexes.as_slice(), !no_recursive));
+            let plan = jetstream_transfer::details::plan_fix(&client, &destination, local, manifest.as_ref(), &OpProgress::default()).await?;
+            if !apply {
+                return print_json(&plan);
+            }
+            let result = jetstream_transfer::details::apply_fix(&client, &plan, &OpProgress::default()).await;
+            print_json(&serde_json::json!({ "plan": plan, "result": result }))?;
+            return Ok(if result.failed > 0 { 2 } else { 0 });
         }
         Command::Thumbnail { object, cache, out, allow_cold, max_mib, cache_mib } => {
             use jetstream_transfer::thumbs;

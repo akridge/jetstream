@@ -6,6 +6,7 @@
   import DropOverlay from './components/DropOverlay.svelte';
   import FolderDialog from './components/FolderDialog.svelte';
   import AddFoldersDialog from './components/AddFoldersDialog.svelte';
+  import FixDetailsDialog from './components/FixDetailsDialog.svelte';
   import FoldersView from './views/FoldersView.svelte';
   import ActivityView from './views/ActivityView.svelte';
   import SettingsView from './views/SettingsView.svelte';
@@ -80,6 +81,11 @@
       {/if}
     </main>
   </div>
+  {#if app.fixDetails}
+    {#key app.fixDetails}
+      <FixDetailsDialog dialog={app.fixDetails} />
+    {/key}
+  {/if}
   {#if app.addFoldersDialog}
     <AddFoldersDialog bind:this={addRef} dialog={app.addFoldersDialog} />
   {/if}

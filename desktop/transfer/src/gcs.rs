@@ -37,15 +37,39 @@ pub fn crc32c_b64(crc: u32) -> String {
 
 /// Upload metadata: name, checksum (verified by Cloud Storage) and, when known, the source
 /// file's modified time the way `gcloud storage rsync` records it.
-fn object_metadata(name: &str, crc: impl Into<Option<u32>>, mtime_secs: Option<i64>) -> serde_json::Value {
-    let mut metadata = serde_json::json!({ "name": name });
+fn object_metadata(name: &str, crc: impl Into<Option<u32>>, extras: &UploadExtras) -> serde_json::Value {
+    let mut metadata = serde_json::json!({ "name": name, "contentType": extras.content_type_for(name) });
     if let Some(crc) = crc.into() {
         metadata["crc32c"] = serde_json::json!(crc32c_b64(crc));
     }
-    if let Some(mtime) = mtime_secs {
-        metadata["metadata"] = serde_json::json!({ FILE_MTIME_KEY: mtime.to_string() });
+    let custom = file_dates(extras);
+    if !custom.is_empty() {
+        metadata["metadata"] = serde_json::Value::Object(custom);
     }
     metadata
+}
+
+/// The source file's dates as custom metadata (modified the way gcloud records it, plus created).
+fn file_dates(extras: &UploadExtras) -> serde_json::Map<String, serde_json::Value> {
+    let mut custom = serde_json::Map::new();
+    if let Some(mtime) = extras.mtime_secs {
+        custom.insert(FILE_MTIME_KEY.into(), mtime.to_string().into());
+    }
+    if let Some(created) = extras.created_secs {
+        custom.insert(FILE_CREATED_KEY.into(), created.to_string().into());
+    }
+    custom
+}
+
+/// The content type for an object name, from its extension (like gcloud); binary if unknown.
+pub fn guess_content_type(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    // Common science formats mime_guess doesn't know.
+    let special = [(".nc", "application/x-netcdf"), (".nc4", "application/x-netcdf"), (".h5", "application/x-hdf5"), (".hdf5", "application/x-hdf5"), (".parquet", "application/vnd.apache.parquet")];
+    if let Some((_, t)) = special.iter().find(|(ext, _)| lower.ends_with(ext)) {
+        return t.to_string();
+    }
+    mime_guess::from_path(name).first_raw().unwrap_or("application/octet-stream").to_string()
 }
 
 pub fn parse_crc32c_b64(value: &str) -> Option<u32> {
@@ -120,15 +144,25 @@ pub struct ObjectInfo {
     /// Custom metadata; `goog-reserved-file-mtime` holds the source file's modified time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
+    /// Changes whenever the object's metadata changes (for conditional metadata updates).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metageneration: Option<String>,
 }
 
 /// Custom metadata key `gcloud storage rsync` uses for a file's modified time (seconds).
 pub const FILE_MTIME_KEY: &str = "goog-reserved-file-mtime";
+/// The source file's created time (seconds), recorded by JetStream (gcloud doesn't keep it).
+pub const FILE_CREATED_KEY: &str = "jetstream-file-created";
 
 impl ObjectInfo {
     /// The source file's modified time (seconds since the epoch), if the uploader recorded it.
     pub fn file_mtime(&self) -> Option<i64> {
         self.metadata.as_ref()?.get(FILE_MTIME_KEY)?.trim().parse().ok()
+    }
+
+    /// The source file's created time, if JetStream recorded it.
+    pub fn file_created(&self) -> Option<i64> {
+        self.metadata.as_ref()?.get(FILE_CREATED_KEY)?.trim().parse().ok()
     }
 }
 
@@ -137,6 +171,10 @@ impl ObjectInfo {
 pub struct UploadExtras {
     /// Source file modified time (seconds), stored as `goog-reserved-file-mtime`.
     pub mtime_secs: Option<i64>,
+    /// Source file created time (seconds), stored as `jetstream-file-created`.
+    pub created_secs: Option<i64>,
+    /// Content type; guessed from the name when not given.
+    pub content_type: Option<String>,
     /// Incremented as body bytes are handed to the network, for live progress. Bytes counted
     /// for a request that then fails are subtracted again.
     pub live: Option<Arc<AtomicU64>>,
@@ -148,6 +186,16 @@ pub struct UploadExtras {
 }
 
 impl UploadExtras {
+    /// Details of a local file: its dates and the content type for `name`.
+    pub fn for_file(meta: &std::fs::Metadata, name: &str) -> Self {
+        let secs = |t: std::io::Result<std::time::SystemTime>| t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+        Self { mtime_secs: secs(meta.modified()), created_secs: secs(meta.created()), content_type: Some(guess_content_type(name)), ..Default::default() }
+    }
+
+    fn content_type_for(&self, name: &str) -> String {
+        self.content_type.clone().unwrap_or_else(|| guess_content_type(name))
+    }
+
     fn interrupted(&self) -> bool {
         self.throttle.as_ref().is_some_and(|t| t.is_paused()) || self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))
     }
@@ -407,10 +455,11 @@ impl GcsClient {
         extras: &UploadExtras,
     ) -> Result<ObjectInfo, GcsError> {
         let boundary = format!("jetstream-{:016x}", rand::random::<u64>());
-        let metadata = object_metadata(name, crc, extras.mtime_secs);
+        let metadata = object_metadata(name, crc, extras);
+        let content_type = extras.content_type_for(name);
         let mut body = Vec::with_capacity(data.len() + 512);
         body.extend_from_slice(
-            format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n")
+            format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n--{boundary}\r\nContent-Type: {content_type}\r\n\r\n")
                 .as_bytes(),
         );
         body.extend_from_slice(&data);
@@ -451,7 +500,7 @@ impl GcsClient {
         no_clobber: bool,
         mtime_secs: Option<i64>,
     ) -> Result<String, GcsError> {
-        self.start_resumable_opt(bucket, name, size, Some(crc), no_clobber, mtime_secs).await
+        self.start_resumable_extras(bucket, name, size, Some(crc), no_clobber, &UploadExtras { mtime_secs, ..Default::default() }).await
     }
 
     /// Start a resumable upload; without `crc` the server doesn't check the content (used for
@@ -465,6 +514,19 @@ impl GcsClient {
         no_clobber: bool,
         mtime_secs: Option<i64>,
     ) -> Result<String, GcsError> {
+        self.start_resumable_extras(bucket, name, size, crc, no_clobber, &UploadExtras { mtime_secs, ..Default::default() }).await
+    }
+
+    /// Start a resumable upload with the file's details (type, dates).
+    pub async fn start_resumable_extras(
+        &self,
+        bucket: &str,
+        name: &str,
+        size: u64,
+        crc: Option<u32>,
+        no_clobber: bool,
+        extras: &UploadExtras,
+    ) -> Result<String, GcsError> {
         let mut url = format!(
             "{}/upload/storage/v1/b/{}/o?uploadType=resumable&name={}",
             self.base,
@@ -474,14 +536,14 @@ impl GcsClient {
         if no_clobber {
             url.push_str("&ifGenerationMatch=0");
         }
-        let metadata = object_metadata(name, crc, mtime_secs);
+        let metadata = object_metadata(name, crc, extras);
         let response = self
             .send(
                 self.http
                     .post(url)
                     .timeout(Duration::from_secs(120))
                     .header(CONTENT_TYPE, "application/json; charset=UTF-8")
-                    .header("X-Upload-Content-Type", "application/octet-stream")
+                    .header("X-Upload-Content-Type", extras.content_type_for(name))
                     .header("X-Upload-Content-Length", size.to_string())
                     .body(metadata.to_string()),
             )
@@ -599,7 +661,7 @@ impl GcsClient {
     ) -> Result<DirPage> {
         let mut url = format!(
             "{}/storage/v1/b/{}/o?prefix={}&delimiter=%2F&maxResults={max_results}\
-             &fields=items(name,size,updated,storageClass,contentType,generation),prefixes,nextPageToken",
+             &fields=items(name,size,updated,storageClass,contentType,generation,metadata),prefixes,nextPageToken",
             self.base,
             encode(bucket),
             encode(prefix)
@@ -625,7 +687,7 @@ impl GcsClient {
     /// One page (up to 1000) of all objects under `prefix`, recursively, with size details.
     pub async fn list_flat(&self, bucket: &str, prefix: &str, page_token: Option<&str>) -> Result<DirPage> {
         let mut url = format!(
-            "{}/storage/v1/b/{}/o?prefix={}&maxResults=1000&fields=items(name,size,updated,storageClass),nextPageToken",
+            "{}/storage/v1/b/{}/o?prefix={}&maxResults=1000&fields=items(name,size,updated,storageClass,metadata),nextPageToken",
             self.base,
             encode(bucket),
             encode(prefix)
@@ -978,6 +1040,23 @@ impl GcsClient {
         Ok(folders)
     }
 
+    /// Update an object's metadata (content type, custom metadata keys merge) without touching
+    /// its content. With `metageneration`, only if it hasn't changed since (else AlreadyExists).
+    pub async fn patch_object(&self, bucket: &str, name: &str, metageneration: Option<&str>, body: &serde_json::Value) -> Result<ObjectInfo, GcsError> {
+        let mut url = format!("{}/storage/v1/b/{}/o/{}", self.base, encode(bucket), encode(name));
+        if let Some(m) = metageneration {
+            url.push_str(&format!("?ifMetagenerationMatch={m}"));
+        }
+        let response = self.send(self.http.patch(url).json(body)).await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(GcsError::AlreadyExists); // gone since it was planned: leave it
+        }
+        if !response.status().is_success() {
+            return Err(Self::error_for(response).await);
+        }
+        response.json().await.map_err(|e| GcsError::Retryable(e.to_string()))
+    }
+
     /// Join `sources` (up to 32 objects in the bucket, in order) into `dest`, with the source
     /// file's modified time as metadata. The result's crc32c covers the whole content.
     pub async fn compose(
@@ -986,15 +1065,16 @@ impl GcsClient {
         dest: &str,
         sources: &[String],
         no_clobber: bool,
-        mtime_secs: Option<i64>,
+        extras: &UploadExtras,
     ) -> Result<ObjectInfo, GcsError> {
         let mut url = format!("{}/storage/v1/b/{}/o/{}/compose", self.base, encode(bucket), encode(dest));
         if no_clobber {
             url.push_str("?ifGenerationMatch=0");
         }
-        let mut destination = serde_json::json!({ "contentType": "application/octet-stream" });
-        if let Some(mtime) = mtime_secs {
-            destination["metadata"] = serde_json::json!({ FILE_MTIME_KEY: mtime.to_string() });
+        let mut destination = serde_json::json!({ "contentType": extras.content_type_for(dest) });
+        let custom = file_dates(extras);
+        if !custom.is_empty() {
+            destination["metadata"] = serde_json::Value::Object(custom);
         }
         let body = serde_json::json!({
             "sourceObjects": sources.iter().map(|name| serde_json::json!({ "name": name })).collect::<Vec<_>>(),
@@ -1080,6 +1160,23 @@ mod tests {
     fn encodes_object_names_for_urls() {
         assert_eq!(encode("surveys/2026/IMG 0001#1.jpg"), "surveys%2F2026%2FIMG%200001%231.jpg");
         assert_eq!(encode("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn content_types_and_file_dates_go_in_the_metadata() {
+        assert_eq!(guess_content_type("photos/IMG_1.JPG"), "image/jpeg");
+        assert_eq!(guess_content_type("a.png"), "image/png");
+        assert_eq!(guess_content_type("casts.csv"), "text/csv");
+        assert_eq!(guess_content_type("sst.nc"), "application/x-netcdf");
+        assert_eq!(guess_content_type("scan.tif"), "image/tiff");
+        assert_eq!(guess_content_type("mystery.zzz"), "application/octet-stream");
+        let extras = UploadExtras { mtime_secs: Some(1_600_000_000), created_secs: Some(1_500_000_000), ..Default::default() };
+        let meta = object_metadata("d/report.pdf", 7, &extras);
+        assert_eq!(meta["contentType"], "application/pdf");
+        assert_eq!(meta["metadata"][FILE_MTIME_KEY], "1600000000");
+        assert_eq!(meta["metadata"][FILE_CREATED_KEY], "1500000000");
+        let bare = object_metadata("x.bin", 7, &UploadExtras::default());
+        assert!(bare.get("metadata").is_none());
     }
 
     #[test]
