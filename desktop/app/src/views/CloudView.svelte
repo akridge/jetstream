@@ -31,6 +31,8 @@
   import FileOpDialog from '../components/FileOpDialog.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
   import ThumbTile from '../components/ThumbTile.svelte';
+  import PreviewPane from '../components/PreviewPane.svelte';
+  import PanelRight from '@lucide/svelte/icons/panel-right';
   import FileCheck from '@lucide/svelte/icons/file-check';
   import LayoutGrid from '@lucide/svelte/icons/layout-grid';
   import { thumbLoader } from '../lib/thumbs.svelte.js';
@@ -112,6 +114,10 @@
 
   // Optional thumbnail view (off unless the user turns it on).
   let thumbsOn = $derived(!!app.prefs.cloud_thumbnails);
+  /** The preview pane: on unless closed (remembered), shown while something is selected. */
+  let previewOn = $derived(app.prefs.cloud_preview !== false);
+  let paneWidth = $derived(Number(app.prefs.cloud_preview_width) || 340);
+  let showPane = $derived(previewOn && !trash && selectedEntries.length > 0);
   function toggleThumbs() {
     const on = !thumbsOn;
     thumbLoader.reset();
@@ -594,6 +600,7 @@
           {/if}
           {#if !trash}
             <button class="btn ghost sm" class:toggled={thumbsOn} aria-pressed={thumbsOn} title={thumbsOn ? 'Show as a list' : 'Show images as thumbnails'} onclick={toggleThumbs}><LayoutGrid size={14} /> Thumbnails</button>
+            <button class="btn ghost sm" class:toggled={previewOn} aria-pressed={previewOn} title={previewOn ? 'Hide the preview pane' : 'Show a preview and details of the selected file'} onclick={() => app.savePrefs({ cloud_preview: !previewOn })}><PanelRight size={14} /> Preview</button>
           {/if}
           <button class="btn ghost sm icon" aria-label="Refresh" title="Refresh" onclick={() => (trash ? loadTrash() : refresh())}><RefreshCw size={14} class={loading ? 'spin' : ''} /></button>
         </div>
@@ -678,6 +685,8 @@
           <div class="more"><button class="btn sm" disabled={trash.loading} onclick={() => loadTrash(true)}>Load more</button></div>
         {/if}
       {:else}
+        <div class="split">
+        <div class="list-col">
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div class="table" role="grid" aria-multiselectable="true" tabindex="0" bind:this={table} onkeydown={keydown} oncontextmenu={backgroundMenu}>
           {#if !thumbsOn}
@@ -789,6 +798,21 @@
         {#if nextToken}
           <div class="more"><button class="btn sm" disabled={loading} onclick={loadMore}>Load more</button></div>
         {/if}
+        </div>
+        {#if showPane}
+          <PreviewPane
+            {bucket}
+            entries={selectedEntries}
+            width={paneWidth}
+            onresize={(w) => app.savePrefs({ cloud_preview_width: Math.round(w) })}
+            onclose={() => app.savePrefs({ cloud_preview: false })}
+            oncopy={copyPaths}
+            ondownload={() => download()}
+            onconsole={() => single && openUrl(consoleUrl(single))}
+            onsize={(entry) => computeTotals(entry.path)}
+          />
+        {/if}
+        </div>
       {/if}
     </div>
     <p class="hints muted">
@@ -1005,6 +1029,15 @@
   }
   .tile:hover {
     background: var(--surface-hover);
+  }
+  .split {
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+  }
+  .list-col {
+    flex: 1;
+    min-width: 0;
   }
   .tile.selected {
     background: var(--accent-soft);

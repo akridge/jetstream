@@ -86,6 +86,10 @@ jobs:
         working-directory: desktop
         run: npm ci || npm install
 
+      - name: Test UI helpers
+        working-directory: desktop
+        run: npm run test:ui
+
       - name: Release notes
         # A release tag needs a section for its version in desktop/CHANGELOG.md; that section
         # becomes the release's description.

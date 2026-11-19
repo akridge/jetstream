@@ -82,6 +82,12 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
     - other images download only if they're under the size cap (20 MB by default); bigger ones show "Too large · click to preview"
     - Nearline, Coldline and Archive images wait for a click (retrieving them is charged)
     - thumbnails (about 6 KB each) go in a cache with a size limit (250 MB by default; the oldest go first), in the system's cache folder, or in `JetStreamData` for the portable copy. A replaced file gets a new thumbnail. **Settings → Cloud storage thumbnails** shows the cache size, clears it, and sets the limits.
+  - **Preview pane** (on by default; close it with its ×, bring it back with **Preview** in the toolbar; drag its edge to resize): selecting a file shows
+    - **images** larger (1024 px, cached like thumbnails; same download limit and cold-storage click)
+    - **CSV and TSV files** as a table of the first 200 rows, and **text, JSON, XML, logs and Markdown** as text (JSON pretty-printed). Only the first 64 KB is read, however big the file.
+    - **every detail Cloud Storage keeps:** type, size, storage class, the original created and modified dates, upload time, CRC32C and MD5 (files uploaded in parallel parts have no MD5, and it says so), generation and any custom metadata, with Copy path, Download and Console buttons.
+
+    Selecting a folder shows its path and a **Size** button; several items show their count and total size. Content loads only for the file you settle on (a quarter-second pause), so arrowing through a folder doesn't download every file.
   - **Select like Explorer:** click; Ctrl/Shift+click for several; arrow keys; right-click for a menu.
   - **Rename** (F2), **New folder**, **Move or copy to…**, and **Delete** (Del). Each shows what it involves before running:
     - how many files and how much data

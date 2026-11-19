@@ -18,6 +18,7 @@ pub mod gcs;
 pub mod localops;
 pub mod manifest;
 pub mod onedrive;
+pub mod preview;
 pub mod receipt;
 pub mod scan;
 pub mod speedcheck;

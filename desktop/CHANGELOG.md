@@ -29,6 +29,7 @@ upload engine, in one window.
 ### Cloud storage
 - A file manager for buckets: rename, move, copy, delete and restore.
 - **Thumbnails** for images (optional), with a size-limited cache.
+- **Preview pane:** a larger image, the start of CSV and text files, and every detail of the selected file (original dates, checksums, storage class, custom metadata). Reads only the first 64 KB of big files.
 - **Fix file details** adds file types and original dates to files uploaded by older versions, without uploading them again.
 - Folder insights and cloud cleanup.
 

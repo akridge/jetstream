@@ -809,6 +809,8 @@ struct ThumbRequest {
     allow_cold: bool,
     /// Download cap in MiB (default 20); a click on a too-large tile raises it.
     max_mib: Option<u64>,
+    /// Longest side in pixels (256 for tiles; the preview pane asks for 1024).
+    edge: Option<u32>,
 }
 
 /// A thumbnail: `{ data_url, source }`, or why there isn't one (`{ skip: "too_large", size }`,
@@ -827,7 +829,8 @@ async fn thumbnail(app: AppHandle, core: tauri::State<'_, Core>, request: ThumbR
         content_type: request.content_type,
         storage_class: request.storage_class,
     };
-    let opts = thumbs::ThumbOptions { max_bytes: request.max_mib.unwrap_or(20).max(1) * 1024 * 1024, allow_cold: request.allow_cold };
+    let edge = request.edge.unwrap_or(thumbs::EDGE).clamp(64, thumbs::PREVIEW_EDGE);
+    let opts = thumbs::ThumbOptions { max_bytes: request.max_mib.unwrap_or(20).max(1) * 1024 * 1024, allow_cold: request.allow_cold, edge };
     Ok(match thumbs::thumbnail(&client, &cache, &object, &opts).await {
         Ok(thumb) => serde_json::json!({
             "data_url": format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&thumb.jpeg)),
@@ -835,6 +838,30 @@ async fn thumbnail(app: AppHandle, core: tauri::State<'_, Core>, request: ThumbR
         }),
         Err(skip) => serde_json::to_value(&skip).map_err(|e| e.to_string())?,
     })
+}
+
+/// An object's details for the preview pane (Cloud Storage's resource: checksums, dates,
+/// storage class, custom metadata); null if it no longer exists.
+#[tauri::command]
+async fn object_details(core: tauri::State<'_, Core>, bucket: String, path: String) -> Result<Option<serde_json::Value>, String> {
+    core.client()?.get_object_raw(&bucket, &path).await.map_err(|e| e.to_string())
+}
+
+/// The first 64 KB of a text file for the preview pane (`{ kind: "text", text, shown, size,
+/// truncated }`, or "binary" / "cold" / "error"). Shares the thumbnails' download slots.
+#[tauri::command]
+async fn preview_text(
+    core: tauri::State<'_, Core>,
+    bucket: String,
+    path: String,
+    generation: Option<String>,
+    size: u64,
+    storage_class: Option<String>,
+    allow_cold: Option<bool>,
+) -> Result<jetstream_transfer::preview::TextPreview, String> {
+    let client = core.client()?;
+    let _slot = core.thumb_slots.0.clone().acquire_owned().await.map_err(|e| e.to_string())?;
+    Ok(jetstream_transfer::preview::text(&client, &bucket, &path, generation.as_deref(), size, storage_class.as_deref(), allow_cold.unwrap_or(false)).await)
 }
 
 #[tauri::command]
@@ -1123,6 +1150,8 @@ fn main() {
             check_update,
             speed_check,
             thumbnail,
+            object_details,
+            preview_text,
             plan_fix_details,
             run_fix_details,
             thumbnail_cache_info,

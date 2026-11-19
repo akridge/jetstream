@@ -215,6 +215,17 @@ enum Command {
         /// Cache size limit in MiB.
         #[arg(long, default_value_t = 250)]
         cache_mib: u64,
+        /// Longest side in pixels (256 for tiles, 1024 for the preview pane).
+        #[arg(long, default_value_t = jetstream_transfer::thumbs::EDGE)]
+        edge: u32,
+    },
+    /// Print an object's details (its metadata as Cloud Storage returns it).
+    Stat { object: String },
+    /// Print the start of a text file in a bucket (64 KB), as the preview pane shows it.
+    Head {
+        object: String,
+        #[arg(long)]
+        allow_cold: bool,
     },
     /// Bucket settings (soft delete, hierarchical namespace, Autoclass) and your permissions.
     Bucket { bucket: String },
@@ -425,7 +436,19 @@ async fn run() -> Result<i32> {
             let report = jetstream_transfer::speedcheck::speed_check(&client, &destination, local.as_deref(), &OpProgress::default()).await?;
             return print_json(&report);
         }
-        Command::Thumbnail { object, cache, out, allow_cold, max_mib, cache_mib } => {
+        Command::Stat { object } => {
+            let (bucket, name) = split_gs(&object)?;
+            let raw = cloud_client()?.get_object_raw(&bucket, &name).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            return print_json(&raw.ok_or_else(|| anyhow::anyhow!("{object} not found"))?);
+        }
+        Command::Head { object, allow_cold } => {
+            let (bucket, name) = split_gs(&object)?;
+            let client = cloud_client()?;
+            let info = client.get_object(&bucket, &name).await.map_err(|e| anyhow::anyhow!("{e}"))?.ok_or_else(|| anyhow::anyhow!("{object} not found"))?;
+            let preview = jetstream_transfer::preview::text(&client, &bucket, &name, info.generation.as_deref(), info.size, info.storage_class.as_deref(), allow_cold).await;
+            return print_json(&preview);
+        }
+        Command::Thumbnail { object, cache, out, allow_cold, max_mib, cache_mib, edge } => {
             use jetstream_transfer::thumbs;
             let (bucket, name) = split_gs(&object)?;
             let client = cloud_client()?;
@@ -439,7 +462,7 @@ async fn run() -> Result<i32> {
                 storage_class: info.storage_class,
             };
             let cache = thumbs::ThumbCache::open(cache, cache_mib * 1024 * 1024)?;
-            let opts = thumbs::ThumbOptions { max_bytes: max_mib * 1024 * 1024, allow_cold };
+            let opts = thumbs::ThumbOptions { max_bytes: max_mib * 1024 * 1024, allow_cold, edge };
             return match thumbs::thumbnail(&client, &cache, &object, &opts).await {
                 Ok(thumb) => {
                     if let Some(out) = out {

@@ -47,13 +47,18 @@ pub struct ThumbOptions {
     pub max_bytes: u64,
     /// Preview Nearline/Coldline/Archive objects too (retrieval is charged).
     pub allow_cold: bool,
+    /// Longest side in pixels: EDGE for tiles, PREVIEW_EDGE for the preview pane.
+    pub edge: u32,
 }
 
 impl Default for ThumbOptions {
     fn default() -> Self {
-        Self { max_bytes: 20 * 1024 * 1024, allow_cold: false }
+        Self { max_bytes: 20 * 1024 * 1024, allow_cold: false, edge: EDGE }
     }
 }
+
+/// The preview pane's larger image.
+pub const PREVIEW_EDGE: u32 = 1024;
 
 /// Why there's no thumbnail.
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
@@ -150,6 +155,11 @@ fn encode(image: DynamicImage, edge: u32) -> Result<Vec<u8>> {
 /// The preview a camera embedded in a JPEG's EXIF block, made upright and re-encoded, if the
 /// start of the file holds one big enough to look decent.
 pub fn embedded_preview(start_of_file: &[u8], edge: u32) -> Option<Vec<u8>> {
+    embedded_preview_at_least(start_of_file, edge, MIN_EMBEDDED_EDGE)
+}
+
+/// As `embedded_preview`, only if the embedded preview's longest side is at least `min_edge`.
+fn embedded_preview_at_least(start_of_file: &[u8], edge: u32, min_edge: u32) -> Option<Vec<u8>> {
     let exif = exif::Reader::new().read_from_container(&mut Cursor::new(start_of_file)).ok()?;
     let field = |tag| exif.get_field(tag, exif::In::THUMBNAIL).and_then(|f| f.value.get_uint(0));
     let offset = field(exif::Tag::JPEGInterchangeFormat)? as usize;
@@ -158,7 +168,7 @@ pub fn embedded_preview(start_of_file: &[u8], edge: u32) -> Option<Vec<u8>> {
     let mut reader = ImageReader::with_format(Cursor::new(preview), image::ImageFormat::Jpeg);
     reader.limits(limits());
     let mut image = reader.decode().ok()?;
-    if image.width().max(image.height()) < MIN_EMBEDDED_EDGE {
+    if image.width().max(image.height()) < min_edge {
         return None;
     }
     // The preview is stored like the main image: apply the main image's orientation.
@@ -184,7 +194,9 @@ pub async fn fetch(client: &GcsClient, object: &ObjectRef, opts: &ThumbOptions) 
             .download_range(&object.bucket, &object.name, generation, 0, EXIF_PROBE - 1)
             .await
             .map_err(|e| Skip::Error { message: e.to_string() })?;
-        if let Some(jpeg) = tokio::task::spawn_blocking(move || embedded_preview(&start, EDGE)).await.ok().flatten() {
+        // A large preview only uses an embedded one that's nearly as big (most are 160 px).
+        let (edge, min_edge) = (opts.edge, if opts.edge > EDGE { opts.edge * 3 / 5 } else { MIN_EMBEDDED_EDGE });
+        if let Some(jpeg) = tokio::task::spawn_blocking(move || embedded_preview_at_least(&start, edge, min_edge)).await.ok().flatten() {
             return Ok(Thumb { jpeg, source: Source::Embedded });
         }
     }
@@ -196,7 +208,8 @@ pub async fn fetch(client: &GcsClient, object: &ObjectRef, opts: &ThumbOptions) 
     if data.len() as u64 > opts.max_bytes {
         return Err(Skip::TooLarge { size: data.len() as u64 });
     }
-    match tokio::task::spawn_blocking(move || make_thumbnail(&data, EDGE)).await {
+    let edge = opts.edge;
+    match tokio::task::spawn_blocking(move || make_thumbnail(&data, edge)).await {
         Ok(Ok(jpeg)) => Ok(Thumb { jpeg, source: Source::Full }),
         Ok(Err(err)) => Err(Skip::Unreadable { message: format!("{err:#}") }),
         Err(err) => Err(Skip::Unreadable { message: err.to_string() }),
@@ -245,7 +258,15 @@ impl ThumbCache {
 
     /// Bucket, name and generation: a replaced object gets a new key.
     pub fn key(object: &ObjectRef) -> String {
-        let text = format!("{}\0{}\0{}\0{}", object.bucket, object.name, object.generation.as_deref().unwrap_or(""), object.size);
+        Self::key_for(object, EDGE)
+    }
+
+    /// The key for a thumbnail of `edge` pixels (tile-size keys are unchanged from before).
+    pub fn key_for(object: &ObjectRef, edge: u32) -> String {
+        let mut text = format!("{}\0{}\0{}\0{}", object.bucket, object.name, object.generation.as_deref().unwrap_or(""), object.size);
+        if edge != EDGE {
+            text.push_str(&format!("\0{edge}"));
+        }
         // FNV-1a (64-bit) plus crc32c: stable across builds, and collisions are vanishingly rare.
         let mut fnv: u64 = 0xcbf29ce484222325;
         for byte in text.bytes() {
@@ -355,7 +376,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// remembered; too-large, cold-storage and failed downloads aren't (a click or a later try can
 /// still get them).
 pub async fn thumbnail(client: &GcsClient, cache: &ThumbCache, object: &ObjectRef, opts: &ThumbOptions) -> std::result::Result<Thumb, Skip> {
-    let key = ThumbCache::key(object);
+    let key = ThumbCache::key_for(object, opts.edge);
     match cache.get(&key) {
         Some(Ok(jpeg)) => return Ok(Thumb { jpeg, source: Source::Cache }),
         Some(Err(skip)) => return Err(skip),

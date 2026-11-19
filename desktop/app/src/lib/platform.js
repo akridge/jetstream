@@ -317,6 +317,18 @@ export async function thumbnail(request) {
   return invoke('thumbnail', { request });
 }
 
+/** An object's full details (Cloud Storage's resource), or null if it's gone. */
+export async function objectDetails(bucket, path) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('object_details', { bucket, path });
+}
+
+/** The first 64 KB of a text file: { kind: 'text', text, shown, size, truncated } | { kind: 'binary' | 'cold' | 'error' }. */
+export async function previewText(bucket, entry, allowCold = false) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('preview_text', { bucket, path: entry.path, generation: entry.generation || null, size: entry.size || 0, storageClass: entry.storage_class || null, allowCold });
+}
+
 /** The thumbnail cache: { dir, bytes, files, max_bytes }. */
 export async function thumbnailCacheInfo() {
   if (!isDesktop) return null;

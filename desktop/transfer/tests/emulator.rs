@@ -1063,6 +1063,55 @@ mod thumbnails {
         assert!(matches!(thumbs::thumbnail(&client, &cache, &broken, &ThumbOptions::default()).await, Err(Skip::Unreadable { .. })));
         assert_eq!(proxy.received.load(Ordering::Relaxed), before, "remembered, not downloaded again");
     }
+
+    #[tokio::test]
+    async fn the_preview_pane_gets_a_bigger_image_and_the_start_of_text_files() {
+        use jetstream_transfer::preview::{self, TextPreview};
+        let Some(env) = Env::new().await else { return };
+        let proxy = Proxy::start(&env.emulator.base).await;
+        let http = GcsClient::http_client();
+        let client = GcsClient::with_base(http.clone(), &proxy.base, Arc::new(TokenProvider::none(http)));
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ThumbCache::open(dir.path(), 50 * 1024 * 1024).unwrap();
+
+        // A camera JPEG whose embedded preview is tile-sized: the tile uses it, the pane doesn't.
+        let mut photo = test_images::jpeg_with_exif(2000, 1500, &test_images::jpeg(160, 120), 1);
+        photo.resize(photo.len().max(200 * 1024), 0);
+        let photo = put(&env, "big_photo.jpg", photo, "image/jpeg").await;
+        let tile = thumbs::thumbnail(&client, &cache, &photo, &ThumbOptions::default()).await.unwrap();
+        assert_eq!(tile.source, Source::Embedded);
+        let pane_opts = ThumbOptions { edge: thumbs::PREVIEW_EDGE, ..Default::default() };
+        let pane = thumbs::thumbnail(&client, &cache, &photo, &pane_opts).await.unwrap();
+        assert_eq!(pane.source, Source::Full);
+        assert_eq!(image::load_from_memory(&pane.jpeg).unwrap().width(), 1024);
+        // Both cached separately.
+        assert_eq!(thumbs::thumbnail(&client, &cache, &photo, &pane_opts).await.unwrap().source, Source::Cache);
+        assert_eq!(image::load_from_memory(&thumbs::thumbnail(&client, &cache, &photo, &ThumbOptions::default()).await.unwrap().jpeg).unwrap().width(), 160);
+
+        // A big CSV: only the first 64 KB is read.
+        let row = "2024-03-01T00:00:00Z,19.5,\"Kona, HI\"\n";
+        let csv: String = std::iter::once("time,temp,site\n".to_string()).chain(std::iter::repeat_n(row.to_string(), 100_000)).collect();
+        let size = csv.len() as u64;
+        let object = put(&env, "ctd.csv", csv.into_bytes(), "text/csv").await;
+        let before = proxy.received.load(Ordering::Relaxed);
+        let TextPreview::Text { text, shown, size: total, truncated } = preview::text(&client, "bucket", "ctd.csv", object.generation.as_deref(), size, None, false).await else {
+            panic!("not text")
+        };
+        assert_eq!((shown, total, truncated), (preview::TEXT_BYTES, size, true));
+        assert!(text.starts_with("time,temp,site\n2024-03-01"));
+        let read = proxy.received.load(Ordering::Relaxed) - before;
+        assert!(read < 2 * preview::TEXT_BYTES, "read {read} bytes of {size}");
+
+        // Binary, cold, small.
+        put(&env, "x.bin", vec![0u8, 1, 2, 3, 0, 9], "application/octet-stream").await;
+        assert_eq!(preview::text(&client, "bucket", "x.bin", None, 6, None, false).await, TextPreview::Binary);
+        assert!(matches!(preview::text(&client, "bucket", "ctd.csv", None, size, Some("ARCHIVE"), false).await, TextPreview::Cold { .. }));
+        put(&env, "small.json", b"{\"a\": 1}".to_vec(), "application/json").await;
+        assert_eq!(
+            preview::text(&client, "bucket", "small.json", None, 8, None, false).await,
+            TextPreview::Text { text: "{\"a\": 1}".into(), shown: 8, size: 8, truncated: false }
+        );
+    }
 }
 
 /// What's recorded on each object: content type and the source file's dates.
