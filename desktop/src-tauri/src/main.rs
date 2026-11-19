@@ -428,10 +428,10 @@ struct OpTick {
 }
 
 /// Run an operation with progress ticks ("cloud-op-progress") and cancellation by `op_id`.
-async fn track<F, Fut>(app: &AppHandle, core: &Core, op_id: &str, work: F) -> Result<OpResult, String>
+async fn track<T, F, Fut>(app: &AppHandle, core: &Core, op_id: &str, work: F) -> Result<T, String>
 where
     F: FnOnce(Arc<OpProgress>) -> Fut,
-    Fut: std::future::Future<Output = Result<OpResult, String>>,
+    Fut: std::future::Future<Output = Result<T, String>>,
 {
     let progress = Arc::new(OpProgress::default());
     core.running.lock().unwrap().insert(op_id.to_string(), progress.clone());
@@ -754,6 +754,25 @@ async fn run_fix_details(app: AppHandle, core: tauri::State<'_, Core>, op_id: St
     let plan = core.fix_plans.lock().unwrap().remove(&op_id).ok_or("This fix was already run or has expired; check again.")?;
     let client = core.client()?;
     track(&app, &core, &op_id, |progress| async move { Ok(details::apply_fix(&client, &plan, &progress).await) }).await
+}
+
+/// Speed check against gs://destination (and the folder uploaded from, if given); emits
+/// "cloud-op-progress" (`done` of 5 steps, `bytes` moved). Stores nothing in the bucket.
+#[tauri::command]
+async fn speed_check(
+    app: AppHandle,
+    core: tauri::State<'_, Core>,
+    op_id: String,
+    destination: String,
+    local_path: Option<String>,
+) -> Result<jetstream_transfer::speedcheck::SpeedReport, String> {
+    let client = core.client()?;
+    track(&app, &core, &op_id, |progress| async move {
+        jetstream_transfer::speedcheck::speed_check(&client, &destination, local_path.as_deref().map(std::path::Path::new), &progress)
+            .await
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
 }
 
 // ----- Thumbnails for the cloud browser --------------------------------------------------------
@@ -1102,6 +1121,7 @@ fn main() {
             watch_folders,
             app_info,
             check_update,
+            speed_check,
             thumbnail,
             plan_fix_details,
             run_fix_details,

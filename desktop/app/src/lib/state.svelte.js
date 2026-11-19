@@ -97,6 +97,8 @@ class AppState {
   starting = $state({});
   /** The "Fix file details" dialog: { destination, preset? } or null. */
   fixDetails = $state(null);
+  /** The speed check dialog: { destination?, localPath? } or null. */
+  speedCheck = $state(null);
   /** The "Add several folders" dialog: { parent?, paths? } or null. */
   addFoldersDialog = $state(null);
   /** Folders (by preset id) to upload as soon as their running preview finishes. */

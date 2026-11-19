@@ -8,7 +8,8 @@ The Rust core of JetStream, used by the desktop app (as a library) and as a CLI:
 - **`fix-details gs://bucket/folder/ [--local DIR] [--apply]`:** adds missing content types (from file names) and, with `--local` (the folder synced there), the original files' dates to objects already uploaded. It updates only their metadata, conditional on `ifMetagenerationMatch`, so nothing is re-uploaded. Dates go only to files that match their cloud copy by size and checksum, taken from the manifest or by reading the file. Without `--apply` it only prints the plan.
 - **What uploads record:** `contentType` from the extension (unknown types stay `application/octet-stream`), plus custom metadata `goog-reserved-file-mtime` (the source file's modified time in seconds, as `gcloud storage rsync` writes it) and `jetstream-file-created` (its created time, where the file system has one).
 - **`du gs://bucket/folder/`:** total objects and bytes under a folder, broken down by storage class.
-- **`scan <folder>`:** fast local folder analysis. Subfolders are walked in parallel. It reports:
+- **`speed-check gs://bucket/prefix [--local FOLDER]`:** what limits uploads: the folder's list and read speed, MB/s over one connection and over 8, and milliseconds per request, with a verdict. Uses upload sessions that are never finished and then cancelled, so nothing is stored.
+- **`scan <folder>`:** fast local folder analysis. Folders are read in parallel (as for syncs: 8 threads, 16 for network paths). It reports:
   - size by kind of file and by file type
   - the biggest subfolders and the largest files
   - junk files

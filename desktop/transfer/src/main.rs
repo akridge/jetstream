@@ -187,6 +187,15 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// Measure what limits uploads: the folder (list and read speed), the network (one
+    /// connection and 8 at once) and request time. Nothing is stored in the bucket.
+    SpeedCheck {
+        /// gs://bucket/prefix to test against.
+        destination: String,
+        /// The folder you upload from (to test reading it).
+        #[arg(long)]
+        local: Option<PathBuf>,
+    },
     /// Make a thumbnail of an image in a bucket (cached), as the cloud browser does.
     Thumbnail {
         /// gs://bucket/path/to/image.jpg
@@ -410,6 +419,11 @@ async fn run() -> Result<i32> {
             let result = jetstream_transfer::details::apply_fix(&client, &plan, &OpProgress::default()).await;
             print_json(&serde_json::json!({ "plan": plan, "result": result }))?;
             return Ok(if result.failed > 0 { 2 } else { 0 });
+        }
+        Command::SpeedCheck { destination, local } => {
+            let client = cloud_client()?;
+            let report = jetstream_transfer::speedcheck::speed_check(&client, &destination, local.as_deref(), &OpProgress::default()).await?;
+            return print_json(&report);
         }
         Command::Thumbnail { object, cache, out, allow_cold, max_mib, cache_mib } => {
             use jetstream_transfer::thumbs;

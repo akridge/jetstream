@@ -5,6 +5,7 @@
   import Sun from '@lucide/svelte/icons/sun';
   import Moon from '@lucide/svelte/icons/moon';
   import Monitor from '@lucide/svelte/icons/monitor';
+  import Gauge from '@lucide/svelte/icons/gauge';
   import { app } from '../lib/state.svelte.js';
   import { api, apiBase } from '../lib/api.js';
   import { clearThumbnailCache, ensureNotificationPermission, isDesktop, openClassic, openUrl, setThumbnailCacheLimit, thumbnailCacheInfo } from '../lib/platform.js';
@@ -203,6 +204,17 @@
           </span>
         </label>
       </div>
+
+      {#if isDesktop}
+        <div class="limit">
+          <span class="label">Speed check</span>
+          <p class="sub">
+            Uploads slower than expected? This measures what limits them: the network over one connection and over several, and the time each request takes.
+            Use <strong>Speed check…</strong> on a synced folder's card to include reading that folder. Nothing is stored in the bucket.
+          </p>
+          <div><button class="btn" onclick={() => (app.speedCheck = {})}><Gauge size={15} /> Speed check…</button></div>
+        </div>
+      {/if}
 
       <div class="limit">
         <span class="label">Upload and download speed limit</span>

@@ -875,6 +875,13 @@ impl GcsClient {
         Err(Self::error_for(response).await)
     }
 
+    /// Cancel an unfinished resumable upload: what was sent is discarded and no object is made.
+    /// (Sessions left alone expire on their own after a week.)
+    pub async fn cancel_resumable(&self, session: &str) {
+        let request = self.http.delete(session).timeout(Duration::from_secs(20)).header(CONTENT_LENGTH, "0");
+        let _ = self.send(request).await;
+    }
+
     /// Start downloading an object's bytes (pinned to `generation` when given). Read the body
     /// with `Response::chunk`.
     pub async fn download(&self, bucket: &str, name: &str, generation: Option<&str>) -> Result<Response, GcsError> {

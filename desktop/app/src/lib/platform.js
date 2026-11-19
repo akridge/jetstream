@@ -210,6 +210,13 @@ export function runFixDetails(opId, onProgress) {
   return withOpProgress(opId, onProgress, () => invoke('run_fix_details', { opId }));
 }
 
+/** Speed check against gs://destination (and localPath, if given); onProgress({ done, bytes }).
+ * Resolves to the report (see speedcheck.rs). Stop it with cancelCloudOp(opId). */
+export function speedCheck(opId, destination, localPath, onProgress) {
+  if (!isDesktop) return Promise.reject(desktopOnly());
+  return withOpProgress(opId, onProgress, () => invoke('speed_check', { opId, destination, localPath }));
+}
+
 /** Run a planned operation; onProgress({done, skipped, failed, bytes}). */
 export function runCloudOp(opId, onProgress) {
   return withOpProgress(opId, onProgress, () => invoke('run_cloud_op', { opId }));

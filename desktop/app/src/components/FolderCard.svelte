@@ -161,6 +161,9 @@
           <button role="menuitem" onclick={() => { menuOpen = false; folderStatus.check(preset, { soon: true }); }}>Check for changes now</button>
           <button role="menuitem" title="Add missing file types and the original files' dates to what's already uploaded (nothing is re-uploaded)" onclick={() => { menuOpen = false; app.fixDetails = { destination: `gs://${normalizeDestination(preset.destination)}/`, preset }; }}>Fix file details in the cloud…</button>
           <button role="menuitem" onclick={() => { menuOpen = false; app.createReceipt(preset); }}>Make a receipt now</button>
+          {#if isDesktop}
+            <button role="menuitem" title="Find out what limits uploads from this folder: the disk or share, the network, or per-file overhead" onclick={() => { menuOpen = false; app.speedCheck = { destination: `gs://${normalizeDestination(preset.destination)}/`, localPath: preset.source_path }; }}>Speed check…</button>
+          {/if}
           <button role="menuitem" onclick={() => openCloud()}>Open in Cloud storage</button>
           {#if isDesktop}
             <button role="menuitem" onclick={() => revealPath(preset.source_path)}>Show folder</button>

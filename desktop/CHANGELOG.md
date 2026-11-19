@@ -11,6 +11,8 @@ upload engine, in one window.
 ### Uploads
 - **Large files upload in parallel parts** and are joined in the cloud, checked by checksum. Turn it off in Settings if a bucket needs MD5 checksums.
 - **Pause and stop take effect at once.** Resuming picks up where it left off, including partly uploaded files.
+- **Speed check:** finds out what limits uploads (the disk or share, the network, or per-file overhead) without storing anything in the bucket.
+- **Faster on network shares:** folders are listed many at a time.
 - **Internet drops are waited out.** Uploads pause while the connection is down and continue when it's back, without failing files.
 - **Preview, then upload.** A preview can go straight on to the upload, reusing what it already worked out.
 - **Uploads keep file details:** a proper file type (images open in the browser, not as downloads) and the original modified and created dates.

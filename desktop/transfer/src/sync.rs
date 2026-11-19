@@ -320,48 +320,53 @@ pub(crate) fn scan(source: &Path, excludes: &[Regex], recursive: bool) -> Result
     if !source.is_dir() {
         bail!("{} is not a folder", source.display());
     }
-    let mut result = ScanResult { files: Vec::new(), excluded: 0, unreadable: 0, online_only: Vec::new() };
-    let walker = walkdir::WalkDir::new(source).follow_links(false).max_depth(if recursive { usize::MAX } else { 1 });
-    for entry in walker {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => {
-                result.unreadable += 1;
-                continue;
+    // Folders are read in parallel (see walk.rs); results are sorted by path so every scan of
+    // the same folder lists its files in the same order.
+    let parts = crate::walk::par_walk(
+        source,
+        recursive,
+        None,
+        || ScanResult { files: Vec::new(), excluded: 0, unreadable: 0, online_only: Vec::new() },
+        |result: &mut ScanResult, item| {
+            let (entry, rel) = match item {
+                crate::walk::Item::File { entry, rel, .. } => (entry, rel),
+                crate::walk::Item::Dir { .. } => return,
+                crate::walk::Item::Error => {
+                    result.unreadable += 1;
+                    return;
+                }
+            };
+            if excludes.iter().any(|re| re.is_match(rel)) {
+                result.excluded += 1;
+                return;
             }
-        };
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(source)
-            .unwrap_or(entry.path())
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        if excludes.iter().any(|re| re.is_match(&rel)) {
-            result.excluded += 1;
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else {
-            result.unreadable += 1;
-            continue;
-        };
-        if onedrive::is_online_only(&meta) {
-            result.online_only.push(rel);
-            continue;
-        }
-        let mtime_ns = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0);
-        let created_secs = meta.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
-        result.files.push(LocalFile { abs: entry.into_path(), rel, size: meta.len(), mtime_ns, created_secs });
+            let Ok(meta) = entry.metadata() else {
+                result.unreadable += 1;
+                return;
+            };
+            if onedrive::is_online_only(&meta) {
+                result.online_only.push(rel.to_string());
+                return;
+            }
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0);
+            let created_secs = meta.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+            result.files.push(LocalFile { abs: entry.path(), rel: rel.to_string(), size: meta.len(), mtime_ns, created_secs });
+        },
+    );
+    let mut result = ScanResult { files: Vec::new(), excluded: 0, unreadable: 0, online_only: Vec::new() };
+    for part in parts {
+        result.files.extend(part.files);
+        result.excluded += part.excluded;
+        result.unreadable += part.unreadable;
+        result.online_only.extend(part.online_only);
     }
+    result.files.sort_unstable_by(|a, b| a.rel.cmp(&b.rel));
+    result.online_only.sort_unstable();
     Ok(result)
 }
 

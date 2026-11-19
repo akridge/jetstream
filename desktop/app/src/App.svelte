@@ -7,6 +7,7 @@
   import FolderDialog from './components/FolderDialog.svelte';
   import AddFoldersDialog from './components/AddFoldersDialog.svelte';
   import FixDetailsDialog from './components/FixDetailsDialog.svelte';
+  import SpeedCheckDialog from './components/SpeedCheckDialog.svelte';
   import FoldersView from './views/FoldersView.svelte';
   import ActivityView from './views/ActivityView.svelte';
   import SettingsView from './views/SettingsView.svelte';
@@ -84,6 +85,11 @@
   {#if app.fixDetails}
     {#key app.fixDetails}
       <FixDetailsDialog dialog={app.fixDetails} />
+    {/key}
+  {/if}
+  {#if app.speedCheck}
+    {#key app.speedCheck}
+      <SpeedCheckDialog dialog={app.speedCheck} />
     {/key}
   {/if}
   {#if app.addFoldersDialog}

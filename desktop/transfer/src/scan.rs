@@ -1,14 +1,15 @@
 //! Fast local folder analysis: what a folder contains, what's big, old or junk.
-//! Top-level subfolders are walked in parallel; progress counters can be polled while it runs.
+//! Folders are read in parallel (walk.rs); progress counters can be polled while it runs.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
-use rayon::prelude::*;
+
+use crate::walk::{par_walk, Item};
 use serde::Serialize;
 
 #[derive(Debug, Clone)]
@@ -141,6 +142,8 @@ struct Partial {
     junk: (u64, u64, TopN),
     oldest: Option<u64>,
     newest: Option<u64>,
+    /// Files and bytes per top-level subfolder ("" = files directly in the folder).
+    tops: HashMap<String, (u64, u64)>,
 }
 
 impl Partial {
@@ -157,6 +160,7 @@ impl Partial {
             junk: (0, 0, TopN::new(n)),
             oldest: None,
             newest: None,
+            tops: HashMap::new(),
         }
     }
 
@@ -187,86 +191,75 @@ impl Partial {
             (a, b) => a.or(b),
         };
         self.newest = self.newest.max(other.newest);
+        for (k, (f, b)) in other.tops {
+            let e = self.tops.entry(k).or_default();
+            e.0 += f;
+            e.1 += b;
+        }
     }
 }
 
-fn walk(root: &Path, start: &Path, opts: &ScanOptions, now: u64, progress: &ScanProgress, recurse: bool) -> Partial {
-    let mut p = Partial::new(opts.top_n);
-    let archive_cutoff = now.saturating_sub(opts.archive_age_days * 86_400);
-    let walker = walkdir::WalkDir::new(start).follow_links(false).max_depth(if recurse { usize::MAX } else { 1 });
-    for entry in walker {
-        if progress.cancel.load(Ordering::Relaxed) {
-            break;
+/// Count one walk item into a thread's partial result.
+fn visit(p: &mut Partial, item: Item, opts: &ScanOptions, archive_cutoff: u64, progress: &ScanProgress) {
+    let (entry, rel) = match item {
+        Item::Dir { rel, .. } => {
+            p.folders += 1;
+            p.tops.entry(rel.split('/').next().unwrap_or("").to_string()).or_default();
+            return;
         }
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => {
-                p.unreadable += 1;
-                continue;
-            }
-        };
-        if entry.file_type().is_dir() {
-            if entry.depth() > 0 {
-                p.folders += 1;
-            }
-            continue;
-        }
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else {
+        Item::Error => {
             p.unreadable += 1;
-            continue;
-        };
-        let size = meta.len();
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let name_lower = entry.file_name().to_string_lossy().to_lowercase();
-        let ext = Path::new(&name_lower)
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let rel = entry
-            .path()
-            .strip_prefix(root)
-            .unwrap_or(entry.path())
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
+            return;
+        }
+        Item::File { entry, rel, .. } => (entry, rel),
+    };
+    let Ok(meta) = entry.metadata() else {
+        p.unreadable += 1;
+        return;
+    };
+    let size = meta.len();
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let name_lower = entry.file_name().to_string_lossy().to_lowercase();
+    let ext = Path::new(&name_lower)
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
 
-        p.files += 1;
-        p.bytes += size;
-        progress.files.fetch_add(1, Ordering::Relaxed);
-        progress.bytes.fetch_add(size, Ordering::Relaxed);
-        let c = p.categories.entry(category(&ext)).or_default();
-        c.0 += 1;
-        c.1 += size;
-        let e = p.extensions.entry(if ext.is_empty() { "(none)".into() } else { format!(".{ext}") }).or_default();
-        e.0 += 1;
-        e.1 += size;
-        if modified > 0 {
-            p.oldest = Some(p.oldest.map_or(modified, |o| o.min(modified)));
-            p.newest = Some(p.newest.map_or(modified, |n| n.max(modified)));
-        }
-        let item = FileItem { bytes: size, path: rel, modified };
-        if is_junk(&name_lower, &ext) {
-            p.junk.0 += 1;
-            p.junk.1 += size;
-            p.junk.2.push(item.clone());
-        }
-        if modified > 0 && modified < archive_cutoff && size >= opts.archive_min_bytes {
-            p.archive.0 += 1;
-            p.archive.1 += size;
-            p.archive.2.push(item.clone());
-        }
-        p.largest.push(item);
+    p.files += 1;
+    p.bytes += size;
+    progress.files.fetch_add(1, Ordering::Relaxed);
+    progress.bytes.fetch_add(size, Ordering::Relaxed);
+    let top = rel.split_once('/').map(|(first, _)| first).unwrap_or("");
+    let t = p.tops.entry(top.to_string()).or_default();
+    t.0 += 1;
+    t.1 += size;
+    let c = p.categories.entry(category(&ext)).or_default();
+    c.0 += 1;
+    c.1 += size;
+    let e = p.extensions.entry(if ext.is_empty() { "(none)".into() } else { format!(".{ext}") }).or_default();
+    e.0 += 1;
+    e.1 += size;
+    if modified > 0 {
+        p.oldest = Some(p.oldest.map_or(modified, |o| o.min(modified)));
+        p.newest = Some(p.newest.map_or(modified, |n| n.max(modified)));
     }
-    p
+    let item = FileItem { bytes: size, path: rel.to_string(), modified };
+    if is_junk(&name_lower, &ext) {
+        p.junk.0 += 1;
+        p.junk.1 += size;
+        p.junk.2.push(item.clone());
+    }
+    if modified > 0 && modified < archive_cutoff && size >= opts.archive_min_bytes {
+        p.archive.0 += 1;
+        p.archive.1 += size;
+        p.archive.2.push(item.clone());
+    }
+    p.largest.push(item);
 }
 
 fn sorted_buckets<K: ToString>(map: HashMap<K, (u64, u64)>, limit: usize) -> Vec<Bucket> {
@@ -286,39 +279,18 @@ pub fn scan_folder(path: &Path, opts: &ScanOptions, progress: &ScanProgress) -> 
     let started = Instant::now();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 
-    let mut subdirs: Vec<PathBuf> = Vec::new();
-    let mut unreadable_root = 0;
-    match std::fs::read_dir(path) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    subdirs.push(entry.path());
-                }
-            }
-        }
-        Err(_) => unreadable_root += 1,
+    let archive_cutoff = now.saturating_sub(opts.archive_age_days * 86_400);
+    let mut total = Partial::new(opts.top_n);
+    for part in par_walk(path, true, Some(&progress.cancel), || Partial::new(opts.top_n), |p, item| visit(p, item, opts, archive_cutoff, progress)) {
+        total.merge(part);
     }
-
-    // Files directly in the folder, then each top-level subfolder in parallel.
-    let mut total = walk(path, path, opts, now, progress, false);
-    total.unreadable += unreadable_root;
-    let per_folder: Vec<(String, Partial)> = subdirs
-        .par_iter()
-        .map(|dir| {
-            let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            (name, walk(path, dir, opts, now, progress, true))
-        })
-        .collect();
 
     let mut top_folders = Vec::new();
-    if total.files > 0 {
-        top_folders.push(Bucket { name: "(files in this folder)".into(), files: total.files, bytes: total.bytes });
+    for (name, (files, bytes)) in std::mem::take(&mut total.tops) {
+        let name = if name.is_empty() { "(files in this folder)".to_string() } else { name };
+        top_folders.push(Bucket { name, files, bytes });
     }
-    for (name, partial) in per_folder {
-        top_folders.push(Bucket { name, files: partial.files, bytes: partial.bytes });
-        total.merge(partial);
-    }
-    top_folders.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    top_folders.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
     top_folders.truncate(50);
 
     Ok(ScanReport {
@@ -343,6 +315,7 @@ pub fn scan_folder(path: &Path, opts: &ScanOptions, progress: &ScanProgress) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     fn write(dir: &Path, rel: &str, len: usize) -> PathBuf {

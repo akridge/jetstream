@@ -175,6 +175,14 @@ JetStream.app / JetStream.exe        Rust shell (src-tauri/src/main.rs)
 
 ## If uploads seem stuck or slow
 
+- **Not sure why it's slow? Run a speed check:** **Speed check…** in a synced folder's menu (or **Settings → Uploads**). In about half a minute it measures:
+  - how fast the folder lists and reads (big files and small ones)
+  - upload speed over one connection and over 8 at once
+  - the time each request to Cloud Storage takes
+
+  Then it says which is the limit: the disk or share, the network, or per-file overhead. Nothing is stored in the bucket (the test uploads are never finished), and the speed limit isn't applied while it runs. **Copy results** gives a text summary to share.
+- **Network shares:** folders are now read many at a time (16 at once for `\\server\share` paths, 8 otherwise), instead of one after another. On a share each folder read waits on the file server, so this cuts the time spent listing big shares. Later syncs only need that listing: what's already uploaded isn't read again.
+
 - **OneDrive folders (e.g. Desktop or Documents):** online-only files aren't on the computer, so they're skipped with a note in the job output. Right-click the folder and choose **Always keep on this device**, then sync again.
 - **Files open in another program** are tried again at the end of the sync; close the program if they still fail.
 - **A dropped internet connection** (JetStream engine): the card says **Waiting for the internet connection**, and everything carries on by itself when it's back, however long it was down, without failing files. Large files continue from where Google has them. A connection that silently stops moving is noticed within a minute.

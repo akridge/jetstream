@@ -1174,3 +1174,30 @@ mod file_details {
         // reports metagenerations but doesn't enforce ifMetagenerationMatch.
     }
 }
+
+#[tokio::test]
+async fn speed_check_measures_without_storing_anything() {
+    let Some(env) = Env::new().await else { return };
+    env.write("big.bin", &vec![7u8; 6 * 1024 * 1024]);
+    for i in 0..40 {
+        env.write(&format!("small/{i}.txt"), b"hello");
+    }
+    let progress = jetstream_transfer::fileops::OpProgress::default();
+    let report = jetstream_transfer::speedcheck::speed_check(&env.client, "gs://bucket/data", Some(&env.src()), &progress).await.unwrap();
+    let folder = report.folder.as_ref().unwrap();
+    assert_eq!(folder.files, 41);
+    assert_eq!(folder.read_bytes, 6 * 1024 * 1024);
+    assert!(folder.small_files_per_sec.is_some());
+    assert!(report.single_mb_per_sec > 0.0 && report.parallel_mb_per_sec > 0.0, "{report:?}");
+    assert!(report.request_ms >= 0.0);
+    assert!(!report.findings.is_empty());
+    assert_eq!(progress.done.load(std::sync::atomic::Ordering::Relaxed), jetstream_transfer::speedcheck::STEPS);
+    // No objects were created.
+    assert!(env.client.list("bucket", "").await.unwrap().is_empty(), "the check left objects behind");
+
+    // Stopped before it starts: returns at once, marked stopped.
+    let stopped = jetstream_transfer::fileops::OpProgress::default();
+    stopped.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let report = jetstream_transfer::speedcheck::speed_check(&env.client, "gs://bucket/data", None, &stopped).await.unwrap();
+    assert!(report.cancelled);
+}
