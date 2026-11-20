@@ -1,0 +1,52 @@
+name: Publish the docs site
+
+# Builds the documentation site (website/, MkDocs Material) and publishes it to GitHub Pages
+# on pushes to the default branch that change it, or by hand from the Actions tab. Other
+# branches build it as a check (a broken link fails the build) without publishing.
+#
+# One-time setup: Settings → Pages → Build and deployment → Source: "GitHub Actions".
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "website/**"
+      - "desktop/CHANGELOG.md"
+      - ".github/workflows/pages.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build the site
+        env:
+          NO_MKDOCS_2_WARNING: "1"
+        run: |
+          pip install "mkdocs-material>=9.5,<10"
+          mkdocs build --strict -f website/mkdocs.yml -d ../_site
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

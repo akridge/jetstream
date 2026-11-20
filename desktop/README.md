@@ -2,6 +2,8 @@
 
 A native desktop app for JetStream, built with [Tauri 2](https://tauri.app) and [Svelte 5](https://svelte.dev). It has its own desktop interface and bundles the JetStream server, so you don't need Python, Anaconda or a terminal to use it.
 
+**User guide, downloads and screenshots: [akridge.github.io/jetstream](https://akridge.github.io/jetstream/)** (the site's source is in [`website/`](../website)).
+
 ## Ways to run it
 
 | You want to… | Use | Needs |

@@ -3,6 +3,8 @@
 
 A comprehensive web-based application for managing Google Cloud Storage uploads and Google Drive transfers, with features including job queuing, real-time analytics, and batch processing capabilities.
 
+> **Looking for the desktop app?** JetStream Desktop (Windows and Linux) adds synced folders, verification receipts, a cloud file manager and catalogs. See the **[JetStream docs site](https://akridge.github.io/jetstream/)** for downloads and guides, or [desktop/README.md](desktop/README.md).
+
 ### Features
 
 - **Upload Management** — queue-backed GCS uploads with retry, scheduling, and no-clobber support
