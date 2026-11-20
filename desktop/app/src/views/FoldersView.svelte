@@ -17,7 +17,8 @@
   import Keyboard from '@lucide/svelte/icons/keyboard';
   import FolderCard from '../components/FolderCard.svelte';
   import FolderRow from '../components/FolderRow.svelte';
-  import { app, ACTIVE } from '../lib/state.svelte.js';
+  import WelcomeCard from '../components/WelcomeCard.svelte';
+  import { app, ACTIVE, TERMINAL } from '../lib/state.svelte.js';
   import { api } from '../lib/api.js';
   import { folderStatus } from '../lib/status.svelte.js';
   import { allTags, folderState, isHidden, tagsOf, updateOptions } from '../lib/folders.svelte.js';
@@ -25,6 +26,14 @@
   import { isDesktop, pickFolder } from '../lib/platform.js';
 
   let running = $derived(app.jobList.filter((j) => ACTIVE.has(j.status)).length);
+
+  // Getting started: for people who haven't uploaded anything yet (not shown to people who
+  // already have, unless they saw it before finishing).
+  let firstUploadDone = $derived(app.presets.length > 0 && app.jobList.some((j) => TERMINAL.has(j.status) && j.status === 'completed' && !j.dry_run && !j.filters?.job_type));
+  let showWelcome = $derived(app.loaded && !app.prefs.welcome_done && (!firstUploadDone || !!app.prefs.welcome_shown));
+  $effect(() => {
+    if (showWelcome && !firstUploadDone && !app.prefs.welcome_shown) app.savePrefs({ welcome_shown: true });
+  });
 
   async function add() {
     const path = await pickFolder();
@@ -232,6 +241,10 @@
       <button class="btn primary" onclick={add}><FolderPlus size={17} /> Add folder</button>
     </div>
   </header>
+
+  {#if showWelcome}
+    <WelcomeCard />
+  {/if}
 
   {#if app.loaded && visible.length > 1}
     <div class="summary">

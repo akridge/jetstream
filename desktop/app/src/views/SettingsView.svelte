@@ -6,7 +6,7 @@
   import Moon from '@lucide/svelte/icons/moon';
   import Monitor from '@lucide/svelte/icons/monitor';
   import Gauge from '@lucide/svelte/icons/gauge';
-  import { app } from '../lib/state.svelte.js';
+  import { app, notifyLevel } from '../lib/state.svelte.js';
   import { api, apiBase } from '../lib/api.js';
   import { clearThumbnailCache, ensureNotificationPermission, isDesktop, openClassic, openUrl, setThumbnailCacheLimit, thumbnailCacheInfo } from '../lib/platform.js';
   import { bytes, count } from '../lib/format.js';
@@ -105,9 +105,12 @@
     app.scheduleUpdateChecks();
   }
 
-  function setNotifications(on) {
-    app.savePrefs({ notifications: on });
-    if (on) ensureNotificationPermission();
+  function setNotifyLevel(level) {
+    app.savePrefs({ notify_level: level, notifications: level !== 'off' });
+    if (level !== 'off') ensureNotificationPermission();
+  }
+  function setQuiet(changes) {
+    app.savePrefs({ quiet_hours: { on: false, from: '22:00', to: '07:00', ...app.prefs.quiet_hours, ...changes } });
   }
 </script>
 
@@ -283,13 +286,33 @@
           {/each}
         </div>
       </div>
-      <label class="row toggle">
+      <div class="row stack">
         <span>
-          <span class="label">Notify me when jobs finish</span>
-          <small class="muted">A desktop notification when an upload, preview or cloud operation completes or fails.</small>
+          <span class="label">Desktop notifications</span>
+          <small class="muted">{notifyLevel(app.prefs) === 'problems' ? "Only when something needs you: a failed sync or files that couldn't be verified." : notifyLevel(app.prefs) === 'all' ? 'When an upload or preview finishes or fails, and when files couldn’t be verified.' : 'None. Messages still show inside JetStream.'}</small>
         </span>
-        <input type="checkbox" checked={app.prefs.notifications} onchange={(e) => setNotifications(e.currentTarget.checked)} />
-      </label>
+        <div class="segmented">
+          {#each [['all', 'All'], ['problems', 'Only problems'], ['off', 'Off']] as [id, label] (id)}
+            <button class:active={notifyLevel(app.prefs) === id} onclick={() => setNotifyLevel(id)}>{label}</button>
+          {/each}
+        </div>
+      </div>
+      {#if notifyLevel(app.prefs) !== 'off'}
+        <div class="row">
+          <label class="toggle quiet">
+            <input type="checkbox" checked={!!app.prefs.quiet_hours?.on} onchange={(e) => setQuiet({ on: e.currentTarget.checked })} />
+            <span>
+              <span class="label">Quiet hours</span>
+              <small class="muted">No notifications in this window (uploads carry on).</small>
+            </span>
+          </label>
+          <span class="times">
+            <input class="input" type="time" aria-label="Quiet from" value={app.prefs.quiet_hours?.from || '22:00'} disabled={!app.prefs.quiet_hours?.on} onchange={(e) => setQuiet({ from: e.currentTarget.value })} />
+            <span class="muted">to</span>
+            <input class="input" type="time" aria-label="Quiet until" value={app.prefs.quiet_hours?.to || '07:00'} disabled={!app.prefs.quiet_hours?.on} onchange={(e) => setQuiet({ to: e.currentTarget.value })} />
+          </span>
+        </div>
+      {/if}
     </div>
 
     <div class="card panel">
@@ -304,6 +327,9 @@
         <dt>JetStream server</dt>
         <dd>{app.version || '…'} <span class="muted">(the Python package, versioned separately)</span></dd>
       </dl>
+      {#if app.desktop}
+        <button class="link-btn" onclick={() => (app.whatsNew = app.desktop.version)}>What's new in {app.desktop.version}</button>
+      {/if}
       {#if isDesktop}
         <div class="updates">
           {#if app.update}
@@ -343,6 +369,47 @@
 </section>
 
 <style>
+  .row.stack {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .row.stack > span {
+    display: flex;
+    flex-direction: column;
+  }
+  .segmented button {
+    white-space: nowrap;
+  }
+  .link-btn {
+    display: block;
+    text-align: left;
+    border: none;
+    background: none;
+    padding: 0;
+    margin-top: 10px;
+    color: var(--accent);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .times {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .times .input {
+    width: 120px;
+  }
+  .quiet {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+  }
+  .quiet > span {
+    display: flex;
+    flex-direction: column;
+  }
   .updates {
     margin-top: 14px;
     padding-top: 14px;

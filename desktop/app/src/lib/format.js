@@ -80,3 +80,14 @@ export function scheduleText(schedule) {
   const which = !days ? 'Daily' : days.join() === '0,1,2,3,4' ? 'Weekdays' : days.map((d) => names[d]).join(', ');
   return `${which} at ${schedule.time || '18:00'}`;
 }
+
+/** "Today", "Yesterday", "Monday" (this week), else "Mar 3, 2026". */
+export function dayLabel(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 'Earlier';
+  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(d).setHours(0, 0, 0, 0)) / 86400000);
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return d.toLocaleDateString([], { weekday: 'long' });
+  return d.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+}

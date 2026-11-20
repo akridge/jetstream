@@ -1,6 +1,9 @@
 // Shared app state (Svelte 5 runes) and the live job stream.
 
 import { api, eventsUrl, setApiBase } from './api.js';
+import { inQuietHours, notifyLevel } from './notify.js';
+import { checkMilestones } from './milestones.js';
+export { inQuietHours, notifyLevel };
 import { jobDestination, normalizeDestination, basename, bytes, duration } from './format.js';
 import { appInfo, cancelCloudOp, checkUpdate, ensureNotificationPermission, setThumbnailCacheLimit, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
 
@@ -23,6 +26,14 @@ export function finishedText(done) {
   const timed = done.seconds >= 1;
   const rate = timed ? ` · ${bytes(done.bytes / done.seconds)}/s` : '';
   return `Uploaded ${done.files.toLocaleString()} ${done.files === 1 ? 'file' : 'files'} · ${bytes(done.bytes)}${timed ? ` in ${duration(done.seconds)}` : ''}${rate}`;
+}
+
+/** What a finished job actually uploaded: { files, bytes }. files_uploaded/bytes_uploaded are
+ * progress counters (they count files already in the cloud too); the server records the real
+ * numbers in filters.result. Older jobs fall back to the counters. */
+export function uploadedOf(job) {
+  const r = job?.filters?.result;
+  return { files: r?.uploaded_files ?? job?.files_uploaded ?? 0, bytes: r?.uploaded_bytes ?? job?.bytes_uploaded ?? 0 };
 }
 
 export function notVerified(totals) {
@@ -151,6 +162,8 @@ class AppState {
   receiptSheet = $state(null);
   /** The tags sheet: the presets being tagged, or null. */
   tagsSheet = $state(null);
+  /** "What's new" sheet: the version to show, or null. */
+  whatsNew = $state(null);
   /** The command palette (Ctrl+K). */
   paletteOpen = $state(false);
   /** Synced folders page: search text, filter (all | attention | new | syncing | ok | hidden) and tag. */
@@ -161,6 +174,8 @@ class AppState {
   compareTarget = $state(null);
   /** Last place browsed in Cloud storage, kept while switching views. */
   cloudLocation = null;
+  /** Bumped by openCloud so Cloud storage goes there even when it's already showing. */
+  cloudNavigate = $state(0);
 
   jobList = $derived(
     Object.values(this.jobs).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')),
@@ -190,7 +205,19 @@ class AppState {
     }
   }
 
+  /** Celebrate data and file milestones (quietly marks old ones the first time). */
+  async checkMilestones() {
+    const stats = await api.stats().catch(() => null);
+    if (!stats) return;
+    const { seen, celebrate } = checkMilestones({ bytes: stats.uploaded_bytes ?? stats.total_uploaded_bytes ?? 0, files: stats.uploaded_files ?? stats.total_files_uploaded ?? 0 }, this.prefs.milestones || null);
+    if (JSON.stringify(seen) !== JSON.stringify(this.prefs.milestones)) this.savePrefs({ milestones: seen });
+    for (const m of celebrate) {
+      this.toast(m.kind === 'bytes' ? `Milestone: ${m.label} backed up with JetStream. Nice work!` : `Milestone: ${m.label} uploaded with JetStream. Nice work!`, 'success', { timeout: 9000 });
+    }
+  }
+
   async refreshAll() {
+    this.checkMilestones();
     await Promise.allSettled([
       this.refreshJobs(),
       this.refreshPresets(),
@@ -217,6 +244,13 @@ class AppState {
   async #loadVersion() {
     this.desktop = await appInfo().catch(() => null);
     this.scheduleUpdateChecks();
+    // After an update, show what's new once (not on the very first run).
+    const version = this.desktop?.version;
+    if (version) {
+      const seen = this.prefs.last_seen_version;
+      if (seen && seen !== version) this.whatsNew = version;
+      if (seen !== version) this.savePrefs({ last_seen_version: version });
+    }
     this.version = (await api.version()).version || '';
   }
 
@@ -351,6 +385,7 @@ class AppState {
       const view = { label: problems ? 'Review' : 'View receipt', run: () => this.openReceipt(preset, summary.json) };
       if (problems) {
         this.toast(`${preset.name}: ${problems.toLocaleString()} ${problems === 1 ? "file couldn't" : "files couldn't"} be verified`, 'warning', { action: view, timeout: 12000 });
+        this.notifyUser(`${preset.name}: not all files verified`, `${problems.toLocaleString()} ${problems === 1 ? 'file' : 'files'} couldn't be verified. Open JetStream to review.`, { problem: true });
       } else if (!auto) {
         this.toast(`${preset.name}: all ${(summary.totals?.verified || 0).toLocaleString()} files verified`, 'success', { action: view, timeout: 6000 });
       }
@@ -362,6 +397,24 @@ class AppState {
     } finally {
       set(null);
     }
+  }
+
+  /** Show gs://bucket/prefix in Cloud storage. */
+  openCloud(bucket, prefix = '') {
+    this.cloudLocation = { bucket, prefix: prefix && !prefix.endsWith('/') ? `${prefix}/` : prefix };
+    this.view = 'cloud';
+    this.cloudNavigate++;
+  }
+
+  /** Starred cloud locations ({ bucket, prefix }), shown in the sidebar. */
+  isStarred(bucket, prefix = '') {
+    return (this.prefs.starred || []).some((s) => s.bucket === bucket && s.prefix === prefix);
+  }
+  toggleStar(bucket, prefix = '') {
+    const list = this.prefs.starred || [];
+    const on = this.isStarred(bucket, prefix);
+    this.savePrefs({ starred: on ? list.filter((s) => !(s.bucket === bucket && s.prefix === prefix)) : [...list, { bucket, prefix }].slice(-12) });
+    return !on;
   }
 
   /** Stop a running verification. */
@@ -395,6 +448,7 @@ class AppState {
   }
 
   #jobFinished(info) {
+    if (info.status === 'completed' && !info.dry_run) setTimeout(() => this.checkMilestones(), 1500);
     const job0 = this.jobs[info.job_id];
     const group0 = job0?.filters?.group?.id;
     const lastOfGroup = !group0 || !this.jobList.some((j) => j.filters?.group?.id === group0 && j.job_id !== info.job_id && ACTIVE.has(j.status));
@@ -420,7 +474,7 @@ class AppState {
         this.toast(`${title}: ${folder} (${run.group.parts} folders)`, failed ? 'error' : run.status === 'cancelled' ? 'info' : 'success', {
           action: { label: 'View', run: () => this.openJob(info.job_id) },
         });
-      if (this.prefs.notifications) notify(title, `${folder}\n${info.destination || ''}`);
+      this.notifyUser(title, `${folder}\n${info.destination || ''}`, { problem: !!failed });
       return;
     }
     if (info.status === 'completed' && job && !job.filters?.job_type) this.#autoReceipt(job);
@@ -434,7 +488,16 @@ class AppState {
       this.toast(`${title}: ${folder}`, info.status === 'failed' ? 'error' : 'info', {
         action: { label: 'View', run: () => this.openJob(info.job_id) },
       });
-    if (this.prefs.notifications) notify(title, `${folder}\n${done ? finishedText(done) : info.destination || ''}`);
+    this.notifyUser(title, `${folder}\n${done ? finishedText(done) : info.destination || ''}`, { problem: info.status === 'failed' });
+  }
+
+  /** A desktop notification, as set up in Settings: for every finished job, only for problems,
+   * or never; and none during quiet hours. */
+  notifyUser(title, body, { problem = false } = {}) {
+    const level = notifyLevel(this.prefs);
+    if (level === 'off' || (level === 'problems' && !problem)) return;
+    if (inQuietHours(this.prefs.quiet_hours)) return;
+    notify(title, body);
   }
 
   /** Remember a finished upload's numbers for the folder card's "done" moment. */
@@ -442,8 +505,8 @@ class AppState {
     const preset = this.presetForJob(job);
     if (!preset) return null;
     const done = {
-      files: jobs.reduce((n, j) => n + (j.files_uploaded || 0), 0),
-      bytes: jobs.reduce((n, j) => n + (j.bytes_uploaded || 0), 0),
+      files: jobs.reduce((n, j) => n + uploadedOf(j).files, 0),
+      bytes: jobs.reduce((n, j) => n + uploadedOf(j).bytes, 0),
       seconds: jobs.reduce((n, j) => n + (j.duration_seconds || 0), 0),
       at: Date.now(),
     };

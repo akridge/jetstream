@@ -202,6 +202,10 @@ class StatsResponse(BaseModel):
     total_files_uploaded: int
     active_jobs: int
     queue_length: int
+    # What uploads actually sent (not counting files already in the cloud); older jobs that
+    # didn't record it count as before.
+    uploaded_files: int = 0
+    uploaded_bytes: int = 0
 
 class CloudAnalysisRequest(BaseModel):
     """Request model for cloud storage analysis."""

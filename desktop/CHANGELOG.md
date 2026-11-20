@@ -23,6 +23,8 @@ upload engine, in one window.
 - **Many folders, easy to manage:** a summary of what's backed up and what needs you, search, filters with counts, tags, hiding finished projects, sorting with problems first, a compact list view and keyboard shortcuts.
 - **Search or do anything (Ctrl+K):** jump to any view or run any action on any folder by typing.
 - **Upload complete:** a finished sync says what it uploaded, how much and how fast.
+- **A friendly start:** three steps to a first verified upload, ticked off as they happen; milestones along the way (1,000 files, 1 TB, …).
+- **Activity by day:** "Today · 3 syncs · 1,240 files uploaded · 8.4 GB".
 - **Folders always show what's new** and can upload new files on their own after a quiet period.
 - **Folders are watched:** new files are noticed within seconds.
 - **Add several folders at once**, choose subfolders, and upload all of them from one bar.
@@ -35,8 +37,10 @@ upload engine, in one window.
 - **Thumbnails** for images (optional), with a size-limited cache.
 - **Preview pane:** a larger image, the start of CSV and text files, and every detail of the selected file (original dates, checksums, storage class, custom metadata). Reads only the first 64 KB of big files.
 - **Fix file details** adds file types and original dates to files uploaded by older versions, without uploading them again. It shows live progress, before and after for each file, and a summary when it's done.
+- **Starred locations** in the sidebar, one click away.
 - Folder insights and cloud cleanup.
 
 ### Windows
 - **Portable build:** unzip and run, no install. Settings and history stay next to the app.
-- The app checks for new versions and says when one is available (turn this off in Settings).
+- The app checks for new versions and says when one is available (turn this off in Settings), and shows what's new after an update.
+- **Notifications your way:** for every finished job, only for problems, or off, with quiet hours.

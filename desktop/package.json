@@ -7,7 +7,7 @@
     "dev:ui": "vite",
     "build:ui": "vite build",
     "preview:ui": "vite preview",
-    "test:ui": "node --test app/src/lib/preview.test.mjs",
+    "test:ui": "node --test app/src/lib/preview.test.mjs app/src/lib/notify.test.mjs app/src/lib/extras.test.mjs",
     "sidecar": "python scripts/build_sidecar.py",
     "engine": "python scripts/build_engine.py",
     "icons": "tauri icon ../jetstream/static/icon.png",

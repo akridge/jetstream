@@ -11,6 +11,7 @@
   import ReceiptSheet from './components/ReceiptSheet.svelte';
   import TagsSheet from './components/TagsSheet.svelte';
   import CommandPalette from './components/CommandPalette.svelte';
+  import WhatsNewSheet from './components/WhatsNewSheet.svelte';
   import FoldersView from './views/FoldersView.svelte';
   import ActivityView from './views/ActivityView.svelte';
   import SettingsView from './views/SettingsView.svelte';
@@ -105,6 +106,9 @@
   {/if}
   {#if app.tagsSheet}
     <TagsSheet presets={app.tagsSheet} onclose={() => (app.tagsSheet = null)} />
+  {/if}
+  {#if app.whatsNew}
+    <WhatsNewSheet version={app.whatsNew} />
   {/if}
   {#if app.paletteOpen}
     <CommandPalette />

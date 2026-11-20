@@ -4,7 +4,8 @@
   import JobRow from '../components/JobRow.svelte';
   import JobDrawer from '../components/JobDrawer.svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import { app, ACTIVE, collapseRuns } from '../lib/state.svelte.js';
+  import { app, ACTIVE, collapseRuns, uploadedOf } from '../lib/state.svelte.js';
+  import { bytes, count, dayLabel } from '../lib/format.js';
 
   const FILTERS = [
     { id: 'all', label: 'All' },
@@ -34,6 +35,25 @@
   );
   // Split uploads show as one row that opens into their subfolders.
   let runs = $derived(collapseRuns(filtered));
+  /** Runs grouped by the day they started, newest first, with what each day uploaded. */
+  let days = $derived.by(() => {
+    const out = [];
+    for (const job of runs) {
+      const label = dayLabel(job.created_at);
+      let day = out[out.length - 1];
+      if (!day || day.label !== label) out.push((day = { label, runs: [], syncs: 0, files: 0, bytes: 0 }));
+      day.runs.push(job);
+      const parts = job.group ? job.group.jobs : [job];
+      if (!job.dry_run && job.status === 'completed' && !job.filters?.job_type) {
+        day.syncs++;
+        for (const p of parts) {
+          day.files += uploadedOf(p).files;
+          day.bytes += uploadedOf(p).bytes;
+        }
+      }
+    }
+    return out;
+  });
   const expanded = new SvelteSet();
   let selected = $derived(app.selectedJobId ? app.jobs[app.selectedJobId] : null);
   let counts = $derived({
@@ -68,7 +88,12 @@
 
   <div class="split">
     <div class="list card">
-      {#each runs as job (job.group ? `group-${job.group.id}` : job.job_id)}
+      {#each days as day (day.label)}
+        <div class="day">
+          <strong>{day.label}</strong>
+          {#if day.syncs}<span>{count(day.syncs)} {day.syncs === 1 ? 'sync' : 'syncs'} · {count(day.files)} {day.files === 1 ? 'file' : 'files'} uploaded · {bytes(day.bytes)}</span>{/if}
+        </div>
+      {#each day.runs as job (job.group ? `group-${job.group.id}` : job.job_id)}
         {#if job.group}
           <JobRow
             {job}
@@ -85,6 +110,7 @@
         {:else}
           <JobRow {job} selected={app.selectedJobId === job.job_id} onselect={(id) => (app.selectedJobId = id)} />
         {/if}
+      {/each}
       {:else}
         <div class="empty">
           <Inbox size={30} />
@@ -191,6 +217,22 @@
     min-height: 0;
     display: flex;
     gap: 16px;
+  }
+  .day {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 10px 16px 6px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .day span {
+    color: var(--muted);
+    font-size: 12.5px;
   }
   .list {
     flex: 1;

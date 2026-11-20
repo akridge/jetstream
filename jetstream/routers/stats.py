@@ -44,7 +44,21 @@ async def get_stats(db: Session = Depends(get_db)):
         UploadJob.status == "queued"
     ).scalar()
     
+    # What was actually sent by real (not preview) uploads.
+    uploaded_files = uploaded_bytes = 0
+    rows = db.query(UploadJob.filters, UploadJob.files_uploaded, UploadJob.bytes_uploaded).filter(
+        UploadJob.status == "completed", UploadJob.dry_run.is_(False)
+    )
+    for filters, files, size in rows:
+        result = (filters or {}).get("result") if isinstance(filters, dict) else None
+        if (filters or {}).get("job_type") if isinstance(filters, dict) else None:
+            continue  # cloud-to-cloud operations aren't uploads
+        uploaded_files += int((result or {}).get("uploaded_files", files or 0))
+        uploaded_bytes += int((result or {}).get("uploaded_bytes", size or 0))
+
     return StatsResponse(
+        uploaded_files=uploaded_files,
+        uploaded_bytes=uploaded_bytes,
         total_jobs=total_jobs,
         jobs_by_status=jobs_by_status,
         total_uploaded_bytes=total_uploaded,

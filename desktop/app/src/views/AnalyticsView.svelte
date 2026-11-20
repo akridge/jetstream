@@ -76,8 +76,8 @@
     <div class="tiles">
       <div class="card tile hero">
         <span class="label">Data uploaded</span>
-        <span class="value">{bytes(data.stats.total_uploaded_bytes)}</span>
-        <span class="muted">{count(data.stats.total_files_uploaded)} files, all time</span>
+        <span class="value">{bytes(data.stats.uploaded_bytes ?? data.stats.total_uploaded_bytes)}</span>
+        <span class="muted">{count(data.stats.uploaded_files ?? data.stats.total_files_uploaded)} files, all time</span>
       </div>
       <div class="card tile">
         <span class="label">Jobs</span>

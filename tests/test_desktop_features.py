@@ -216,3 +216,32 @@ def test_preset_crud(db_env):
         assert client.delete(f"/api/presets/{created['preset_id']}").status_code == 200
         assert client.get("/api/presets/").json() == []
         assert client.delete("/api/presets/missing").status_code == 404
+
+
+def test_stats_count_what_uploads_actually_sent(db_env):
+    """files_uploaded / bytes_uploaded are progress counters (100% at the end, even when
+    everything was already in the cloud); stats use the recorded result instead."""
+    from jetstream.routers import stats
+    from jetstream.services import UploadService
+
+    # A sync that sent 3 files of 1,000 checked, one that sent nothing, an older job with no
+    # recorded result, a preview and a cloud operation (neither counts).
+    add_job(status="completed", files_uploaded=1000, bytes_uploaded=9000, filters={"result": {"uploaded_files": 3, "uploaded_bytes": 300}})
+    add_job(status="completed", files_uploaded=1000, bytes_uploaded=9000, filters={"result": {"uploaded_files": 0, "uploaded_bytes": 0}})
+    add_job(status="completed", files_uploaded=7, bytes_uploaded=70, filters={})
+    add_job(status="completed", files_uploaded=50, bytes_uploaded=500, dry_run=True)
+    add_job(status="completed", files_uploaded=40, bytes_uploaded=400, filters={"job_type": "cloud_sync"})
+    app = FastAPI()
+    app.include_router(stats.router, prefix="/api/stats")
+    data = TestClient(app).get("/api/stats/").json()
+    assert (data["uploaded_files"], data["uploaded_bytes"]) == (10, 370)
+
+    # The engine's own report wins over the progress counters.
+    service = UploadService.__new__(UploadService)
+    service.upload_results = {"job-1": {"uploaded_files": 2, "uploaded_bytes": 20}}
+
+    class Job:
+        files_uploaded, bytes_uploaded = 99, 990
+
+    assert service.take_result("job-1", Job()) == {"uploaded_files": 2, "uploaded_bytes": 20}
+    assert service.take_result("job-1", Job()) == {"uploaded_files": 99, "uploaded_bytes": 990}, "taken once; then the counters"

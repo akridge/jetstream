@@ -24,6 +24,7 @@
   import Gauge from '@lucide/svelte/icons/gauge';
   import SunMoon from '@lucide/svelte/icons/sun-moon';
   import CornerDownLeft from '@lucide/svelte/icons/corner-down-left';
+  import Sparkles from '@lucide/svelte/icons/sparkles';
   import { app } from '../lib/state.svelte.js';
   import { folderStatus } from '../lib/status.svelte.js';
   import { folderState } from '../lib/folders.svelte.js';
@@ -40,8 +41,7 @@
   let dark = $derived(app.prefs.theme === 'dark' || (app.prefs.theme !== 'light' && window.matchMedia?.('(prefers-color-scheme: dark)').matches));
   function openCloud(path) {
     const [bucket, ...rest] = normalizeDestination(path).split('/');
-    app.cloudLocation = { bucket, prefix: rest.filter(Boolean).length ? `${rest.filter(Boolean).join('/')}/` : '' };
-    app.view = 'cloud';
+    app.openCloud(bucket, rest.filter(Boolean).length ? `${rest.filter(Boolean).join('/')}/` : '');
   }
 
   let commands = $derived.by(() => {
@@ -62,6 +62,7 @@
         : []),
       ...(isDesktop ? [{ section: 'Actions', label: 'Speed check…', icon: Gauge, run: () => (app.speedCheck = {}) }] : []),
       { section: 'Actions', label: 'Make a catalog…', icon: LibraryBig, run: go('catalogs') },
+      ...(app.desktop ? [{ section: 'Actions', label: `What's new in ${app.desktop.version}`, icon: Sparkles, run: () => (app.whatsNew = app.desktop.version) }] : []),
       { section: 'Actions', label: `Switch to ${dark ? 'light' : 'dark'} theme`, icon: SunMoon, run: () => app.savePrefs({ theme: dark ? 'light' : 'dark' }) },
     ];
     for (const p of app.presets) {
@@ -79,6 +80,7 @@
         { section: p.name, label: `Tags for ${p.name}`, icon: Tag, run: () => (app.tagsSheet = [p]), folder: true },
       );
     }
+    for (const s of app.prefs.starred || []) list.push({ section: 'Starred', label: `Open gs://${s.bucket}/${s.prefix}`, icon: Cloud, run: () => app.openCloud(s.bucket, s.prefix) });
     for (const b of app.prefs.recent_buckets || []) list.push({ section: 'Buckets', label: `Open gs://${b}`, icon: Cloud, run: () => openCloud(b) });
     return list;
   });

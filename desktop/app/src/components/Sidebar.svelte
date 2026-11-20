@@ -11,6 +11,7 @@
   import ArrowUpCircle from '@lucide/svelte/icons/circle-arrow-up';
   import X from '@lucide/svelte/icons/x';
   import Search from '@lucide/svelte/icons/search';
+  import Star from '@lucide/svelte/icons/star';
   import { app } from '../lib/state.svelte.js';
   import { openUrl } from '../lib/platform.js';
 
@@ -84,6 +85,14 @@
               <span class="badge danger" title="Failed jobs">{app.failedCount}</span>
             {/if}
           </button>
+          {#if item.id === 'cloud'}
+            {#each app.prefs.starred || [] as place (`${place.bucket}/${place.prefix}`)}
+              <button class="nav-item starred" title="gs://{place.bucket}/{place.prefix}" onclick={() => app.openCloud(place.bucket, place.prefix)}>
+                <Star size={13} fill="currentColor" />
+                <span class="truncate">{place.prefix ? place.prefix.replace(/\/$/, '').split('/').pop() : place.bucket}</span>
+              </button>
+            {/each}
+          {/if}
         {/each}
       </div>
     {/each}
@@ -119,6 +128,16 @@
 </aside>
 
 <style>
+  .nav-item.starred {
+    padding-left: 34px;
+    font-size: 12.5px;
+    opacity: 0.85;
+    min-height: 0;
+    height: 30px;
+  }
+  .nav-item.starred :global(svg) {
+    color: #f2c14e;
+  }
   .palette {
     display: flex;
     align-items: center;

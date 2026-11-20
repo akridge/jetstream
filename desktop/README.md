@@ -74,6 +74,10 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - **Cards or a compact list:** one row per folder with a status dot, what's new, tags and last sync. Click a row to expand it into its card.
   - **Keyboard:** `/` search, `↑` `↓` move, `Enter` expand (list) or compare (cards), `S` sync, `P` preview, `V` verify, `E` edit, `T` tags, `Esc` clear, `?` show these.
   - **Upload complete:** when a sync finishes, its card says so for a moment ("Uploaded 1,240 files · 8.4 GB in 12m · 11.9 MB/s"); the desktop notification says the same.
+- **Getting started:** a new install shows three steps (sign in, add a folder, preview then upload), ticked off as they happen, then "You're all set". Milestones (1,000 files, 1 TB, …) get a small message. After an update, **What's new** shows the release notes once (also in Settings → About).
+- **Activity** is grouped by day, each with what it uploaded ("Today · 3 syncs · 1,240 files uploaded · 8.4 GB").
+- **Starred locations:** the star in Cloud storage's toolbar keeps a bucket or folder in the sidebar under Cloud storage.
+- **Notifications** (Settings → Appearance & notifications): for every finished job, only for problems (a failed sync, files that couldn't be verified), or off; with optional quiet hours.
 - **Search or do anything (Ctrl+K, ⌘K on a Mac, or Search at the top of the sidebar):** type to jump to any view or run an action on any folder: "sync kona", "receipt pago", "open hilo in cloud storage", "catalogs", "speed check", "gs://my-bucket/path".
 - **Add folders your way:** **Add folder** opens the native folder picker, or you can drag a folder from File Explorer onto the window. The dialog counts the folder's files, offers quick bucket choices, and lets you choose:
   - which upload tool to use: `gcloud storage rsync`, or the faster-to-re-sync **JetStream engine** (see [`transfer/README.md`](transfer/README.md))

@@ -1338,6 +1338,7 @@ class UploadService:
         self.active_uploads = {}  # Track active upload processes
         self.stop_requested = set()  # Jobs cancelled while counting their files
         self.engine_jobs = set()  # Jobs run by the JetStream engine (can pause / change speed)
+        self.upload_results = {}  # job_id -> what the engine actually uploaded (see take_result)
     
     async def upload_to_gcs(self, job_id: str, source_path: str,
                            destination_bucket: str, destination_path: str = "",
@@ -1713,8 +1714,23 @@ class UploadService:
             except Exception:
                 pass
         success = returncode == 0
+        if state.summary is not None:
+            s = state.summary
+            self.upload_results[job_id] = {
+                "uploaded_files": int(s.get("would_upload" if dry_run else "uploaded") or 0),
+                "uploaded_bytes": int(s.get("would_upload_bytes" if dry_run else "uploaded_bytes") or 0),
+            }
         print(("✓ " if success else "❌ ") + state.summary_text(returncode).splitlines()[0])
         return success, output
+
+    def take_result(self, job_id: str, job) -> Dict[str, int]:
+        """What a finished upload actually sent (files and bytes), as opposed to the progress
+        counters (files_uploaded / bytes_uploaded count everything checked, so they read 100%).
+        The engine reports it; for gcloud it's the copies counted from its output."""
+        result = self.upload_results.pop(job_id, None)
+        if result is not None:
+            return result
+        return {"uploaded_files": int(job.files_uploaded or 0), "uploaded_bytes": int(job.bytes_uploaded or 0)}
 
     def _send_engine_command(self, job_id: str, command: Dict) -> bool:
         """Send a control command (pause, resume, limit) to a running engine job."""

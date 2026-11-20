@@ -199,6 +199,8 @@ class UploadScheduler:
             # Update job status
             if success:
                 job.status = "completed"
+                # What was actually sent, before the progress counters are set to 100%.
+                job.filters = {**(job.filters or {}), "result": upload_service.take_result(job_id, job)}
                 job.files_uploaded = job.total_files
                 job.bytes_uploaded = job.total_size_bytes
             else:

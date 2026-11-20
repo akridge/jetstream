@@ -36,6 +36,7 @@
   import FileCheck from '@lucide/svelte/icons/file-check';
   import LayoutGrid from '@lucide/svelte/icons/layout-grid';
   import LibraryBig from '@lucide/svelte/icons/library-big';
+  import Star from '@lucide/svelte/icons/star';
   import { thumbLoader } from '../lib/thumbs.svelte.js';
   import { app } from '../lib/state.svelte.js';
   import { cloudOps } from '../lib/cloudops.svelte.js';
@@ -167,6 +168,15 @@
   onMount(() => {
     if (isDesktop && app.cloudLocation) open(app.cloudLocation.bucket, app.cloudLocation.prefix, { remember: false });
   });
+  // Go somewhere asked for elsewhere (a starred location, the command palette) while showing.
+  let seenNavigate = app.cloudNavigate;
+  $effect(() => {
+    const n = app.cloudNavigate;
+    if (n === seenNavigate) return;
+    seenNavigate = n;
+    if (isDesktop && app.cloudLocation) open(app.cloudLocation.bucket, app.cloudLocation.prefix, { remember: false });
+  });
+  let starred = $derived(bucket ? app.isStarred(bucket, prefix) : false);
 
   const refresh = (opts = {}) => open(bucket, prefix, { remember: false, ...opts });
 
@@ -616,6 +626,13 @@
             <button class="btn ghost sm" class:toggled={thumbsOn} aria-pressed={thumbsOn} title={thumbsOn ? 'Show as a list' : 'Show images as thumbnails'} onclick={toggleThumbs}><LayoutGrid size={14} /> Thumbnails</button>
             <button class="btn ghost sm" class:toggled={previewOn} aria-pressed={previewOn} title={previewOn ? 'Hide the preview pane' : 'Show a preview and details of the selected file'} onclick={() => app.savePrefs({ cloud_preview: !previewOn })}><PanelRight size={14} /> Preview</button>
           {/if}
+          <button
+            class="btn ghost sm icon star"
+            class:on={starred}
+            aria-pressed={starred}
+            aria-label={starred ? 'Remove from starred' : 'Star this location'}
+            title={starred ? 'Starred: in the sidebar. Click to remove.' : 'Star this location to keep it in the sidebar'}
+            onclick={() => app.toggleStar(bucket, prefix)}><Star size={14} fill={starred ? 'currentColor' : 'none'} /></button>
           <button class="btn ghost sm icon" aria-label="Refresh" title="Refresh" onclick={() => (trash ? loadTrash() : refresh())}><RefreshCw size={14} class={loading ? 'spin' : ''} /></button>
         </div>
       </div>
@@ -1043,6 +1060,9 @@
   }
   .tile:hover {
     background: var(--surface-hover);
+  }
+  .star.on {
+    color: #e0a100;
   }
   .split {
     display: flex;
