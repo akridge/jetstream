@@ -19,8 +19,8 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
 2. Open the latest green run and scroll to **Artifacts**.
 3. Download the artifact for your system:
    - `jetstream-desktop-windows-latest`: the portable zip, an `.msi` installer and a setup `.exe`
-   - `jetstream-desktop-macos-latest`: a `.dmg`
-   - `jetstream-desktop-ubuntu-22.04`: a portable zip, an `.AppImage` and a `.deb`
+   - `jetstream-desktop-ubuntu-22.04`: a portable zip, an `.AppImage` and a `.deb` (Linux)
+   - `jetstream-desktop-macos-latest`: a `.dmg` (only when the macOS workflow is run by hand)
 4. Unzip the artifact you downloaded (GitHub wraps every artifact in a zip).
 
 **From a release:** tagged versions (`desktop-v*`) have the same files attached to a GitHub release, with notes from [CHANGELOG.md](CHANGELOG.md).
@@ -33,6 +33,12 @@ The web version (`pip install` and `jetstream` in a browser) is described in the
   - Unzip it anywhere, including a USB drive, and run `JetStream.exe`. Nothing is installed.
   - Job history, logs and the upload manifest stay in the `JetStreamData` folder next to the program.
   - Delete `JetStreamData` to share history with an installed copy instead.
+
+**On Linux:**
+- **`.deb`** (Debian, Ubuntu 22.04 and newer): `sudo apt install ./JetStream_<version>_amd64.deb` installs it with what it needs (WebKitGTK 4.1).
+- **`.AppImage`** (most distributions): `chmod +x JetStream_<version>_amd64.AppImage`, then run it.
+- **Portable zip** (`JetStream-<version>-linux-x64-portable.zip`): unzip and run `./JetStream`. It needs WebKitGTK 4.1 installed (`libwebkit2gtk-4.1-0` on Ubuntu/Debian).
+- The tray icon needs a desktop with AppIndicator support (GNOME needs the AppIndicator extension).
 
 **First run:**
 - Windows warns about unsigned apps. Choose **More info → Run anyway**.
@@ -301,10 +307,10 @@ python scripts/build_desktop.py --package-only   # adds the portable zip; copies
 - **Icons:** regenerate them from `jetstream/static/icon.png` with `npm run icons`.
 - **Releasing:** add a `## <version>` section to `CHANGELOG.md`, set the version with `set_version.py`, push, then tag: `git tag desktop-v0.2.1 && git push origin desktop-v0.2.1`. When the build finishes, publish the draft release.
 - **Versions:** the desktop app (with its upload engine) has its own version, separate from the `jetstream` Python package. It lives in `src-tauri/tauri.conf.json`. Change it everywhere with `python desktop/scripts/set_version.py 0.2.1`; `--check` confirms the files agree. Every CI build also carries its build number and commit. They show in the sidebar ("v0.2.0 · build 18"), in **Settings → About** (desktop app, upload engine and server versions), in `jetstream-transfer --version`, and in the portable zip's name. Local builds say "local build".
-- **CI:** the **Build desktop app (Windows)** GitHub workflow (`.github/workflows/desktop.yml`) builds the Windows portable zip and installers:
+- **CI:** the **Build desktop app (Windows and Linux)** GitHub workflow (`.github/workflows/desktop.yml`) builds both on every push that changes the app:
   - It runs on any push that changes `desktop/`, `jetstream/` or `requirements.txt` (README-only changes are skipped), when started from the Actions tab, or when a `desktop-v*` tag is pushed.
-  - Each run uploads a `jetstream-desktop-windows-latest` artifact with the portable zip and installers. Download it from the run's summary page.
+  - Each run uploads `jetstream-desktop-windows-latest` (portable zip, `.msi`, setup `.exe`) and `jetstream-desktop-ubuntu-22.04` (portable zip, `.AppImage`, `.deb`). Download them from the run's summary page. Linux builds on Ubuntu 22.04 so the AppImage runs on older distributions too.
   - A tag such as `desktop-v0.2.0` (which must match the desktop version) also creates a draft release with the installers and portable zip attached. Its description is that version's section of [CHANGELOG.md](CHANGELOG.md) (`scripts/release_notes.py`); the build fails if the section is missing. Publish the draft to make it the "latest" release the app's update check sees.
-  - macOS and Linux builds are parked in **Build desktop app (macOS and Linux)** (`.github/workflows/desktop-mac-linux.yml`), which only runs when started from the Actions tab.
+  - The macOS build is parked in **Build desktop app (macOS)** (`.github/workflows/desktop-mac-linux.yml`), which only runs when started from the Actions tab.
   - The **Run workflow** button only appears once the workflow file is on the default branch.
 - **Code signing:** Windows SmartScreen and macOS Gatekeeper warn about unsigned apps. Signing needs certificates that are not set up yet. See the [Tauri signing guides](https://tauri.app/distribute/).
