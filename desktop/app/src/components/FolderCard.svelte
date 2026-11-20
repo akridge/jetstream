@@ -17,12 +17,15 @@
   import StatusIcon from './StatusIcon.svelte';
   import { folderStatus } from '../lib/status.svelte.js';
   import ProgressBar from './ProgressBar.svelte';
-  import { app, ACTIVE, TERMINAL, collapseRuns, notVerified } from '../lib/state.svelte.js';
+  import { app, ACTIVE, TERMINAL, collapseRuns, notVerified, finishedText } from '../lib/state.svelte.js';
+  import { isHidden, tagsOf, updateOptions } from '../lib/folders.svelte.js';
+  import EyeOff from '@lucide/svelte/icons/eye-off';
+  import PartyPopper from '@lucide/svelte/icons/circle-check-big';
   import { api, pollActivity } from '../lib/api.js';
   import { bytes, count, duration, relativeTime, normalizeDestination, scheduleText, upcoming } from '../lib/format.js';
   import { isDesktop, revealPath } from '../lib/platform.js';
 
-  let { preset, selecting = false, selected = false, onselect = () => {} } = $props();
+  let { preset, selecting = false, selected = false, focused = false, onselect = () => {} } = $props();
 
   // A split upload (one job per subfolder) counts as one run.
   let jobs = $derived(collapseRuns(app.jobsForPreset(preset)));
@@ -85,6 +88,23 @@
     void preset.preset_id;
     if (isDesktop) app.loadReceipts(preset);
   });
+  let tags = $derived(tagsOf(preset));
+  let hidden = $derived(isHidden(preset));
+  let done = $derived(app.justFinished[preset.preset_id]);
+
+  async function setHidden(on) {
+    menuOpen = false;
+    try {
+      await updateOptions(preset, { hidden: on });
+      await app.refreshPresets();
+      app.toast(on ? `${preset.name} is hidden from the list` : `${preset.name} is back in the list`, 'info', {
+        timeout: 5000,
+        action: { label: 'Undo', run: async () => { await updateOptions({ ...preset, options: { ...preset.options, hidden: on } }, { hidden: !on }); await app.refreshPresets(); } },
+      });
+    } catch (err) {
+      app.toast(`Couldn't save: ${err.message}`, 'error');
+    }
+  }
   let schedule = $derived(preset.options?.schedule);
   let scheduled = $derived(schedule && schedule.mode && schedule.mode !== 'off');
 
@@ -94,9 +114,11 @@
   let uploadAfter = $derived(!!app.uploadAfterPreview[preset.preset_id]);
   // What's new since the last sync, from the background check (no file reads).
   let status = $derived(folderStatus.of(preset));
+  // Right after an upload, the last check is from before it: don't show its counts.
+  let staleAfterDone = $derived(!!(done && status && status.checked_at < done.at));
   let checking = $derived(!!folderStatus.checking[preset.preset_id]);
   let autoAt = $derived(folderStatus.autoAt[preset.preset_id]);
-  let changes = $derived(status && !status.error ? status.changes : null);
+  let changes = $derived(status && !status.error && !(done && status.checked_at < done.at) ? status.changes : null);
   const ago = (ms) => relativeTime(new Date(ms).toISOString());
   const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   // A failure is old news once a later check finds everything uploaded.
@@ -141,7 +163,7 @@
 
 <svelte:window onclick={() => (menuOpen = false)} />
 
-<article class="card folder" class:running={current} class:picked={selecting && selected}>
+<article class="card folder" class:running={current} class:picked={selecting && selected} class:focused class:hidden-folder={hidden} data-folder={preset.preset_id}>
   <header>
     {#if selecting}
       <label class="icon pick" title="Select {preset.name}"><input type="checkbox" checked={selected} onchange={onselect} aria-label="Select {preset.name}" /></label>
@@ -159,6 +181,8 @@
       {#if menuOpen}
         <div class="menu card" role="menu">
           <button role="menuitem" onclick={() => app.editFolder(preset)}>Edit…</button>
+          <button role="menuitem" onclick={() => { menuOpen = false; app.tagsSheet = [preset]; }}>Tags…</button>
+          <button role="menuitem" title="Hidden folders keep syncing on their schedule and auto-upload; they're just out of the list" onclick={() => setHidden(!hidden)}>{hidden ? 'Show in the list' : 'Hide from the list'}</button>
           <button role="menuitem" onclick={() => app.compareFolder(preset)}>Compare with cloud</button>
           <button role="menuitem" onclick={() => { menuOpen = false; folderStatus.check(preset, { soon: true }); }}>Check for changes now</button>
           <button role="menuitem" title="Add missing file types and the original files' dates to what's already uploaded (nothing is re-uploaded)" onclick={() => { menuOpen = false; app.fixDetails = { destination: `gs://${normalizeDestination(preset.destination)}/`, preset }; }}>Fix file details in the cloud…</button>
@@ -184,8 +208,22 @@
     <Cloud size={15} />
     <span class="mono truncate start" title={`gs://${normalizeDestination(preset.destination)}/`}><bdi>gs://{normalizeDestination(preset.destination)}/</bdi></span>
     {#if preset.options?.auto_upload}<span class="pill auto" title="New files are uploaded automatically">Auto-upload</span>{/if}
+    {#if hidden}<span class="pill" title="Hidden from the list (still syncs)"><EyeOff size={11} /> Hidden</span>{/if}
     <span class="pill">{tool}</span>
   </div>
+
+  {#if tags.length}
+    <div class="tags">
+      {#each tags as t (t)}<button class="pill tag" title="Show folders tagged {t}" onclick={() => (app.folderQuery = { ...app.folderQuery, tag: t })}>{t}</button>{/each}
+    </div>
+  {/if}
+
+  {#if done && !current}
+    <div class="done" role="status">
+      <span class="pop"><PartyPopper size={18} /></span>
+      <span><strong>Upload complete</strong><span class="muted"> · {finishedText(done)}</span></span>
+    </div>
+  {/if}
 
   <div class="status">
     {#if current}
@@ -244,6 +282,8 @@
         <span class="muted">{relativeTime(lastFinished.completed_at)}</span>
       </div>
       <div class="error truncate" title={lastFinished.error_message}>{lastFinished.error_message || 'See activity for details'}</div>
+    {:else if staleAfterDone}
+      <div class="row muted"><RefreshCw size={14} class="spin" /> Checking what's left…</div>
     {:else if changes}
       <div class="row">
         <span class="state-icon pending"><ArrowUpCircle size={16} /></span>
@@ -554,5 +594,65 @@
   .vbar {
     flex: 1;
     min-width: 60px;
+  }
+  .folder.focused {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .folder.hidden-folder {
+    opacity: 0.8;
+  }
+  .tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: -2px;
+  }
+  .pill.tag {
+    border: none;
+    cursor: pointer;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font: inherit;
+    font-size: 11.5px;
+  }
+  .done {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--success-soft);
+    font-size: 13px;
+    animation: done-in 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .done strong {
+    color: var(--success);
+  }
+  .done .pop {
+    color: var(--success);
+    display: grid;
+    animation: pop 0.6s cubic-bezier(0.2, 1.6, 0.4, 1);
+  }
+  @keyframes done-in {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+  }
+  @keyframes pop {
+    0% {
+      transform: scale(0.3);
+      opacity: 0;
+    }
+    60% {
+      transform: scale(1.25);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .done,
+    .done .pop {
+      animation: none;
+    }
   }
 </style>

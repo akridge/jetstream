@@ -1,7 +1,7 @@
 // Shared app state (Svelte 5 runes) and the live job stream.
 
 import { api, eventsUrl, setApiBase } from './api.js';
-import { jobDestination, normalizeDestination, basename } from './format.js';
+import { jobDestination, normalizeDestination, basename, bytes, duration } from './format.js';
 import { appInfo, cancelCloudOp, checkUpdate, ensureNotificationPermission, setThumbnailCacheLimit, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
 
 const PREFS_KEY = 'jetstreamDesktopPrefs';
@@ -16,6 +16,15 @@ function loadPrefs() {
 }
 
 /** Files a receipt couldn't verify (different, not in the cloud, unreadable, online-only). */
+/** "Uploaded 1,240 files · 8.4 GB in 12m · 11.9 MB/s" (or "Nothing new to upload"). */
+export function finishedText(done) {
+  if (!done.files) return 'Nothing new to upload: everything was already in the cloud';
+  // Under a second, "in 0s" and a rate say nothing useful.
+  const timed = done.seconds >= 1;
+  const rate = timed ? ` · ${bytes(done.bytes / done.seconds)}/s` : '';
+  return `Uploaded ${done.files.toLocaleString()} ${done.files === 1 ? 'file' : 'files'} · ${bytes(done.bytes)}${timed ? ` in ${duration(done.seconds)}` : ''}${rate}`;
+}
+
 export function notVerified(totals) {
   const t = totals || {};
   return (t.mismatch || 0) + (t.missing_in_cloud || 0) + (t.unreadable || 0) + (t.online_only || 0);
@@ -140,6 +149,14 @@ class AppState {
   verifying = $state({});
   /** The receipt sheet: { preset, json } or null. */
   receiptSheet = $state(null);
+  /** The tags sheet: the presets being tagged, or null. */
+  tagsSheet = $state(null);
+  /** The command palette (Ctrl+K). */
+  paletteOpen = $state(false);
+  /** Synced folders page: search text, filter (all | attention | new | syncing | ok | hidden) and tag. */
+  folderQuery = $state({ text: '', filter: 'all', tag: null });
+  /** Uploads that just finished, by preset id: { files, bytes, seconds, at } (shown on the card for a moment). */
+  justFinished = $state({});
   /** Synced folder shown on the Compare screen. */
   compareTarget = $state(null);
   /** Last place browsed in Cloud storage, kept while switching views. */
@@ -396,6 +413,7 @@ class AppState {
       if (job.dry_run && this.#continueAfterPreview(job, run.status === 'completed' && !run.group.failed)) return;
       const folder = this.presetForJob(job)?.name || run.group.name;
       const failed = run.group.failed;
+      if (!failed && run.status === 'completed' && !job.dry_run) this.#markFinished(job, siblings);
       const title = failed ? `${kind} finished with ${failed} failed ${failed === 1 ? 'folder' : 'folders'}` : run.status === 'cancelled' ? `${kind} cancelled` : `${kind} finished`;
       if (!failed && run.status === 'completed') this.#announceSuccess(kind, `${folder} (${run.group.parts} folders)`, info.job_id);
       else
@@ -410,12 +428,34 @@ class AppState {
     const folder = this.presetForJob(job)?.name || info.name;
     const title =
       info.status === 'completed' ? `${kind} finished` : info.status === 'failed' ? `${kind} failed` : `${kind} cancelled`;
+    const done = info.status === 'completed' && job && !job.dry_run ? this.#markFinished(job, [job]) : null;
     if (info.status === 'completed') this.#announceSuccess(kind, folder, info.job_id);
     else
       this.toast(`${title}: ${folder}`, info.status === 'failed' ? 'error' : 'info', {
         action: { label: 'View', run: () => this.openJob(info.job_id) },
       });
-    if (this.prefs.notifications) notify(title, `${folder}\n${info.destination || ''}`);
+    if (this.prefs.notifications) notify(title, `${folder}\n${done ? finishedText(done) : info.destination || ''}`);
+  }
+
+  /** Remember a finished upload's numbers for the folder card's "done" moment. */
+  #markFinished(job, jobs) {
+    const preset = this.presetForJob(job);
+    if (!preset) return null;
+    const done = {
+      files: jobs.reduce((n, j) => n + (j.files_uploaded || 0), 0),
+      bytes: jobs.reduce((n, j) => n + (j.bytes_uploaded || 0), 0),
+      seconds: jobs.reduce((n, j) => n + (j.duration_seconds || 0), 0),
+      at: Date.now(),
+    };
+    const id = preset.preset_id;
+    this.justFinished = { ...this.justFinished, [id]: done };
+    setTimeout(() => {
+      if (this.justFinished[id]?.at === done.at) {
+        const { [id]: _, ...rest } = this.justFinished;
+        this.justFinished = rest;
+      }
+    }, 15000);
+    return done;
   }
 
   #successes = [];

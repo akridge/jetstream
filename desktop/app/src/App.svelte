@@ -9,6 +9,8 @@
   import FixDetailsDialog from './components/FixDetailsDialog.svelte';
   import SpeedCheckDialog from './components/SpeedCheckDialog.svelte';
   import ReceiptSheet from './components/ReceiptSheet.svelte';
+  import TagsSheet from './components/TagsSheet.svelte';
+  import CommandPalette from './components/CommandPalette.svelte';
   import FoldersView from './views/FoldersView.svelte';
   import ActivityView from './views/ActivityView.svelte';
   import SettingsView from './views/SettingsView.svelte';
@@ -57,7 +59,17 @@
   $effect(() => {
     if (app.server.phase === 'failed') serverLog().then((text) => (log = text));
   });
+
+  /** Ctrl+K / ⌘K anywhere: the command palette. */
+  function globalKeys(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && app.server.phase === 'ready') {
+      e.preventDefault();
+      app.paletteOpen = !app.paletteOpen;
+    }
+  }
 </script>
+
+<svelte:window onkeydown={globalKeys} />
 
 {#if app.server.phase === 'ready'}
   <div class="shell">
@@ -90,6 +102,12 @@
     {#key app.fixDetails}
       <FixDetailsDialog dialog={app.fixDetails} />
     {/key}
+  {/if}
+  {#if app.tagsSheet}
+    <TagsSheet presets={app.tagsSheet} onclose={() => (app.tagsSheet = null)} />
+  {/if}
+  {#if app.paletteOpen}
+    <CommandPalette />
   {/if}
   {#if app.receiptSheet}
     {#key app.receiptSheet}

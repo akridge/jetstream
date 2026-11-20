@@ -10,6 +10,7 @@
   import LibraryBig from '@lucide/svelte/icons/library-big';
   import ArrowUpCircle from '@lucide/svelte/icons/circle-arrow-up';
   import X from '@lucide/svelte/icons/x';
+  import Search from '@lucide/svelte/icons/search';
   import { app } from '../lib/state.svelte.js';
   import { openUrl } from '../lib/platform.js';
 
@@ -45,6 +46,7 @@
     },
   ];
 
+  const mod = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
   let showUpdate = $derived(app.update && app.prefs.update_dismissed !== app.update.latest);
   let auth = $derived(app.auth);
   let authState = $derived(
@@ -60,6 +62,12 @@
       <div class="tag">NOAA cloud data transfer</div>
     </div>
   </div>
+
+  <button class="palette" onclick={() => (app.paletteOpen = true)} title="Jump to a folder or view, or run an action">
+    <Search size={15} />
+    <span>Search</span>
+    <kbd>{mod} K</kbd>
+  </button>
 
   <nav>
     {#each groups as group, g (g)}
@@ -111,6 +119,36 @@
 </aside>
 
 <style>
+  .palette {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 4px 14px;
+    padding: 7px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    color: inherit;
+    opacity: 0.85;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .palette:hover {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.1);
+  }
+  .palette span {
+    flex: 1;
+    text-align: left;
+  }
+  .palette kbd {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+  }
   .update {
     display: flex;
     align-items: center;

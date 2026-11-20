@@ -20,6 +20,9 @@ upload engine, in one window.
 - Speed limit, download to this computer, and drop files onto the window to upload them.
 
 ### Folders
+- **Many folders, easy to manage:** a summary of what's backed up and what needs you, search, filters with counts, tags, hiding finished projects, sorting with problems first, a compact list view and keyboard shortcuts.
+- **Search or do anything (Ctrl+K):** jump to any view or run any action on any folder by typing.
+- **Upload complete:** a finished sync says what it uploaded, how much and how fast.
 - **Folders always show what's new** and can upload new files on their own after a quiet period.
 - **Folders are watched:** new files are noticed within seconds.
 - **Add several folders at once**, choose subfolders, and upload all of them from one bar.
