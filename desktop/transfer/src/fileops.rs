@@ -141,6 +141,8 @@ pub struct OpProgress {
     pub failed: AtomicU64,
     pub bytes: AtomicU64,
     pub cancel: AtomicBool,
+    /// Which step a multi-step operation is on (0 when it has only one), for its progress text.
+    pub stage: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize)]

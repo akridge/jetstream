@@ -2,8 +2,7 @@
 
 import { api, eventsUrl, setApiBase } from './api.js';
 import { jobDestination, normalizeDestination, basename } from './format.js';
-import { appInfo, checkUpdate, ensureNotificationPermission, setThumbnailCacheLimit, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
-import { cloudOps } from './cloudops.svelte.js';
+import { appInfo, cancelCloudOp, checkUpdate, ensureNotificationPermission, setThumbnailCacheLimit, getServerStatus, listReceipts, makeReceipt, newOpId, notify, onServerStatus, revealPath, setTransferLimit } from './platform.js';
 
 const PREFS_KEY = 'jetstreamDesktopPrefs';
 const DEFAULT_PREFS = { theme: 'system', notifications: true, default_upload_tool: 'gcloud', update_check: true, recent_buckets: [], recent_scans: [] };
@@ -14,6 +13,12 @@ function loadPrefs() {
   } catch {
     return { ...DEFAULT_PREFS };
   }
+}
+
+/** Files a receipt couldn't verify (different, not in the cloud, unreadable, online-only). */
+export function notVerified(totals) {
+  const t = totals || {};
+  return (t.mismatch || 0) + (t.missing_in_cloud || 0) + (t.unreadable || 0) + (t.online_only || 0);
 }
 
 export const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
@@ -131,6 +136,10 @@ class AppState {
   /** Latest receipt per synced folder (preset_id -> summary), and a counter to reload lists. */
   receipts = $state({});
   receiptsVersion = $state(0);
+  /** Verifications running, by preset id: { opId, done, total, auto }. */
+  verifying = $state({});
+  /** The receipt sheet: { preset, json } or null. */
+  receiptSheet = $state(null);
   /** Synced folder shown on the Compare screen. */
   compareTarget = $state(null);
   /** Last place browsed in Cloud storage, kept while switching views. */
@@ -287,40 +296,66 @@ class AppState {
     return this.#speed.get(jobId)?.rate || 0;
   }
 
-  /** Check a synced folder against the cloud and save a receipt (shown in the operations tray). */
+  /**
+   * Verify a synced folder file by file and save a receipt. Quiet: progress shows on the
+   * folder card (app.verifying), not in the operations tray. A toast only when asked for
+   * (`auto` false) or when something couldn't be verified; it opens the receipt.
+   */
   async createReceipt(preset, { auto = false } = {}) {
+    const pid = preset.preset_id;
+    if (this.verifying[pid]) return null;
     const o = preset.options || {};
     const id = newOpId();
-    const summary = await cloudOps.start(id, `Verifying ${preset.name}`, 0, 'Verified', (onProgress) =>
-      makeReceipt(id, {
-        folderName: preset.name,
-        path: preset.source_path,
-        destination: `gs://${normalizeDestination(preset.destination)}/`,
-        excludePatterns: lines(o.exclude_patterns) || [],
-        excludeFolders: commaList(o.exclude_folders) || [],
-        recursive: o.recursive !== false,
-        account: this.auth?.gcloud_account || this.auth?.service_account || null,
-        cloudCopy: !!o.receipt_cloud_copy,
-      }, onProgress), {
-      report: (r) => {
-        const t = r.totals || {};
-        const problems = (t.mismatch || 0) + (t.missing_in_cloud || 0) + (t.unreadable || 0) + (t.online_only || 0);
-        const message = problems
-          ? `Receipt for ${preset.name}: ${problems.toLocaleString()} of ${(t.local_files || 0).toLocaleString()} files not verified`
-          : `Receipt for ${preset.name}: all ${(t.verified || 0).toLocaleString()} files verified`;
-        // An automatic receipt that verified everything shows on the folder card; no toast.
-        if (auto && !problems) return;
-        this.toast(message, problems ? 'error' : 'success', {
-          action: problems ? { label: 'Compare', run: () => this.compareFolder(preset) } : { label: 'Show', run: () => revealPath(r.csv) },
-          timeout: auto && !problems ? 6000 : 12000,
-        });
-      },
-    });
-    if (summary) {
-      this.receipts = { ...this.receipts, [preset.preset_id]: summary };
+    const set = (value) => {
+      const next = { ...this.verifying };
+      if (value) next[pid] = value;
+      else delete next[pid];
+      this.verifying = next;
+    };
+    set({ opId: id, done: 0, total: 0, auto });
+    try {
+      const summary = await makeReceipt(
+        id,
+        {
+          folderName: preset.name,
+          path: preset.source_path,
+          destination: `gs://${normalizeDestination(preset.destination)}/`,
+          excludePatterns: lines(o.exclude_patterns) || [],
+          excludeFolders: commaList(o.exclude_folders) || [],
+          recursive: o.recursive !== false,
+          account: this.auth?.gcloud_account || this.auth?.service_account || null,
+          cloudCopy: !!o.receipt_cloud_copy,
+        },
+        (t) => this.verifying[pid] && set({ ...this.verifying[pid], done: t.done || 0, total: t.total || 0 }),
+      );
+      this.receipts = { ...this.receipts, [pid]: summary };
       this.receiptsVersion++;
+      const problems = notVerified(summary.totals);
+      const view = { label: problems ? 'Review' : 'View receipt', run: () => this.openReceipt(preset, summary.json) };
+      if (problems) {
+        this.toast(`${preset.name}: ${problems.toLocaleString()} ${problems === 1 ? "file couldn't" : "files couldn't"} be verified`, 'warning', { action: view, timeout: 12000 });
+      } else if (!auto) {
+        this.toast(`${preset.name}: all ${(summary.totals?.verified || 0).toLocaleString()} files verified`, 'success', { action: view, timeout: 6000 });
+      }
+      return summary;
+    } catch (err) {
+      const message = String(err?.message || err);
+      if (!/stopped|cancel/i.test(message)) this.toast(`Couldn't verify ${preset.name}: ${message}`, 'error', { timeout: 10000 });
+      return null;
+    } finally {
+      set(null);
     }
-    return summary;
+  }
+
+  /** Stop a running verification. */
+  stopVerifying(preset) {
+    const running = this.verifying[preset.preset_id];
+    if (running) cancelCloudOp(running.opId);
+  }
+
+  /** Open the receipt sheet (the latest receipt when `json` isn't given). */
+  openReceipt(preset, json = null) {
+    this.receiptSheet = { preset, json: json || this.receipts[preset.preset_id]?.json || null };
   }
 
   async loadReceipts(preset) {

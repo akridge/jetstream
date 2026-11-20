@@ -22,6 +22,13 @@ use crate::gcs::{guess_content_type, parse_crc32c_b64, GcsClient, GcsError, Obje
 use crate::manifest::Manifest;
 use crate::sync::{crc32c_file, parse_destination, scan};
 
+/// `progress.stage` while planning: listing the cloud (`done` = objects listed), looking
+/// through the folder on this computer, then reading files to confirm they match (`done` of
+/// `total`).
+pub const STAGE_LISTING: u64 = 1;
+pub const STAGE_SCANNING: u64 = 2;
+pub const STAGE_READING: u64 = 3;
+
 /// Examples listed in the plan (the counts cover everything).
 const MAX_EXAMPLES: usize = 200;
 const PATCHES_AT_ONCE: usize = 16;
@@ -38,6 +45,9 @@ pub struct FixItem {
     /// Original modified / created time to record (None: leave it).
     pub modified: Option<i64>,
     pub created: Option<i64>,
+    /// What the object has now (shown as "before" in the app).
+    pub current_type: Option<String>,
+    pub current_modified: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -46,6 +56,8 @@ pub struct FixPlan {
     pub prefix: String,
     /// Objects looked at.
     pub objects: u64,
+    /// Objects that change (a type, dates, or both).
+    pub changes: u64,
     /// Objects that get a content type / original dates.
     pub types: u64,
     pub dates: u64,
@@ -84,6 +96,8 @@ fn needs(object: &ObjectInfo, local: Option<(i64, Option<i64>)>) -> Option<FixIt
         content_type,
         modified,
         created,
+        current_type: object.content_type.clone().filter(|t| !t.is_empty()),
+        current_modified: object.file_mtime(),
     })
 }
 
@@ -97,6 +111,7 @@ pub async fn plan_fix(
     progress: &OpProgress,
 ) -> Result<FixPlan> {
     let (bucket, prefix) = parse_destination(destination)?;
+    progress.stage.store(STAGE_LISTING, Ordering::Relaxed);
     let mut objects: Vec<ObjectInfo> = Vec::new();
     let mut token: Option<String> = None;
     loop {
@@ -111,7 +126,7 @@ pub async fn plan_fix(
             }
             objects.push(info);
         }
-        progress.total.store(objects.len() as u64, Ordering::Relaxed);
+        progress.done.store(objects.len() as u64, Ordering::Relaxed);
         if progress.cancel.load(Ordering::Relaxed) {
             anyhow::bail!("stopped");
         }
@@ -125,6 +140,7 @@ pub async fn plan_fix(
     let mut same: HashMap<String, (i64, Option<i64>)> = HashMap::new();
     let mut plan = FixPlan { bucket: bucket.clone(), prefix: prefix.clone(), objects: objects.len() as u64, ..Default::default() };
     if let Some((root, excludes, recursive)) = local {
+        progress.stage.store(STAGE_SCANNING, Ordering::Relaxed);
         let root_owned = root.to_path_buf();
         let excludes_owned = excludes.to_vec();
         let scanned = tokio::task::spawn_blocking(move || scan(&root_owned, &excludes_owned, recursive)).await??;
@@ -157,14 +173,27 @@ pub async fn plan_fix(
             }
         }
         plan.read_files = to_read.len() as u64;
+        if progress.cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("stopped");
+        }
+        progress.stage.store(STAGE_READING, Ordering::Relaxed);
+        progress.total.store(to_read.len() as u64, Ordering::Relaxed);
+        progress.done.store(0, Ordering::Relaxed);
         let read: Vec<_> = stream::iter(to_read)
             .map(|(rel, path, cloud_crc, dates)| async move {
+                if progress.cancel.load(Ordering::Relaxed) {
+                    return (rel, false, dates);
+                }
                 let crc = tokio::task::spawn_blocking(move || crc32c_file(&path, None, None)).await.ok().and_then(|r| r.ok());
+                progress.done.fetch_add(1, Ordering::Relaxed);
                 (rel, crc == cloud_crc, dates)
             })
             .buffer_unordered(4)
             .collect()
             .await;
+        if progress.cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("stopped");
+        }
         for (rel, matches, dates) in read {
             if matches {
                 same.insert(rel, dates);
@@ -190,7 +219,8 @@ pub async fn plan_fix(
             plan.items.push(item);
         }
     }
-    progress.done.store(objects.len() as u64, Ordering::Relaxed);
+    plan.changes = plan.items.len() as u64;
+    progress.stage.store(0, Ordering::Relaxed);
     Ok(plan)
 }
 

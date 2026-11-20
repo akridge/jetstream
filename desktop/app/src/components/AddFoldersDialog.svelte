@@ -230,7 +230,7 @@
         </label>
         <label class="toggle">
           <input type="checkbox" bind:checked={receipts} />
-          <span><strong>Make a verification receipt after each sync</strong></span>
+          <span><strong>Verify every file after each sync</strong></span>
         </label>
         {#if network}
           <span class="hint">Network folders are checked for new files every hour (walking a share takes a while); change it per folder with Edit.</span>

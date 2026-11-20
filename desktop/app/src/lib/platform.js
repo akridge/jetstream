@@ -198,10 +198,12 @@ async function withOpProgress(opId, onProgress, call) {
   }
 }
 
-/** Plan "Fix file details" for gs://destination (types; dates too with localPath). Read-only. */
-export async function planFixDetails(opId, destination, { localPath = null, excludePatterns = [], excludeFolders = [], recursive = true } = {}) {
+/** Plan "Fix file details" for gs://destination (types; dates too with localPath). Read-only.
+ * onProgress({ stage, done, total }): stage 1 listing the cloud (done = listed), 2 looking
+ * through the folder, 3 reading files to confirm (done of total). Stop with cancelCloudOp. */
+export async function planFixDetails(opId, destination, { localPath = null, excludePatterns = [], excludeFolders = [], recursive = true } = {}, onProgress) {
   if (!isDesktop) throw desktopOnly();
-  return invoke('plan_fix_details', { opId, destination, localPath, excludePatterns, excludeFolders, recursive });
+  return withOpProgress(opId, onProgress, () => invoke('plan_fix_details', { opId, destination, localPath, excludePatterns, excludeFolders, recursive }));
 }
 
 /** Apply a planned fix; onProgress({ done, skipped, failed }). */
@@ -409,6 +411,18 @@ export function makeReceipt(opId, { folderName, path, destination, excludePatter
   return withOpProgress(opId, onProgress, () =>
     invoke('make_receipt', { opId, folderName, path, destination, excludePatterns, excludeFolders, recursive, account, cloudCopy }),
   );
+}
+
+/** A saved receipt for the receipt sheet: summary, totals and problems (no verified files). */
+export async function readReceipt(json) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('read_receipt', { json });
+}
+
+/** Open a receipt's printable page in the browser (to print or save as PDF). */
+export async function openReceiptPage(json) {
+  if (!isDesktop) throw desktopOnly();
+  return invoke('receipt_html', { json });
 }
 
 /** Saved receipts for a synced folder, newest first. */

@@ -237,8 +237,8 @@
         <label class="toggle">
           <input type="checkbox" checked={form.options.receipts !== false} onchange={(e) => (form.options.receipts = e.currentTarget.checked)} />
           <span>
-            <strong>Make a verification receipt after each sync</strong>
-            <small>Checks every file against the cloud by checksum and saves a CSV and JSON record (who, when, each file's checksum) for data management and archiving.</small>
+            <strong>Verify every file after each sync</strong>
+            <small>Checks each file against its cloud copy by checksum and keeps a receipt (who, when, each file's checksum) you can open, print or share. Runs quietly; you're told only if something isn't verified.</small>
           </span>
         </label>
         {#if form.options.receipts !== false}

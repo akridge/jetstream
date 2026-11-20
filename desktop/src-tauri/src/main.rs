@@ -432,6 +432,7 @@ struct OpTick {
     skipped: u64,
     failed: u64,
     bytes: u64,
+    stage: u64,
 }
 
 /// Run an operation with progress ticks ("cloud-op-progress") and cancellation by `op_id`.
@@ -455,6 +456,7 @@ where
                     skipped: tick_progress.skipped.load(Ordering::Relaxed),
                     failed: tick_progress.failed.load(Ordering::Relaxed),
                     bytes: tick_progress.bytes.load(Ordering::Relaxed),
+                    stage: tick_progress.stage.load(Ordering::Relaxed),
                 },
             );
             std::thread::sleep(Duration::from_millis(250));
@@ -688,11 +690,56 @@ fn list_receipts(folder_name: String) -> Vec<serde_json::Value> {
                 "account": value["account"],
                 "json": p.display().to_string(),
                 "csv": p.with_extension("csv").display().to_string(),
+                "html": p.with_extension("html").display().to_string(),
             }))
         })
         .collect();
     out.sort_by(|a, b| b["finished_at"].as_str().cmp(&a["finished_at"].as_str()));
     out
+}
+
+/// A saved receipt's JSON, if `path` really is one of JetStream's receipts.
+fn receipt_json(path: &str) -> Result<(std::path::PathBuf, serde_json::Value), String> {
+    let root = data_dir().join("receipts").canonicalize().map_err(|_| "No receipts yet.".to_string())?;
+    let file = std::path::Path::new(path).canonicalize().map_err(|_| "That receipt no longer exists.".to_string())?;
+    if !file.starts_with(&root) || file.extension().is_none_or(|e| e != "json") {
+        return Err("Not a JetStream receipt.".into());
+    }
+    let value = serde_json::from_slice(&std::fs::read(&file).map_err(|e| e.to_string())?).map_err(|e| format!("The receipt can't be read: {e}"))?;
+    Ok((file, value))
+}
+
+/// A receipt for the app's receipt sheet: its summary and problems (not the verified files).
+#[tauri::command]
+async fn read_receipt(json: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (file, value) = receipt_json(&json)?;
+        let mut view = receipt::view(&value, receipt::VIEW_PROBLEMS_PER_KIND);
+        view["json"] = file.display().to_string().into();
+        view["csv"] = file.with_extension("csv").display().to_string().into();
+        Ok(view)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Open the printable receipt (HTML) in the browser, writing it first for receipts made
+/// before JetStream wrote them. Returns its path.
+#[tauri::command]
+async fn receipt_html(app: AppHandle, json: String) -> Result<String, String> {
+    let html = tauri::async_runtime::spawn_blocking(move || {
+        let (file, value) = receipt_json(&json)?;
+        let html = file.with_extension("html");
+        if !html.exists() {
+            std::fs::write(&html, receipt::to_html(&value)).map_err(|e| e.to_string())?;
+        }
+        Ok::<_, String>(html)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_path(html.display().to_string(), None::<&str>).map_err(|e| format!("Couldn't open the receipt: {e}"))?;
+    Ok(html.display().to_string())
 }
 
 /// Compare a local folder with its cloud copy (read-only). Uses the upload manifest, when
@@ -733,6 +780,7 @@ async fn compare_folder(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn plan_fix_details(
+    app: AppHandle,
     core: tauri::State<'_, Core>,
     op_id: String,
     destination: String,
@@ -746,9 +794,10 @@ async fn plan_fix_details(
     let manifest_path = portable_data_dir().unwrap_or_else(default_data_dir).join("transfer-manifest.db");
     let manifest = if manifest_path.exists() { Manifest::open(&manifest_path).ok() } else { None };
     let local = local_path.as_deref().map(|p| (std::path::Path::new(p), excludes.as_slice(), recursive.unwrap_or(true)));
-    let plan = details::plan_fix(&client, &destination, local, manifest.as_ref(), &OpProgress::default())
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    let plan = track(&app, &core, &op_id, |progress| async move {
+        details::plan_fix(&client, &destination, local, manifest.as_ref(), &progress).await.map_err(|e| format!("{e:#}"))
+    })
+    .await?;
     core.fix_plans.lock().unwrap().insert(op_id, plan.clone());
     let mut summary = plan;
     summary.items.clear();
@@ -1296,7 +1345,9 @@ fn main() {
             clear_thumbnail_cache,
             set_thumbnail_cache_limit,
             make_receipt,
-            list_receipts
+            list_receipts,
+            read_receipt,
+            receipt_html
         ])
         .setup(|app| {
             build_tray(app.handle())?;

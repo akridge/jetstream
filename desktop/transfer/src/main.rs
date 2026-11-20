@@ -168,6 +168,9 @@ enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+    /// Print a saved receipt as the app shows it: summary and problems, not the verified files.
+    #[command(hide = true)]
+    ReceiptView { json: PathBuf },
     /// Add missing file types (and, with --local, the original files' dates) to objects already
     /// in gs://bucket/prefix by updating their metadata. A plan unless --apply.
     FixDetails {
@@ -469,8 +472,13 @@ async fn run() -> Result<i32> {
             let (csv, json) = jetstream_transfer::receipt::write_receipt(&receipt, &out)?;
             print_json(&serde_json::json!({
                 "result": receipt.result, "totals": receipt.totals, "csv": csv, "json": json,
+                "finished_at": receipt.finished_at, "destination": receipt.destination,
             }))?;
             return Ok(if receipt.result == "complete" { 0 } else { 2 });
+        }
+        Command::ReceiptView { json } => {
+            let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&json)?)?;
+            return print_json(&jetstream_transfer::receipt::view(&value, jetstream_transfer::receipt::VIEW_PROBLEMS_PER_KIND));
         }
         Command::FixDetails { destination, local, excludes, exclude_folders, no_recursive, manifest, apply } => {
             let regexes = jetstream_transfer::compare::exclude_regexes(&excludes, &exclude_folders)?;

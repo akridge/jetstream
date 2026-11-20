@@ -1197,8 +1197,20 @@ mod file_details {
         let generation_before = raw(&env, "data/photos/a.jpg").await["generation"].clone();
 
         let local = (env.src(), Vec::new(), true);
-        let plan = plan_fix(&env.client, "gs://bucket/data", Some((local.0.as_path(), local.1.as_slice(), local.2)), None, &OpProgress::default()).await.unwrap();
+        // Stopped: says so, changes nothing.
+        let stopped = OpProgress::default();
+        stopped.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(plan_fix(&env.client, "gs://bucket/data", Some((local.0.as_path(), local.1.as_slice(), local.2)), None, &stopped).await.is_err());
+
+        let progress = OpProgress::default();
+        let plan = plan_fix(&env.client, "gs://bucket/data", Some((local.0.as_path(), local.1.as_slice(), local.2)), None, &progress).await.unwrap();
         assert_eq!(plan.objects, 5);
+        assert_eq!(plan.changes, 5, "every object changes in some way");
+        // Ended on the reading stage: done of total files read, then the stage is cleared.
+        use std::sync::atomic::Ordering::Relaxed;
+        assert_eq!((progress.done.load(Relaxed), progress.total.load(Relaxed), progress.stage.load(Relaxed)), (3, 3, 0));
+        let example = plan.examples.iter().find(|e| e.name == "data/photos/a.jpg").unwrap();
+        assert_eq!((example.current_type.as_deref(), example.content_type.as_deref()), (Some("application/octet-stream"), Some("image/jpeg")), "before and after");
         assert_eq!(plan.types, 4, "jpg, csv, png, tif get a type; .zzz stays binary: {plan:?}");
         assert_eq!(plan.dates, 3, "the three files that are the same as on this computer");
         assert_eq!((plan.not_local, plan.different, plan.read_files), (1, 1, 3));

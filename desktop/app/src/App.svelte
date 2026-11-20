@@ -8,6 +8,7 @@
   import AddFoldersDialog from './components/AddFoldersDialog.svelte';
   import FixDetailsDialog from './components/FixDetailsDialog.svelte';
   import SpeedCheckDialog from './components/SpeedCheckDialog.svelte';
+  import ReceiptSheet from './components/ReceiptSheet.svelte';
   import FoldersView from './views/FoldersView.svelte';
   import ActivityView from './views/ActivityView.svelte';
   import SettingsView from './views/SettingsView.svelte';
@@ -88,6 +89,11 @@
   {#if app.fixDetails}
     {#key app.fixDetails}
       <FixDetailsDialog dialog={app.fixDetails} />
+    {/key}
+  {/if}
+  {#if app.receiptSheet}
+    {#key app.receiptSheet}
+      <ReceiptSheet sheet={app.receiptSheet} />
     {/key}
   {/if}
   {#if app.speedCheck}

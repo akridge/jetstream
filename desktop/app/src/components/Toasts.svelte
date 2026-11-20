@@ -41,6 +41,9 @@
   .toast.success {
     border-left-color: var(--success);
   }
+  .toast.warning {
+    border-left-color: var(--warning);
+  }
   .toast.error {
     border-left-color: var(--danger);
   }

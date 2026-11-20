@@ -337,6 +337,209 @@ pub fn to_csv(receipt: &Receipt) -> String {
     out
 }
 
+/// Problem rows per kind kept by `view` (the counts cover all of them).
+pub const VIEW_PROBLEMS_PER_KIND: usize = 500;
+/// File rows in the printable receipt (the CSV has them all).
+const HTML_MAX_ROWS: usize = 20_000;
+
+/// What the app's receipt sheet shows, from a receipt's JSON: everything but the verified
+/// file list, with up to `per_kind` problem rows of each kind.
+pub fn view(receipt: &serde_json::Value, per_kind: usize) -> serde_json::Value {
+    use serde_json::json;
+    let mut groups: Vec<(String, Vec<serde_json::Value>, u64)> =
+        ["missing_in_cloud", "mismatch", "unreadable"].iter().map(|k| (k.to_string(), Vec::new(), 0)).collect();
+    let mut online_only = (Vec::new(), 0u64);
+    for file in receipt["files"].as_array().into_iter().flatten() {
+        let status = file["status"].as_str().unwrap_or("");
+        let online = status == "unreadable" && file["note"].as_str().is_some_and(|n| n.contains("online-only"));
+        if online {
+            online_only.1 += 1;
+            if online_only.0.len() < per_kind {
+                online_only.0.push(file.clone());
+            }
+            continue;
+        }
+        if let Some(group) = groups.iter_mut().find(|(k, ..)| k == status) {
+            group.2 += 1;
+            if group.1.len() < per_kind {
+                group.1.push(file.clone());
+            }
+        }
+    }
+    let mut problems: Vec<serde_json::Value> = groups.into_iter().filter(|g| g.2 > 0).map(|(kind, files, count)| json!({ "kind": kind, "count": count, "files": files })).collect();
+    if online_only.1 > 0 {
+        problems.push(json!({ "kind": "online_only", "count": online_only.1, "files": online_only.0 }));
+    }
+    let mut out = receipt.clone();
+    if let Some(map) = out.as_object_mut() {
+        map.remove("files");
+        map.insert("problems".into(), json!(problems));
+    }
+    out
+}
+
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn human_bytes(n: u64) -> String {
+    let units = ["bytes", "KB", "MB", "GB", "TB", "PB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < units.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} bytes")
+    } else {
+        format!("{value:.1} {}", units[unit])
+    }
+}
+
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A printable, self-contained receipt (open it in a browser to print or save as PDF).
+pub fn to_html(receipt: &serde_json::Value) -> String {
+    let s = |key: &str| receipt[key].as_str().unwrap_or("").to_string();
+    let t = &receipt["totals"];
+    let n = |key: &str| t[key].as_u64().unwrap_or(0);
+    let complete = s("result") == "complete";
+    let not_verified = n("mismatch") + n("missing_in_cloud") + n("unreadable") + n("online_only");
+    let headline = if complete {
+        format!("All {} files verified", thousands(n("verified")))
+    } else {
+        format!("{} of {} files not verified", thousands(not_verified), thousands(n("local_files")))
+    };
+    let files: Vec<&serde_json::Value> = receipt["files"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
+    let label = |status: &str, note: &str| match status {
+        "verified" => "Verified",
+        "mismatch" => "Different",
+        "missing_in_cloud" => "Not in the cloud",
+        "cloud_only" => "Cloud only",
+        "unreadable" if note.contains("online-only") => "Online-only",
+        "unreadable" => "Couldn't read",
+        _ => "?",
+    };
+    let mut rows = String::new();
+    let mut problems = String::new();
+    for f in &files {
+        let status = f["status"].as_str().unwrap_or("");
+        let note = f["note"].as_str().unwrap_or("");
+        let cells = format!(
+            "<td class=\"path\">{}</td><td class=\"st {status}\">{}</td><td class=\"num\">{}</td><td class=\"mono\">{}</td><td class=\"mono\">{}</td>",
+            html_escape(f["path"].as_str().unwrap_or("")),
+            label(status, note),
+            human_bytes(f["size"].as_u64().unwrap_or(0)),
+            html_escape(f["crc32c"].as_str().unwrap_or("")),
+            html_escape(f["md5"].as_str().unwrap_or("")),
+        );
+        if !matches!(status, "verified" | "cloud_only") {
+            problems.push_str(&format!("<tr>{cells}<td>{}</td></tr>\n", html_escape(note)));
+        }
+    }
+    for f in files.iter().take(HTML_MAX_ROWS) {
+        let status = f["status"].as_str().unwrap_or("");
+        rows.push_str(&format!(
+            "<tr><td class=\"path\">{}</td><td class=\"st {status}\">{}</td><td class=\"num\">{}</td><td class=\"mono\">{}</td></tr>\n",
+            html_escape(f["path"].as_str().unwrap_or("")),
+            label(status, f["note"].as_str().unwrap_or("")),
+            human_bytes(f["size"].as_u64().unwrap_or(0)),
+            html_escape(f["crc32c"].as_str().unwrap_or("")),
+        ));
+    }
+    let more = if files.len() > HTML_MAX_ROWS {
+        format!("<p class=\"note\">Showing the first {} of {} files. The CSV next to this receipt lists them all.</p>", thousands(HTML_MAX_ROWS as u64), thousands(files.len() as u64))
+    } else {
+        String::new()
+    };
+    let fact = |label: &str, value: String| format!("<div><dt>{label}</dt><dd>{}</dd></div>", html_escape(&value));
+    let facts = [
+        fact("Folder", s("local_root")),
+        fact("Cloud", s("destination")),
+        fact("Checked by", s("account")),
+        fact("Started", s("started_at")),
+        fact("Finished", s("finished_at")),
+        fact("Checksums", format!("{} read now, {} from earlier uploads", thousands(n("files_read")), thousands(n("local_files").saturating_sub(n("files_read") + n("missing_in_cloud"))))),
+        fact("Generated by", s("generator")),
+    ]
+    .join("");
+    let stat = |value: String, label: &str| format!("<div class=\"stat\"><b>{value}</b><span>{label}</span></div>");
+    let stats = [
+        stat(thousands(n("verified")), "verified"),
+        stat(human_bytes(n("verified_bytes")), "verified data"),
+        stat(thousands(n("missing_in_cloud")), "not in the cloud"),
+        stat(thousands(n("mismatch")), "different"),
+        stat(thousands(n("unreadable")), "couldn't read"),
+        stat(thousands(n("cloud_only")), "in the cloud only"),
+    ]
+    .join("");
+    let problem_section = if problems.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<h2>Not verified</h2><table><thead><tr><th>File</th><th>Status</th><th class=\"num\">Size</th><th>CRC32C (cloud)</th><th>MD5 (cloud)</th><th>Why</th></tr></thead><tbody>{problems}</tbody></table>"
+        )
+    };
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upload receipt · {title}</title>
+<style>
+:root {{ color-scheme: light; --ink:#14202e; --muted:#5d6b7c; --line:#dde3ea; --ok:#127a46; --bad:#b4590a; }}
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; color: var(--ink); background: #f4f6f9; }}
+main {{ max-width: 960px; margin: 32px auto; background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 36px 40px; }}
+header {{ display: flex; gap: 18px; align-items: center; border-bottom: 1px solid var(--line); padding-bottom: 22px; }}
+.seal {{ width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center; font-size: 28px; color: #fff; background: var(--ok); flex: none; }}
+.seal.bad {{ background: var(--bad); }}
+h1 {{ font-size: 22px; margin: 0; }}
+.kicker {{ text-transform: uppercase; letter-spacing: .08em; font-size: 11px; color: var(--muted); }}
+dl {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 28px; margin: 22px 0; }}
+dl div {{ min-width: 0; }} dt {{ color: var(--muted); font-size: 12px; }} dd {{ margin: 0; word-break: break-all; }}
+.stats {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin: 8px 0 26px; }}
+.stat {{ border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }}
+.stat b {{ display: block; font-size: 18px; font-variant-numeric: tabular-nums; }} .stat span {{ color: var(--muted); font-size: 12px; }}
+h2 {{ font-size: 15px; margin: 26px 0 8px; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+th, td {{ text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }}
+th {{ color: var(--muted); font-weight: 600; }}
+.num {{ text-align: right; white-space: nowrap; }} .mono {{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }}
+.path {{ word-break: break-all; }}
+.st.verified {{ color: var(--ok); }} .st.mismatch, .st.missing_in_cloud, .st.unreadable {{ color: var(--bad); font-weight: 600; }} .st.cloud_only {{ color: var(--muted); }}
+.note {{ color: var(--muted); font-size: 12px; }}
+footer {{ margin-top: 26px; color: var(--muted); font-size: 12px; }}
+@media print {{ body {{ background: #fff; }} main {{ margin: 0; border: none; padding: 0; }} tr {{ break-inside: avoid; }} }}
+</style></head>
+<body><main>
+<header><div class="seal{seal_class}">{seal}</div><div><div class="kicker">JetStream upload receipt</div><h1>{headline}</h1></div></header>
+<dl>{facts}</dl>
+<div class="stats">{stats}</div>
+{problem_section}
+<h2>Files</h2>
+<table><thead><tr><th>File</th><th>Status</th><th class="num">Size</th><th>CRC32C (cloud)</th></tr></thead><tbody>
+{rows}</tbody></table>
+{more}
+<footer>Each file on this computer was matched with its copy in Google Cloud Storage and their CRC32C checksums compared. "Verified" means the same size and checksum. Files only in the cloud aren't counted against this folder.</footer>
+</main></body></html>
+"#,
+        title = html_escape(&s("finished_at")),
+        seal_class = if complete { "" } else { " bad" },
+        seal = if complete { "✓" } else { "!" },
+        headline = html_escape(&headline),
+    )
+}
+
 /// Write `<dir>/<UTC time>.csv` and `.json`; returns both paths.
 pub fn write_receipt(receipt: &Receipt, dir: &Path) -> Result<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(dir)?;
@@ -352,6 +555,7 @@ pub fn write_receipt(receipt: &Receipt, dir: &Path) -> Result<(PathBuf, PathBuf)
     let json = dir.join(format!("{stem}.json"));
     std::fs::write(&csv, to_csv(receipt))?;
     std::fs::write(&json, serde_json::to_vec_pretty(receipt)?)?;
+    std::fs::write(json.with_extension("html"), to_html(&serde_json::to_value(receipt)?))?;
     Ok((csv, json))
 }
 
@@ -411,6 +615,45 @@ mod tests {
         let (second, _) = write_receipt(&receipt, dir.path()).unwrap();
         assert_ne!(first, second);
         assert!(first.exists() && second.exists());
+        assert!(first.with_extension("html").exists(), "printable receipt written too");
+    }
+
+    fn sample() -> serde_json::Value {
+        serde_json::json!({
+            "generator": "JetStream test", "account": "diver@example.gov", "local_root": "C:\\Reef <2024>", "destination": "gs://b/reef/",
+            "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:01:00Z", "result": "incomplete",
+            "totals": { "local_files": 4, "verified": 1, "verified_bytes": 2048, "missing_in_cloud": 1, "mismatch": 1, "unreadable": 0, "online_only": 1, "cloud_only": 1, "files_read": 1 },
+            "files": [
+                { "path": "a.jpg", "status": "verified", "size": 2048, "crc32c": "AAAAAA==" },
+                { "path": "b<script>.jpg", "status": "missing_in_cloud", "size": 10, "note": "not in the cloud" },
+                { "path": "c.jpg", "status": "mismatch", "size": 10, "note": "this computer: 10 bytes" },
+                { "path": "d.jpg", "status": "unreadable", "size": 0, "note": "online-only file (OneDrive): not on this computer" },
+                { "path": "e.jpg", "status": "cloud_only", "size": 5, "note": "in the cloud only" }
+            ]
+        })
+    }
+
+    #[test]
+    fn the_app_view_groups_problems_and_leaves_out_verified_files() {
+        let view = view(&sample(), 500);
+        assert!(view.get("files").is_none());
+        let kinds: Vec<(&str, u64)> = view["problems"].as_array().unwrap().iter().map(|p| (p["kind"].as_str().unwrap(), p["count"].as_u64().unwrap())).collect();
+        assert_eq!(kinds, vec![("missing_in_cloud", 1), ("mismatch", 1), ("online_only", 1)]);
+        let capped = super::view(&sample(), 0);
+        assert_eq!(capped["problems"][0]["files"].as_array().unwrap().len(), 0);
+        assert_eq!(capped["problems"][0]["count"], 1);
+    }
+
+    #[test]
+    fn the_printable_receipt_escapes_names_and_lists_problems() {
+        let html = to_html(&sample());
+        assert!(html.contains("3 of 4 files not verified"), "{html}");
+        assert!(html.contains("b&lt;script&gt;.jpg") && !html.contains("b<script>"));
+        assert!(html.contains("C:\\Reef &lt;2024&gt;"));
+        assert!(html.contains("<h2>Not verified</h2>"));
+        assert!(html.contains("Online-only") && html.contains("Not in the cloud") && html.contains("2.0 KB"));
+        let complete = to_html(&serde_json::json!({ "result": "complete", "totals": { "verified": 1234, "local_files": 1234 }, "files": [] }));
+        assert!(complete.contains("All 1,234 files verified") && !complete.contains("Not verified</h2>"));
     }
 
     #[test]

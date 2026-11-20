@@ -16,7 +16,7 @@ upload engine, in one window.
 - **Internet drops are waited out.** Uploads pause while the connection is down and continue when it's back, without failing files.
 - **Preview, then upload.** A preview can go straight on to the upload, reusing what it already worked out.
 - **Uploads keep file details:** a proper file type (images open in the browser, not as downloads) and the original modified and created dates.
-- **Verification receipts** prove that every file reached the cloud intact.
+- **Verification receipts** prove that every file reached the cloud intact. They run quietly after each sync and open as a receipt in the app: what's verified, what isn't and how to fix it, earlier receipts, and a printable copy.
 - Speed limit, download to this computer, and drop files onto the window to upload them.
 
 ### Folders
@@ -31,7 +31,7 @@ upload engine, in one window.
 - **Catalogs:** the catalog tool, rebuilt in the app. Images by default and any other kind of file as an option, grouping that updates as you change it, group thumbnails and a gallery, and no 50,000-file limit. The OASIS JSON is identical to the classic tool's; detailed CSV/JSON exports and NOAA InPort / ISO 19115 dataset information are new.
 - **Thumbnails** for images (optional), with a size-limited cache.
 - **Preview pane:** a larger image, the start of CSV and text files, and every detail of the selected file (original dates, checksums, storage class, custom metadata). Reads only the first 64 KB of big files.
-- **Fix file details** adds file types and original dates to files uploaded by older versions, without uploading them again.
+- **Fix file details** adds file types and original dates to files uploaded by older versions, without uploading them again. It shows live progress, before and after for each file, and a summary when it's done.
 - Folder insights and cloud cleanup.
 
 ### Windows

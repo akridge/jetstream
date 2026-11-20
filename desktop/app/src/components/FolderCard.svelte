@@ -17,7 +17,7 @@
   import StatusIcon from './StatusIcon.svelte';
   import { folderStatus } from '../lib/status.svelte.js';
   import ProgressBar from './ProgressBar.svelte';
-  import { app, ACTIVE, TERMINAL, collapseRuns } from '../lib/state.svelte.js';
+  import { app, ACTIVE, TERMINAL, collapseRuns, notVerified } from '../lib/state.svelte.js';
   import { api, pollActivity } from '../lib/api.js';
   import { bytes, count, duration, relativeTime, normalizeDestination, scheduleText, upcoming } from '../lib/format.js';
   import { isDesktop, revealPath } from '../lib/platform.js';
@@ -77,8 +77,10 @@
     return `Reading files to check: ${count(c.hashed_files)} of ${count(c.files_total)}`;
   });
   let partName = (job) => (job.filters?.group_part ? `${job.filters.group_part}/` : 'files in the main folder');
-  // Latest verification receipt.
+  // Latest verification receipt, and a verification running now.
   let receipt = $derived(app.receipts[preset.preset_id]);
+  let verifying = $derived(app.verifying[preset.preset_id]);
+  let unverified = $derived(receipt ? notVerified(receipt.totals) : 0);
   $effect(() => {
     void preset.preset_id;
     if (isDesktop) app.loadReceipts(preset);
@@ -160,7 +162,8 @@
           <button role="menuitem" onclick={() => app.compareFolder(preset)}>Compare with cloud</button>
           <button role="menuitem" onclick={() => { menuOpen = false; folderStatus.check(preset, { soon: true }); }}>Check for changes now</button>
           <button role="menuitem" title="Add missing file types and the original files' dates to what's already uploaded (nothing is re-uploaded)" onclick={() => { menuOpen = false; app.fixDetails = { destination: `gs://${normalizeDestination(preset.destination)}/`, preset }; }}>Fix file details in the cloud…</button>
-          <button role="menuitem" onclick={() => { menuOpen = false; app.createReceipt(preset); }}>Make a receipt now</button>
+          <button role="menuitem" disabled={!!verifying} onclick={() => { menuOpen = false; app.createReceipt(preset); }}>Verify now</button>
+          {#if receipt}<button role="menuitem" onclick={() => { menuOpen = false; app.openReceipt(preset); }}>Receipts…</button>{/if}
           {#if isDesktop}
             <button role="menuitem" title="Find out what limits uploads from this folder: the disk or share, the network, or per-file overhead" onclick={() => { menuOpen = false; app.speedCheck = { destination: `gs://${normalizeDestination(preset.destination)}/`, localPath: preset.source_path }; }}>Speed check…</button>
           {/if}
@@ -282,20 +285,25 @@
     {/if}
   </div>
 
-  {#if receipt && !current}
-    <div class="receipt" class:bad={receipt.result !== 'complete'}>
-      {#if receipt.result === 'complete'}<ShieldCheck size={14} />{:else}<ShieldAlert size={14} />{/if}
+  {#if verifying && !current}
+    <div class="verify running" aria-live="polite">
+      <ShieldCheck size={14} />
+      <span>Verifying… {verifying.total ? `${count(verifying.done)} of ${count(verifying.total)} files` : ''}</span>
+      <div class="vbar"><ProgressBar value={verifying.total ? (100 * verifying.done) / verifying.total : 0} indeterminate={!verifying.total} /></div>
+    </div>
+  {:else if receipt && !current}
+    <button class="verify" class:bad={unverified} onclick={() => app.openReceipt(preset)} title="Open the verification receipt">
+      {#if unverified}<ShieldAlert size={14} />{:else}<ShieldCheck size={14} />{/if}
       <span>
-        {#if receipt.result === 'complete'}
-          Verified {count(receipt.totals?.verified)} files
+        {#if unverified}
+          <strong>{count(unverified)} {unverified === 1 ? 'file' : 'files'} not verified</strong>
         {:else}
-          {@const n = (receipt.totals?.mismatch || 0) + (receipt.totals?.missing_in_cloud || 0) + (receipt.totals?.unreadable || 0) + (receipt.totals?.online_only || 0)}
-          {count(n)} {n === 1 ? 'file' : 'files'} not verified
+          Verified · {count(receipt.totals?.verified)} files
         {/if}
         <span class="muted">· {relativeTime(receipt.finished_at)}</span>
       </span>
-      <button class="link" onclick={() => revealPath(receipt.csv)}>Receipt</button>
-    </div>
+      <span class="open">{unverified ? 'Review' : 'Receipt'} ›</span>
+    </button>
   {/if}
 
   {#if scheduled}
@@ -490,29 +498,6 @@
     background: var(--accent-soft);
     color: var(--accent);
   }
-  .receipt {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--success);
-    font-size: 13px;
-    margin-top: -4px;
-  }
-  .receipt span {
-    color: var(--text-2);
-  }
-  .receipt.bad {
-    color: var(--warning);
-  }
-  .receipt .link {
-    border: none;
-    background: none;
-    padding: 0;
-    color: var(--accent);
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-  }
   .schedule {
     display: flex;
     align-items: center;
@@ -525,5 +510,49 @@
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+  }
+  .verify {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin-top: 2px;
+    padding: 7px 10px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: var(--success-soft);
+    color: var(--success);
+    font: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .verify span {
+    color: var(--text-2);
+  }
+  .verify .open {
+    margin-left: auto;
+    color: var(--success);
+    font-weight: 600;
+  }
+  .verify.bad {
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+  .verify.bad strong,
+  .verify.bad .open {
+    color: var(--warning);
+  }
+  .verify:hover:not(.running) {
+    filter: brightness(0.97);
+  }
+  .verify.running {
+    background: var(--surface-2);
+    color: var(--accent);
+    cursor: default;
+  }
+  .vbar {
+    flex: 1;
+    min-width: 60px;
   }
 </style>

@@ -219,17 +219,19 @@
           <div class="receipts">
             <div class="list-head">
               <h2>Receipts</h2>
-              <button class="btn sm" onclick={() => app.createReceipt(preset)}><FileCheck size={14} /> Make one now</button>
+              <button class="btn sm" disabled={!!app.verifying[preset.preset_id]} onclick={() => app.createReceipt(preset)}>
+                <FileCheck size={14} /> {app.verifying[preset.preset_id] ? 'Verifying…' : 'Verify now'}
+              </button>
             </div>
-            <p class="caption">Every file checked against the cloud by checksum, saved as CSV and JSON.</p>
+            <p class="caption">Every file checked against the cloud by checksum. Open one to see what isn't verified and how to fix it.</p>
             {#each receipts.slice(0, 8) as r (r.json)}
-              <div class="receipt-row">
+              <button class="receipt-row" onclick={() => app.openReceipt(preset, r.json)}>
                 <span class:ok={r.result === 'complete'} class:bad={r.result !== 'complete'}>
                   {r.result === 'complete' ? `${count(r.totals?.verified)} verified` : `${count(notVerified(r.totals))} not verified`}
                 </span>
                 <span class="muted" title={dateTime(r.finished_at)}>{relativeTime(r.finished_at)}</span>
-                <button class="btn ghost sm" title="Show the CSV" onclick={() => revealPath(r.csv)}><Folder size={13} /></button>
-              </div>
+                <span class="chev" aria-hidden="true">›</span>
+              </button>
             {:else}
               <p class="muted">No receipts yet.</p>
             {/each}
@@ -503,12 +505,26 @@
     border-top: 1px solid var(--border);
   }
   .receipt-row {
+    width: 100%;
+    border: none;
+    background: none;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+    border-radius: 6px;
     display: grid;
     grid-template-columns: 1fr auto auto;
     gap: 8px;
     align-items: center;
-    padding: 4px 0;
+    padding: 5px 6px;
     font-size: 13px;
+  }
+  .receipt-row:hover {
+    background: var(--surface-2);
+  }
+  .receipt-row .chev {
+    color: var(--muted);
   }
   .receipt-row .ok {
     color: var(--success);
