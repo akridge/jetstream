@@ -43,6 +43,23 @@ struct Asset {
     browser_download_url: String,
 }
 
+/// This build's name in portable zip names (JetStream-0.2.1-build30-<platform>-x64-portable.zip).
+const PLATFORM: &str = if cfg!(windows) {
+    "windows"
+} else if cfg!(target_os = "macos") {
+    "macos"
+} else {
+    "linux"
+};
+
+/// The portable zip for `platform` (a release has one per platform), if there is one.
+fn portable_asset(assets: &[Asset], platform: &str) -> Option<String> {
+    assets
+        .iter()
+        .find(|a| a.name.ends_with("-portable.zip") && a.name.contains(&format!("-{platform}-")))
+        .map(|a| a.browser_download_url.clone())
+}
+
 /// "desktop-v0.2.1", "v0.2.1" or "0.2.1" as numbers; None for anything else.
 pub fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
     let text = text.trim();
@@ -71,11 +88,7 @@ pub fn newer_than(current: &str, release_json: &str) -> Option<UpdateInfo> {
         notes.truncate(cut);
         notes.push('…');
     }
-    let download = release
-        .assets
-        .iter()
-        .find(|a| a.name.ends_with("-portable.zip") && (cfg!(windows) || !a.name.contains("windows")))
-        .map(|a| a.browser_download_url.clone());
+    let download = portable_asset(&release.assets, PLATFORM);
     Some(UpdateInfo { latest: format!("{}.{}.{}", latest.0, latest.1, latest.2), url: release.html_url, notes, download })
 }
 
@@ -111,6 +124,8 @@ mod tests {
             "prerelease": prerelease,
             "assets": [
                 {"name": "JetStream_0.2.1_x64-setup.exe", "browser_download_url": "https://example.com/setup.exe"},
+                {"name": "JetStream-0.2.1-build30-linux-x64-portable.zip", "browser_download_url": "https://example.com/linux.zip"},
+                {"name": "JetStream_0.2.1_amd64.AppImage", "browser_download_url": "https://example.com/app.AppImage"},
                 {"name": "JetStream-0.2.1-build30-windows-x64-portable.zip", "browser_download_url": "https://example.com/portable.zip"}
             ]
         })
@@ -135,15 +150,28 @@ mod tests {
         assert_eq!(update.latest, "0.2.1");
         assert!(update.url.ends_with("desktop-v0.2.1"));
         assert_eq!(update.notes, "## Notes");
-        if cfg!(windows) {
-            assert_eq!(update.download.as_deref(), Some("https://example.com/portable.zip"));
-        }
+        // Each platform links its own portable zip, whatever order the release lists them in.
+        let expected = if cfg!(windows) { Some("https://example.com/portable.zip") } else if cfg!(target_os = "macos") { None } else { Some("https://example.com/linux.zip") };
+        assert_eq!(update.download.as_deref(), expected);
         assert!(newer_than("0.2.1", &release("desktop-v0.2.1", false, false)).is_none(), "same version");
         assert!(newer_than("0.3.0", &release("desktop-v0.2.1", false, false)).is_none(), "older");
         assert!(newer_than("0.2.0", &release("desktop-v0.2.1", true, false)).is_none(), "draft");
         assert!(newer_than("0.2.0", &release("desktop-v0.2.1", false, true)).is_none(), "pre-release");
         assert!(newer_than("0.2.0", &release("v0.1.30", false, false)).is_none(), "Python package tag");
         assert!(newer_than("0.2.0", "not json").is_none());
+    }
+
+    #[test]
+    fn picks_the_portable_zip_for_each_platform() {
+        let assets: Vec<Asset> = serde_json::from_value(serde_json::json!([
+            {"name": "JetStream-0.2.1-build30-linux-x64-portable.zip", "browser_download_url": "L"},
+            {"name": "JetStream_0.2.1_x64-setup.exe", "browser_download_url": "S"},
+            {"name": "JetStream-0.2.1-build30-windows-x64-portable.zip", "browser_download_url": "W"}
+        ]))
+        .unwrap();
+        assert_eq!(portable_asset(&assets, "windows").as_deref(), Some("W"));
+        assert_eq!(portable_asset(&assets, "linux").as_deref(), Some("L"));
+        assert_eq!(portable_asset(&assets, "macos"), None);
     }
 
     #[tokio::test]
